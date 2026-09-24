@@ -1,10 +1,26 @@
-# PyqCR - 朋友圈相册 (WeChat Moments Album)
+# pyqAlbum - 朋友圈相册 (WeChat Moments Album)
 
 An Android album management app with AI-powered photo rating, built with **Kotlin + Jetpack Compose**.
 
+pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder / tag / rating / AI-selected**, supports **manual tagging & rating**, and uses **DashScope (Alibaba Cloud Bailian) AI** to automatically score photos (1-100) via `qwen-vl-plus` multimodal Vision-Language Model.
+
+---
+
 ## Overview
 
-PyqCR loads photos from the device's MediaStore, allows browsing by **folder / tag / rating**, supports **manual tagging & rating**, and uses **DashScope (Alibaba Cloud Bailian) AI** to automatically score photos (1-100) via `qwen-vl-plus` multimodal Vision-Language Model.
+pyqAlbum is the evolution of PyqCR, focused on a cleaner UX:
+
+- **App name**: pyqAlbum
+- **Grid background**: Black (instead of white) for empty areas in image squares
+- **View layouts**: Grid / Waterfall / Justified — **List view removed**
+- **AI Selection flow**:
+  1. Open **AI Select** screen from the album toolbar icon
+  2. Tap images to select them (shown with green border)
+  3. Selected images appear in a horizontal strip; tap ✕ to remove
+  4. Tap ✨ to go to AI Rating with those pre-selected images
+  5. The "AI Sel" tab on the bottom nav shows only the AI-selected images in any grid layout
+- **Folder selector**: Larger, more spacious chips for easier browsing
+- **Justified Grid**: Fixed — images now properly fill rows with correct aspect ratio weights
 
 ---
 
@@ -39,16 +55,17 @@ PyqCR loads photos from the device's MediaStore, allows browsing by **folder / t
 │           │       └── AlbumRepository.kt # MediaStore scan + Room flows
 │           ├── ui/
 │           │   ├── component/
-│           │   │   ├── ImageThumbnail.kt # Square fit-center, 400px Coil loading
+│           │   │   ├── ImageThumbnail.kt # Square fit-center, black background, 400px Coil
 │           │   │   ├── WaterfallGrid.kt  # Pinterest staggered grid
-│           │   │   ├── JustifiedGrid.kt  # Google Photos uniform row height
+│           │   │   ├── JustifiedGrid.kt  # Google Photos uniform row height (FIXED)
 │           │   │   ├── RatingBar.kt      # 0.5-star increments, Material Icons
 │           │   │   ├── TagChip.kt        # Assist/input chip with remove
 │           │   │   └── BottomActionBar.kt # Batch selection action bar
 │           │   ├── navigation/
-│           │   │   └── AppNavGraph.kt    # NavHost with 6 routes
+│           │   │   └── AppNavGraph.kt    # NavHost with 7 routes (added ai_select)
 │           │   ├── screen/
-│           │   │   ├── AlbumScreen.kt    # Main: 3 browse modes × 4 view layouts
+│           │   │   ├── AlbumScreen.kt    # Main: 3 browse modes × 3 view layouts (LIST removed)
+│           │   │   ├── AiSelectScreen.kt # NEW: Select images for AI rating, persistent selection
 │           │   │   ├── TagScreen.kt      # Tag list → images per tag
 │           │   │   ├── RatingScreen.kt   # Sort by user rating or AI score
 │           │   │   ├── ImageDetailScreen.kt # Full image + tags + rating editing
@@ -70,19 +87,21 @@ PyqCR loads photos from the device's MediaStore, allows browsing by **folder / t
 │       └── gradle-wrapper.properties  # Gradle 8.9 config
 └── .github/workflows/
     └── android-ci.yml       # GitHub Actions CI/CD workflow
+
 ```
 
 ---
 
-## 6 Navigation Routes (AppNavGraph.kt)
+## 7 Navigation Routes (AppNavGraph.kt)
 
 | Route | Screen | Purpose |
 |-------|--------|---------|
-| `album` | `AlbumScreen` | Main screen: browse by Folder/Tag/Rating, 4 view layouts |
+| `album` | `AlbumScreen` | Main screen: browse by Folder/Tag/Rating/AI-Sel, 3 view layouts |
 | `tag` | `TagScreen` | Tag list → images per tag |
 | `rating` | `RatingScreen` | Sort/filter by user rating or AI score |
 | `image_detail/{uri}` | `ImageDetailScreen` | Full image, edit tags & rating |
 | `ai_rating` | `AiRatingScreen` | API config, select images, run AI scoring |
+| `ai_select` | `AiSelectScreen` | **NEW**: Pick images for AI ranking (persistent selection) |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / batch rate / batch resize |
 
 ---
@@ -91,7 +110,8 @@ PyqCR loads photos from the device's MediaStore, allows browsing by **folder / t
 
 | Aspect | Decision |
 |--------|----------|
-| **Image loading** | Coil 3 with `CrossfadeImageLoader`, fit-center non-cropping thumbnails |
+| **Image loading** | Coil 3 with `CrossfadeImageLoader`, fit-center non-cropping thumbnails, black bg |
+| **Grid background** | Black (instead of white) for empty area in square thumbnails |
 | **Database** | Room + KSP (compile-time DAO generation) |
 | **Media access** | SAF + MediaStore (`READ_MEDIA_IMAGES` for API 33+) |
 | **AI API** | OkHttp direct → `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions` |
@@ -102,19 +122,8 @@ PyqCR loads photos from the device's MediaStore, allows browsing by **folder / t
 | **HTTP client** | OkHttp 4.12.0 (Retrofit also declared but unused) |
 | **Thumbnails** | 400px decoded size, no cropping |
 | **minSdk / targetSdk** | 26 / 35 |
-
----
-
-## Requirements (pyqcr.md)
-
-1. **Browse** photos by folder, tag, rating with 4 layouts: grid, waterfall, justified, list
-2. **Tags**: create, assign, remove for individual images or batch
-3. **Rating**: 0.5-star increments, manual + AI-driven
-4. **AI Scoring**: DashScope Vision API (`qwen-vl-plus`), base64 images in batches of 10
-5. **Batch resize**: 50% resize or pad-to-square via `BitmapFactory`
-6. **Multi-select**: long-press to enter selection mode, bottom action bar for operations
-7. **Permissions**: runtime request, proper MediaStore query
-8. **Encrypted API key**: stored via `EncryptedSharedPreferences`
+| **View layouts** | Grid / Waterfall / Justified (**List removed**) |
+| **AI selection** | Persistent via SharedPreferences, visible in "AI Sel" tab |
 
 ---
 
@@ -123,6 +132,20 @@ PyqCR loads photos from the device's MediaStore, allows browsing by **folder / t
 > "你是一位資深攝影編輯，請嚴格依據以下標準給照片評分（1-100）：構圖、光線、色彩、主體清晰度、情感表達。高於80分為優秀，60-79為良好，40-59為一般，低於40為較差。以JSON Array回應，每項包含score和reason。"
 
 Response format (per image): `{"score": 85, "reason": "Composition is well balanced..."}`
+
+---
+
+## Key Changes from Previous Version
+
+| Change | Details |
+|--------|---------|
+| **App name** | Changed from "PyqCR - 朋友圈相册" to "pyqAlbum" |
+| **Folder selector** | Larger chips, more padding, more vertical space |
+| **Grid background** | Black instead of white for empty area in squares |
+| **Justified Grid** | Fixed: images now properly fill rows with correct weights |
+| **AI selection flow** | New `AiSelectScreen` for picking images; "AI Sel" tab shows them in any layout |
+| **List view** | Removed (GRID / WATERFALL / JUSTIFIED remain) |
+| **AiRatingScreen** | Now accepts `initialSelectedUris` and `onUrisChanged` for shared selection state |
 
 ---
 
@@ -144,7 +167,7 @@ Since your hardware can't compile Android, we'll let GitHub do it. Here's exactl
 
 ### Step 1: Create a GitHub repository
 
-Go to https://github.com/new and create a new repository (e.g., `PyqCR`). Make it **Public** or **Private** — either works.
+Go to https://github.com/new and create a new repository (e.g., `pyqAlbum`). Make it **Public** or **Private** — either works.
 
 ### Step 2: Initialize Git and push
 
@@ -154,8 +177,8 @@ Run on this machine:
 cd /srv/pyqalbum
 git init
 git add .
-git commit -m "Initial commit: PyqCR Android app skeleton"
-git remote add origin https://github.com/YOUR_USERNAME/PyqCR.git   # replace with your repo URL
+git commit -m "Initial commit: pyqAlbum Android app"
+git remote add origin https://github.com/YOUR_USERNAME/pyqAlbum.git   # replace with your repo URL
 git branch -M main
 git push -u origin main
 ```
@@ -193,7 +216,7 @@ Transfer the APK to your Android phone and install it. Grant the storage permiss
 
 ## ⚠️ Outstanding Items / What's Not Yet Done
 
-These are features from pyqcr.md that are **not yet implemented** in the codebase:
+These are features that are **not yet implemented** in the codebase:
 
 ### 1. pHash duplicate detection (from photo_rating.py)
 - `PHASH_THRESHOLD = 15`, `PENALTY_FACTOR = 0.1`
@@ -275,9 +298,10 @@ These are features from pyqcr.md that are **not yet implemented** in the codebas
 
 When you want to pick up where I left off, focus on these files (in priority order):
 
-1. **`Ui/screen/AiRatingScreen.kt`** — AI scoring UI is the main value-add feature
-2. **`Ai/AiRatingService.kt`** — API call logic, needs pHash dedup integrated
-3. **`Ui/screen/AlbumScreen.kt`** — Main screen, browse modes + view layouts
-4. **`Data/repository/AlbumRepository.kt`** — MediaStore scanning + Room CRUD
-5. **`Ui/component/JustifiedGrid.kt`** — Google Photos-style uniform row layout
-6. **`.github/workflows/android-ci.yml`** — CI/CD (already set up, push to GitHub)
+1. **`Ui/screen/AiSelectScreen.kt`** — NEW: AI selection screen
+2. **`Ui/screen/AiRatingScreen.kt`** — AI scoring UI, now shares selection state with AiSelectScreen
+3. **`Ui/screen/AlbumScreen.kt`** — Main screen, browse modes + 3 view layouts, AI Sel tab
+4. **`Ui/component/JustifiedGrid.kt`** — Fixed justified grid layout
+5. **`Ui/component/ImageThumbnail.kt`** — Black background square thumbnails
+6. **`Data/repository/AlbumRepository.kt`** — MediaStore scanning + Room CRUD
+7. **`.github/workflows/android-ci.yml`** — CI/CD (already set up, push to GitHub)

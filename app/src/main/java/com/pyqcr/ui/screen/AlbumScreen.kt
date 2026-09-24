@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -18,6 +19,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -30,14 +32,14 @@ import com.pyqcr.ui.viewmodel.AlbumViewModel
 /**
  * Main album screen with:
  * - Three browse modes: Folder / Tag / Rating (bottom nav or tabs)
- * - Four view layouts: Standard Grid / Waterfall / Justified / List (toolbar toggle)
+ * - Three view layouts: Standard Grid / Waterfall / Justified (toolbar toggle)
  * - Multi-select with bottom action bar
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AlbumScreen(
     onImageClick: (String) -> Unit,
-    onNavigateToAiRating: () -> Unit,
+    onNavigateToAiSelection: () -> Unit,
     viewModel: AlbumViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -53,6 +55,9 @@ fun AlbumScreen(
     // Multi-select state
     var isMultiSelectMode by remember { mutableStateOf(false) }
     var selectedImageUris by remember { mutableStateOf(setOf<String>()) }
+
+    // AI rating selection image URIs (persistent set shown in selected region)
+    var aiSelectedUris by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     // Permission
     var hasPermission by remember {
@@ -95,9 +100,9 @@ fun AlbumScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("PyqCR - 朋友圈相册") },
+                title = { Text("pyqAlbum") },
                 actions = {
-                    // View layout toggle buttons
+                    // View layout toggle buttons (GRID / WATERFALL / JUSTIFIED — LIST removed)
                     IconButton(onClick = { selectedViewLayout = ViewLayout.GRID }) {
                         Icon(
                             Icons.Default.GridView,
@@ -128,19 +133,9 @@ fun AlbumScreen(
                                 MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    IconButton(onClick = { selectedViewLayout = ViewLayout.LIST }) {
-                        Icon(
-                            Icons.Default.ViewList,
-                            contentDescription = "List",
-                            tint = if (selectedViewLayout == ViewLayout.LIST)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    // AI Rating
-                    IconButton(onClick = onNavigateToAiRating) {
-                        Icon(Icons.Default.AutoAwesome, contentDescription = "AI Rating")
+                    // AI select mode toggle
+                    IconButton(onClick = { onNavigateToAiSelection() }) {
+                        Icon(Icons.Default.AutoAwesome, contentDescription = "AI Select")
                     }
                 }
             )
@@ -179,6 +174,12 @@ fun AlbumScreen(
                         icon = { Icon(Icons.Default.Star, contentDescription = "Rating") },
                         label = { Text("Rating") }
                     )
+                    NavigationBarItem(
+                        selected = selectedBrowseMode == BrowseMode.AI_SELECTED,
+                        onClick = { selectedBrowseMode = BrowseMode.AI_SELECTED },
+                        icon = { Icon(Icons.Default.CheckCircle, contentDescription = "AI Selected") },
+                        label = { Text("AI Sel") }
+                    )
                 }
             }
         }
@@ -190,7 +191,7 @@ fun AlbumScreen(
         ) {
             when (selectedBrowseMode) {
                 BrowseMode.FOLDER -> {
-                    // Folder selector row
+                    // Folder selector — takes more vertical space with larger chips
                     FolderSelector(
                         folders = folders,
                         selectedFolder = selectedFolder,
@@ -250,6 +251,46 @@ fun AlbumScreen(
                         modifier = Modifier.padding(16.dp)
                     )
                 }
+
+                BrowseMode.AI_SELECTED -> {
+                    // Show only images that were selected for AI rating
+                    if (aiSelectedUris.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No AI-selected images.\nGo to AI Select screen to pick images.",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        val aiImages = images.filter { it.uri in aiSelectedUris }
+                        ImageGridView(
+                            images = aiImages,
+                            viewLayout = selectedViewLayout,
+                            isMultiSelectMode = isMultiSelectMode,
+                            selectedImageUris = selectedImageUris,
+                            onImageClick = { uri ->
+                                if (isMultiSelectMode) {
+                                    selectedImageUris = if (uri in selectedImageUris)
+                                        selectedImageUris - uri
+                                    else
+                                        selectedImageUris + uri
+                                } else {
+                                    onImageClick(uri)
+                                }
+                            },
+                            onLongPress = { uri ->
+                                if (!isMultiSelectMode) {
+                                    isMultiSelectMode = true
+                                    selectedImageUris = setOf(uri)
+                                }
+                            }
+                        )
+                    }
+                }
             }
         }
     }
@@ -262,24 +303,28 @@ private fun FolderSelector(
     onFolderSelected: (String) -> Unit,
     onAllSelected: () -> Unit
 ) {
+    // Taller, more spacious folder selector
     LazyRow(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         item {
             FilterChip(
                 selected = selectedFolder == null,
                 onClick = onAllSelected,
-                label = { Text("All") }
+                label = { Text("All", fontWeight = FontWeight.Bold) },
+                modifier = Modifier.height(40.dp)
             )
         }
         items(folders) { folder ->
             FilterChip(
                 selected = folder == selectedFolder,
                 onClick = { onFolderSelected(folder) },
-                label = { Text(folder) }
+                label = { Text(folder, maxLines = 1) },
+                modifier = Modifier.height(40.dp)
             )
         }
     }
@@ -322,13 +367,18 @@ private fun ImageGridView(
                 contentPadding = PaddingValues(2.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black) // Black background for grid
             ) {
                 items(images, key = { it.uri }) { image ->
                     ImageThumbnail(
                         imageUri = image.uri,
                         modifier = Modifier
-                            .clickable { onImageClick(image.uri) }
+                            .aspectRatio(1f)
+                            .clickable { onImageClick(image.uri) },
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                        backgroundColor = Color.Black
                     )
                 }
             }
@@ -348,40 +398,8 @@ private fun ImageGridView(
                 modifier = Modifier.fillMaxSize()
             )
         }
-
-        ViewLayout.LIST -> {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items(images, key = { it.uri }) { image ->
-                    ListItem(
-                        headlineContent = {
-                            Text(
-                                text = image.displayName,
-                                fontWeight = FontWeight.Medium
-                            )
-                        },
-                        supportingContent = {
-                            Text(
-                                text = "${image.folderName} · ${image.width}x${image.height}" +
-                                        if (image.rating > 0) " · ⭐${image.rating}" else ""
-                            )
-                        },
-                        leadingContent = {
-                            ImageThumbnail(
-                                imageUri = image.uri,
-                                modifier = Modifier.size(56.dp)
-                            )
-                        },
-                        modifier = Modifier.clickable { onImageClick(image.uri) }
-                    )
-                }
-            }
-        }
     }
 }
 
-enum class BrowseMode { FOLDER, TAG, RATING }
-enum class ViewLayout { GRID, WATERFALL, JUSTIFIED, LIST }
+enum class BrowseMode { FOLDER, TAG, RATING, AI_SELECTED }
+enum class ViewLayout { GRID, WATERFALL, JUSTIFIED }

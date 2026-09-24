@@ -3,8 +3,10 @@ package com.pyqcr.ui.screen
 import android.content.Context
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -14,6 +16,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -26,6 +29,7 @@ import com.pyqcr.ai.ImageResizer
 import com.pyqcr.data.model.AiRatingResult
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.ui.component.ImageThumbnail
 import com.pyqcr.ui.component.RatingBar
 import kotlinx.coroutines.launch
 import androidx.security.crypto.EncryptedSharedPreferences
@@ -33,11 +37,17 @@ import androidx.security.crypto.MasterKey
 
 /**
  * AI Rating screen: configure API Key/Model, select images, run AI rating.
+ *
+ * When called from AiSelectScreen, initialSelectedUris and onUrisChanged
+ * allow sharing the selection state so the user can add/remove images
+ * and the selection persists.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AiRatingScreen(
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    initialSelectedUris: Set<String> = emptySet(),
+    onUrisChanged: ((Set<String>) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as PyqCrApp
@@ -50,7 +60,7 @@ fun AiRatingScreen(
 
     // State
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
-    var selectedImages by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var selectedImages by remember { mutableStateOf(initialSelectedUris) }
     var isRunning by remember { mutableStateOf(false) }
     var progress by remember { mutableIntStateOf(0) }
     var totalCount by remember { mutableIntStateOf(0) }
@@ -61,6 +71,11 @@ fun AiRatingScreen(
         repository.getAllImages().collect { images ->
             allImages = images
         }
+    }
+
+    // Sync initialSelectedUris changes
+    LaunchedEffect(initialSelectedUris) {
+        selectedImages = initialSelectedUris
     }
 
     val scope = rememberCoroutineScope()
@@ -134,6 +149,33 @@ fun AiRatingScreen(
                 }
             }
 
+            // Selected images preview
+            if (selectedImages.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "Selected: ${selectedImages.size} images",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                    val selImgs = allImages.filter { it.uri in selectedImages }
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(selImgs, key = { it.uri }) { img ->
+                            Box(modifier = Modifier.size(56.dp)) {
+                                ImageThumbnail(
+                                    imageUri = img.uri,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Select mode / select all
             item {
                 Row(
@@ -146,10 +188,12 @@ fun AiRatingScreen(
                         style = MaterialTheme.typography.titleSmall
                     )
                     TextButton(onClick = {
-                        selectedImages = if (selectedImages.size == allImages.size)
+                        val newSet = if (selectedImages.size == allImages.size)
                             emptySet()
                         else
                             allImages.map { it.uri }.toSet()
+                        selectedImages = newSet
+                        onUrisChanged?.invoke(newSet)
                     }) {
                         Text(if (selectedImages.size == allImages.size) "Deselect All" else "Select All")
                     }
@@ -157,15 +201,17 @@ fun AiRatingScreen(
             }
 
             // Image selection grid
-            val selectedUris = selectedImages
+            val currentSelected = selectedImages
             items(allImages) { image ->
-                val isSelected = image.uri in selectedUris
+                val isSelected = image.uri in currentSelected
                 ElevatedCard(
                     onClick = {
-                        selectedImages = if (isSelected)
-                            selectedImages - image.uri
+                        val newSet = if (isSelected)
+                            currentSelected - image.uri
                         else
-                            selectedImages + image.uri
+                            currentSelected + image.uri
+                        selectedImages = newSet
+                        onUrisChanged?.invoke(newSet)
                     },
                     colors = CardDefaults.elevatedCardColors(
                         containerColor = if (isSelected)
