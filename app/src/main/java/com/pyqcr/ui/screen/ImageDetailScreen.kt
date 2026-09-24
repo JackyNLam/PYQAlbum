@@ -52,6 +52,7 @@ fun ImageDetailScreen(
     var rating by remember { mutableFloatStateOf(0f) }
     var newTagName by remember { mutableStateOf("") }
     var showAddTag by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(imageUri) {
         val entity = imageDao.getImageByUri(imageUri)
@@ -148,7 +149,9 @@ fun ImageDetailScreen(
                         rating = rating,
                         onRatingChange = { newRating ->
                             rating = newRating
-                            repository.updateRating(imageUri, newRating)
+                            coroutineScope.launch {
+                                repository.updateRating(imageUri, newRating)
+                            }
                         }
                     )
 
@@ -179,7 +182,9 @@ fun ImageDetailScreen(
                                 TagChip(
                                     text = tag.name,
                                     onRemove = {
-                                        tagDao.removeTagFromImage(imageUri, tag.id)
+                                        coroutineScope.launch {
+                                            tagDao.removeTagFromImage(imageUri, tag.id)
+                                        }
                                     }
                                 )
                             }
@@ -223,8 +228,7 @@ fun ImageDetailScreen(
                             Button(
                                 onClick = {
                                     if (newTagName.isNotBlank()) {
-                                        val scope = rememberCoroutineScope()
-                                        scope.launch {
+                                        coroutineScope.launch {
                                             var tag = tagDao.getTagByName(newTagName.trim())
                                             val tagId = if (tag != null) {
                                                 tag.id
@@ -233,7 +237,7 @@ fun ImageDetailScreen(
                                             }
                                             if (tagDao.hasTag(imageUri, tagId) == 0) {
                                                 tagDao.addTagToImage(
-                                                    ImageTagCrossref(imageUri = imageUri, tagId = tagId)
+                                                    ImageTagCrossRef(imageUri = imageUri, tagId = tagId)
                                                 )
                                             }
                                             newTagName = ""

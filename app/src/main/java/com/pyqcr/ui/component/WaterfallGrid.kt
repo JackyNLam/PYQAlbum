@@ -2,7 +2,7 @@ package com.pyqcr.ui.component
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
-import androidx.compose.foundation.lazy.staggeredgrid.StaggeredCells
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -26,7 +26,7 @@ fun WaterfallGrid(
     modifier: Modifier = Modifier
 ) {
     LazyVerticalStaggeredGrid(
-        columns = StaggeredCells.Fixed(columns),
+        columns = StaggeredGridCells.Fixed(columns),
         contentPadding = PaddingValues(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalItemSpacing = 4.dp,
