@@ -23,16 +23,10 @@ import coil3.request.crossfade
 import coil3.size.Scale
 import com.pyqcr.data.model.ImageItem
 
-data class JustifiedItem(
-    val index: Int,
-    val weight: Float
-)
-
 /**
- * Justified/Uniform grid — all rows have the same fixed height,
- * each image width is proportional to its aspect ratio, filling the row width exactly.
- *
- * Supports click and long-press callbacks.
+ * Simple justified grid: 3 images per row, fixed height, dynamic width
+ * based on each image's aspect ratio.
+ * Each row width sums to exactly screen width (minus spacing).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -48,22 +42,18 @@ fun JustifiedGrid(
 ) {
     val context = LocalContext.current
     val config = LocalConfiguration.current
+    val screenWidthDp = config.screenWidthDp
 
-    val aspectRatios = remember(images) {
-        images.map { item ->
-            if (item.width > 0 && item.height > 0)
-                item.width.toFloat() / item.height.toFloat()
-            else 1f
-        }
+    // Group images into chunks of 3
+    val rows = remember(images) {
+        images.chunked(3)
     }
 
-    val rows = remember(images, aspectRatios, config, rowHeight, spacing) {
-        val screenWidthDp = config.screenWidthDp.toFloat()
-        layoutIntoRows(aspectRatios, screenWidthDp, spacing.value)
-    }
+    val totalSpacingPerRow = spacing.value * 2 // 2 gaps between 3 items
+    val availableWidth = screenWidthDp.toFloat() - totalSpacingPerRow
 
     LazyColumn(
-        modifier = modifier,
+        modifier = modifier.background(Color.Black),
         verticalArrangement = Arrangement.spacedBy(spacing)
     ) {
         items(rows) { row ->
@@ -73,13 +63,25 @@ fun JustifiedGrid(
                     .height(rowHeight),
                 horizontalArrangement = Arrangement.spacedBy(spacing)
             ) {
-                row.forEach { item ->
-                    val image = images.getOrNull(item.index) ?: return@forEach
+                row.forEach { image ->
+                    val ratio = if (image.width > 0 && image.height > 0)
+                        image.width.toFloat() / image.height.toFloat()
+                    else 1f
+
+                    // Sum of ratios in this row
+                    val sumRatios = row.sumOf {
+                        if (it.width > 0 && it.height > 0)
+                            it.width.toDouble() / it.height.toDouble()
+                        else 1.0
+                    }.toFloat()
+
+                    val itemWidthDp = (ratio / sumRatios) * availableWidth
+
                     val isSelected = image.uri in selectedImageUris
                     Box(
                         modifier = Modifier
+                            .width(itemWidthDp.dp)
                             .fillMaxHeight()
-                            .weight(item.weight)
                             .background(Color.Black)
                             .then(
                                 Modifier.combinedClickable(
@@ -121,45 +123,13 @@ fun JustifiedGrid(
                         }
                     }
                 }
+                // Fill remaining space if row has < 3 images
+                val remaining = 3 - row.size
+                if (remaining > 0) {
+                    val emptyWidth = (availableWidth / 3f) * remaining + spacing.value * (remaining - 1)
+                    Spacer(Modifier.width(emptyWidth.dp))
+                }
             }
         }
     }
-}
-
-private fun layoutIntoRows(
-    ratios: List<Float>,
-    screenWidthDp: Float,
-    spacingDp: Float
-): List<List<JustifiedItem>> {
-    val rows = mutableListOf<MutableList<JustifiedItem>>()
-    var currentRow = mutableListOf<Pair<Int, Float>>()
-    var currentSum = 0f
-
-    for ((index, ratio) in ratios.withIndex()) {
-        val itemWidth = ratio
-
-        if (currentSum + itemWidth > screenWidthDp && currentRow.isNotEmpty()) {
-            rows.add(normaliseRow(currentRow, screenWidthDp))
-            currentRow = mutableListOf()
-            currentSum = 0f
-        }
-        currentRow.add(index to itemWidth)
-        currentSum += itemWidth
-    }
-
-    if (currentRow.isNotEmpty()) {
-        rows.add(normaliseRow(currentRow, screenWidthDp))
-    }
-
-    return rows
-}
-
-private fun normaliseRow(
-    row: List<Pair<Int, Float>>,
-    screenWidthDp: Float
-): MutableList<JustifiedItem> {
-    val rowSum = row.sumOf { it.second.toDouble() }.toFloat()
-    return row.map { (idx, ratio) ->
-        JustifiedItem(index = idx, weight = ratio / rowSum)
-    }.toMutableList()
 }

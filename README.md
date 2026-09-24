@@ -2,26 +2,26 @@
 
 An Android album management app with AI-powered photo rating, built with **Kotlin + Jetpack Compose**.
 
-pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder / tag / rating**, supports **manual tagging & rating**, and uses **DashScope (Alibaba Cloud Bailian) AI** to automatically score photos (1-100) via `qwen-vl-plus` multimodal Vision-Language Model.
+pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder / tag / rating**, and uses **DashScope (Alibaba Cloud Bailian) AI** to automatically score photos (1-100) via `qwen-vl-plus` multimodal Vision-Language Model.
 
 ---
 
 ## Overview
 
 - **App name**: pyqAlbum
-- **Grid background**: Black (instead of white) for empty areas in image squares
-- **View layouts**: Grid / Waterfall / Justified — all support click & long-press
-- **Click image** → opens full-screen detail (tap image to toggle toolbar/bars)
+- **Grid background**: Black for all empty areas in image squares
+- **View layouts**: Grid / Waterfall / Justified
+- **Justified Grid**: 3 images per row, fixed height (120dp), dynamic width proportional to aspect ratio
+- **Click thumbnail** → full-screen detail view
 - **Long-press** → action dialog: assign rating / add tag / select for AI ranking
 - **AI Selection flow**:
-  1. Tap toolbar **✨** icon to open **AI Select** screen
-  2. Tap images to select them (green border + checkmark)
-  3. Selected images shown in a horizontal preview strip at top
-  4. Tap **Submit & Rate** (bottom bar) to go to AI Rating
-  5. AI selected images are persistent (SharedPreferences) and visible in the "AI Sel" section
-- **Multi-select mode**: long-press enters multi-select; bottom bar has batch Tag / Rate / Remove Tag / AI Select
-- **Justified Grid**: Fixed height, dynamic width — images fill rows proportionally by aspect ratio
-- **Full-screen image**: tap image to toggle top bar + bottom nav
+  1. Long-press any image in Album → choose **Select for AI Ranking**
+  2. Or tap toolbar ✨ icon to view/manage AI selections
+  3. In AI Select screen, only selected images are shown — tap to deselect
+  4. Tap **Submit & Rate** to proceed to AI Rating
+  5. Selection persists across app launches (SharedPreferences)
+- **Multi-select mode**: long-press enters multi-select; bottom bar has batch Tag / Rate / Remove Tags / AI Select
+- **Full-screen image**: controls visible by default; tap image to toggle top bar + controls
 
 ---
 
@@ -42,88 +42,37 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 │           │   ├── AiRatingService.kt    # DashScope API batch scoring (10 img/batch)
 │           │   └── ImageResizer.kt       # Resize to 800px max, cache in ai_rating/
 │           ├── data/
-│           │   ├── db/
-│           │   │   ├── AppDatabase.kt    # Room DB singleton
-│           │   │   ├── ImageEntity.kt    # Room Entity: content URI primary key
-│           │   │   ├── TagEntity.kt      # Room Entity: tag name
-│           │   │   ├── ImageTagCrossRef.kt # Many-to-many cross reference
-│           │   │   ├── ImageDao.kt       # Image queries
-│           │   │   └── TagDao.kt         # Tag CRUD + image link queries
-│           │   ├── model/
-│           │   │   ├── ImageItem.kt      # Domain model for UI display
-│           │   │   └── AiRatingResult.kt # AI response: score + reason
-│           │   └── repository/
-│           │       └── AlbumRepository.kt # MediaStore scan + Room flows
+│           │   ├── db/ ...               # Room DB, entities, DAOs
+│           │   ├── model/ ...            # Domain models
+│           │   └── repository/ ...       # MediaStore scan + Room flows
 │           ├── ui/
-│           │   ├── component/
-│           │   │   ├── ImageThumbnail.kt # Square fit-center, black background, 400px Coil
-│           │   │   ├── WaterfallGrid.kt  # Pinterest staggered grid, now with click/long-press
-│           │   │   ├── JustifiedGrid.kt  # Fixed-height row-filling grid, now with click/long-press
-│           │   │   ├── RatingBar.kt      # 0.5-star increments, Material Icons
-│           │   │   ├── TagChip.kt        # Assist/input chip with remove
-│           │   │   └── BottomActionBar.kt # Batch selection action bar
-│           │   ├── navigation/
-│           │   │   └── AppNavGraph.kt    # NavHost with 7 routes
-│           │   ├── screen/
-│           │   │   ├── AlbumScreen.kt    # Main: 3 browse modes × 3 view layouts, long-press actions
-│           │   │   ├── AiSelectScreen.kt # Pick images for AI rating, Submit & Rate button
-│           │   │   ├── TagScreen.kt      # Tag list → images per tag
-│           │   │   ├── RatingScreen.kt   # Sort by user rating or AI score
-│           │   │   ├── ImageDetailScreen.kt # Full-screen image, tap to toggle bars, tags + rating
-│           │   │   ├── AiRatingScreen.kt # Config API key/model, select, run, view results
-│           │   │   └── BatchEditScreen.kt # Batch tag / batch rate / batch resize
-│           │   ├── theme/
-│           │   │   └── Theme.kt          # Material3 dynamic color, light/dark
-│           │   └── viewmodel/
-│           │       └── AlbumViewModel.kt # Screen state management, now with addTagToImage
-│           └── util/
-│               ├── ImageUtil.kt          # Resize 50%, rescale to square w/ padding
-│               ├── BatchProcessor.kt     # Batch add/remove tags, batch rescale
-│               └── PermissionHelper.kt   # Runtime permissions helper
+│           │   ├── component/ ...        # ImageThumbnail, WaterfallGrid, JustifiedGrid, RatingBar, TagChip
+│           │   ├── navigation/ ...       # AppNavGraph with 7 routes
+│           │   ├── screen/ ...           # All screens
+│           │   ├── theme/ ...            # Material3 dynamic color
+│           │   └── viewmodel/ ...        # AlbumViewModel
+│           └── util/ ...                 # ImageUtil, BatchProcessor, PermissionHelper
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── gradle.properties
 ├── gradle/wrapper/gradle-wrapper.properties
-├── .github/workflows/
-│   └── android-ci.yml
+├── .github/workflows/android-ci.yml
 └── README.md
 ```
 
 ---
 
-## 7 Navigation Routes (AppNavGraph.kt)
+## 7 Navigation Routes
 
 | Route | Screen | Purpose |
 |-------|--------|---------|
-| `album` | `AlbumScreen` | Main: browse by Folder/Tag/Rating, 3 view layouts, long-press actions |
+| `album` | `AlbumScreen` | Main album browser: 3 browse modes × 3 layouts |
 | `tag` | `TagScreen` | Tag list → images per tag |
 | `rating` | `RatingScreen` | Sort/filter by user rating or AI score |
-| `image_detail/{uri}` | `ImageDetailScreen` | Full-screen image, tap to toggle bars, edit tags & rating |
+| `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, tap to toggle controls |
 | `ai_rating` | `AiRatingScreen` | API config, select images, run AI scoring |
-| `ai_select` | `AiSelectScreen` | Pick images for AI ranking (persistent selection), Submit & Rate button |
-| `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / batch rate / batch resize |
-
----
-
-## Key Technical Decisions
-
-| Aspect | Decision |
-|--------|----------|
-| **Image loading** | Coil 3 with crossfade, fit-center non-cropping thumbnails, black bg |
-| **Grid background** | Black for empty area in square thumbnails |
-| **Database** | Room + KSP (compile-time DAO generation) |
-| **Media access** | SAF + MediaStore (`READ_MEDIA_IMAGES` for API 33+) |
-| **AI API** | OkHttp direct → dashscope-intl.aliyuncs.com/v1/chat/completions |
-| **API key storage** | EncryptedSharedPreferences (AES-256-GCM) |
-| **Default model** | `qwen-vl-plus` |
-| **Batch size** | 10 images per AI request |
-| **Image resize** | Max 800px longest side, JPEG Q80, cached in `ai_rating/` |
-| **Thumbnails** | 400px decoded size, no cropping |
-| **minSdk / targetSdk** | 26 / 35 |
-| **View layouts** | Grid / Waterfall / Justified (no list view) |
-| **AI selection** | Persistent via SharedPreferences, Submit & Rate button in AiSelectScreen |
-| **Long-press** | Opens action dialog: Assign Rating / Add Tag / Select for AI Ranking |
-| **Full-screen toggle** | Tap image in ImageDetailScreen to show/hide top bar |
+| `ai_select` | `AiSelectScreen` | Manage AI selection — only selected images shown, tap to deselect |
+| `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
 
 ---
 
@@ -131,13 +80,40 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 
 | Action | Result |
 |--------|--------|
-| **Tap thumbnail** | Open image in full-screen detail view |
-| **Long-press thumbnail** | Enter multi-select mode (first tap) OR open action dialog |
+| **Tap thumbnail** | Opens full-screen detail view (never crashes — handles null safely) |
+| **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking |
 | **Tap full-screen image** | Toggle visibility of toolbar and controls |
-| **Bottom nav tabs** | Folder / Tag / Rating (AI Sel tab removed) |
-| **Toolbar icons** | Grid / Waterfall / Justified layout toggles + ✨ AI Select |
-| **AI Select screen** | Select images, see them in a preview strip, tap Submit & Rate |
-| **Multi-select bar** | Batch actions: Tag / Rate / Remove Tags / Select for AI |
+| **Bottom nav tabs** | Folder / Tag / Rating (3 tabs) |
+| **Toolbar icons** | Layout toggle (Grid / Waterfall / Justified) + ✨ AI Select |
+| **AI Select screen** | Shows **only AI-selected images**; tap to deselect with ✕ overlay |
+| **Submit & Rate (bottom bar)** | Proceeds to AI Rating only when images are selected |
+| **Multi-select mode** | Batch actions: Tag / Rate / Remove Tags / Select for AI |
+
+---
+
+## Details on Key Features
+
+### Justified Grid
+- **Always 3 images per row**
+- Each image width = `(imageRatio / sumRatiosInRow) * availableWidth`
+- Fixed `rowHeight = 120.dp`, 2dp gaps between images
+- Black background, `ContentScale.Crop` fills each cell
+- Last row: if fewer than 3 images, remaining space left empty
+- Supports `combinedClickable` (click → detail, long-press → dialog)
+
+### Image Detail Screen
+- `.aspectRatio()` pre-calculated via `remember` — never evaluates `imageItem!!` on null
+- Controls visible by default (`showControls = true`), tap to toggle
+- Shows: metadata, rating bar (0.5-star increments), AI score, tags, add tag, toggle AI selection
+
+### AI Select Screen
+- Loads all AI-selected URIs from SharedPreferences on entry
+- Filters `allImages` to only show selected ones in a 3-column grid
+- Each thumbnail has a green border + semi-transparent overlay with **✕**
+- Tap any thumbnail → removes from selection immediately
+- Empty state: shows instructions ("long-press in Album to add images")
+- Bottom bar: shows count + **Submit & Rate** button
+- Top bar: **Clear All** action to reset selection
 
 ---
 
@@ -148,33 +124,18 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 - **Android Studio** Ladybug (2024.2+) or newer
 - **JDK 17** (Temurin recommended)
 
-### GitHub Actions CI
+### Build
 
 ```bash
 cd /srv/pyqalbum
-git init
-git add .
-git commit -m "Initial commit"
-git remote add origin https://github.com/YOUR_USERNAME/pyqAlbum.git
-git branch -M main
-git push -u origin main
+./gradlew assembleDebug
 ```
 
-After push, go to **Actions** tab → workflow builds → download APK artifact.
+APK will be at `app/build/outputs/apk/debug/app-debug.apk`
 
----
+### GitHub Actions CI
 
-## ⚠️ Outstanding Items
-
-1. **pHash duplicate detection** — PHASH_THRESHOLD = 15, PENALTY_FACTOR = 0.1 — not yet integrated into AiRatingService
-2. **Retrofit vs OkHttp** — AiRatingService uses raw OkHttp; Retrofit dependency unused
-3. **App icon** — mipmap resources missing
-4. **ProGuard rules** — proguard-rules.pro file missing
-5. **Write external storage** — for batch resize, need proper SAF permissions
-6. **Gradle wrapper JAR** — missing locally, GitHub Actions auto-generates it
-7. **TagScreen image loading** — LaunchedEffect ordering issue
-8. **Tests** — no unit tests or UI tests yet
-9. **BottomActionBar** — old file is no longer used (replaced by BatchMultiSelectBar inline in AlbumScreen)
+Push to `main` branch — workflow builds and uploads APK as artifact.
 
 ---
 
@@ -196,15 +157,13 @@ After push, go to **Actions** tab → workflow builds → download APK artifact.
 
 ---
 
-## Quick Reference — Key Files
+## ⚠️ Outstanding Items
 
-1. **`AlbumScreen.kt`** — Main UI, browse modes, 3 layouts, long-press dialog, multi-select
-2. **`AiSelectScreen.kt`** — AI selection with Submit & Rate bottom bar
-3. **`AiRatingScreen.kt`** — AI scoring UI
-4. **`ImageDetailScreen.kt`** — Full-screen view with tap-to-toggle controls
-5. **`JustifiedGrid.kt`** — Fixed-height row-filling grid with click/long-press
-6. **`WaterfallGrid.kt`** — Staggered grid with click/long-press
-7. **`ImageThumbnail.kt`** — Black-background square thumbnails
-8. **`AlbumViewModel.kt`** — State management, now with addTagToImage
-9. **`AppNavGraph.kt`** — 7 routes
-10. **`.github/workflows/android-ci.yml`** — CI/CD, already configured
+1. **pHash duplicate detection** — not yet integrated into AiRatingService
+2. **App icon** — mipmap resources for `ic_launcher` missing
+3. **ProGuard rules** — `proguard-rules.pro` file missing
+4. **Write external storage** — batch resize needs proper SAF permissions
+5. **Gradle wrapper JAR** — missing locally (GitHub Actions auto-generates)
+6. **TagScreen image loading** — LaunchedEffect ordering issue
+7. **Tests** — no unit tests or UI tests yet
+8. **BottomActionBar.kt** — old component file, no longer used (replaced by inline BatchMultiSelectBar)

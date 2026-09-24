@@ -107,6 +107,11 @@ fun ImageDetailScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             // Full-width image with tap-to-toggle controls
+            val aspectRatio = remember(imageItem) {
+                if (imageItem != null && imageItem!!.height > 0)
+                    imageItem!!.width.toFloat() / imageItem!!.height.toFloat()
+                else 1f
+            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -124,11 +129,7 @@ fun ImageDetailScreen(
                     contentDescription = imageItem?.displayName,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(
-                            if (imageItem?.height != null && imageItem?.height!! > 0)
-                                (imageItem?.width?.toFloat() ?: 1f) / (imageItem?.height?.toFloat() ?: 1f)
-                            else 1f
-                        ),
+                        .aspectRatio(aspectRatio),
                     contentScale = ContentScale.Fit
                 )
             }

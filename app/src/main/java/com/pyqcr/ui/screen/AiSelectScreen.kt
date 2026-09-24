@@ -6,15 +6,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,9 +27,8 @@ import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
 
 /**
- * Screen for selecting images to be used in AI rating.
- * Selected images are saved to SharedPreferences.
- * Tap the Submit button at the bottom to go to the AI Rating screen.
+ * Screen for managing images selected for AI rating.
+ * Only shows the selected images as thumbnails — tap to deselect.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -70,6 +66,8 @@ fun AiSelectScreen(
         return
     }
 
+    val selectedImages = allImages.filter { it.uri in aiSelectedUris }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -78,11 +76,20 @@ fun AiSelectScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    if (aiSelectedUris.isNotEmpty()) {
+                        TextButton(onClick = {
+                            aiSelectedUris = emptySet()
+                            saveAiSelectedUris(context, emptySet())
+                        }) {
+                            Text("Clear All", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
                 }
             )
         },
         bottomBar = {
-            // Submit button bar — always visible
             if (aiSelectedUris.isNotEmpty()) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -97,41 +104,28 @@ fun AiSelectScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = "${aiSelectedUris.size} selected",
+                            text = "${selectedImages.size} selected",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
                         )
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            // Clear all
-                            OutlinedButton(
-                                onClick = {
-                                    aiSelectedUris = emptySet()
-                                    saveAiSelectedUris(context, emptySet())
+                        Button(
+                            onClick = {
+                                if (aiSelectedUris.isEmpty()) {
+                                    Toast.makeText(context, "Select some images first", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    showAiRatingScreen = true
                                 }
-                            ) {
-                                Text("Clear")
                             }
-
-                            // Submit button
-                            Button(
-                                onClick = {
-                                    if (aiSelectedUris.isEmpty()) {
-                                        Toast.makeText(context, "Select some images first", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        showAiRatingScreen = true
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    Icons.Default.AutoAwesome,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text("Submit & Rate")
-                            }
+                        ) {
+                            Icon(
+                                Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Submit & Rate")
                         }
                     }
                 }
@@ -143,27 +137,51 @@ fun AiSelectScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // Selected images preview strip
-            if (aiSelectedUris.isNotEmpty()) {
-                Text(
-                    text = "Selected for AI: ${aiSelectedUris.size} images",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                )
-
-                val selectedImages = allImages.filter { it.uri in aiSelectedUris }
-                LazyRow(
+            if (selectedImages.isEmpty()) {
+                // Empty state — show info and all images for selection
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    items(selectedImages, key = { it.uri }) { image ->
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "No images selected yet.",
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "Go to Album, long-press an image, and choose\nSelect for AI Ranking to add images here.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else {
+                // Show only selected images in a grid — tap to deselect
+                Text(
+                    text = "Tap any image to remove it from AI selection:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    contentPadding = PaddingValues(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                ) {
+                    gridItems(selectedImages, key = { it.uri }) { image ->
                         Box(
                             modifier = Modifier
-                                .size(64.dp)
+                                .aspectRatio(1f)
                                 .clickable {
                                     aiSelectedUris = aiSelectedUris - image.uri
                                     saveAiSelectedUris(context, aiSelectedUris)
@@ -171,101 +189,27 @@ fun AiSelectScreen(
                         ) {
                             ImageThumbnail(
                                 imageUri = image.uri,
-                                modifier = Modifier.fillMaxSize()
+                                modifier = Modifier.fillMaxSize(),
+                                backgroundColor = Color.Black
                             )
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color.Black.copy(alpha = 0.3f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("✕", color = Color.White, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "Tap images below to select them for AI rating.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            textAlign = TextAlign.Center,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "Then tap Submit & Rate at the bottom.",
-                            style = MaterialTheme.typography.bodySmall,
-                            textAlign = TextAlign.Center,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            // All images grid for selection
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(3),
-                contentPadding = PaddingValues(2.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black)
-            ) {
-                gridItems(allImages, key = { it.uri }) { image ->
-                    val isSelected = image.uri in aiSelectedUris
-                    Box(
-                        modifier = Modifier
-                            .aspectRatio(1f)
-                            .clickable {
-                                aiSelectedUris = if (isSelected)
-                                    aiSelectedUris - image.uri
-                                else
-                                    aiSelectedUris + image.uri
-                                saveAiSelectedUris(context, aiSelectedUris)
-                            }
-                    ) {
-                        ImageThumbnail(
-                            imageUri = image.uri,
-                            modifier = Modifier.fillMaxSize(),
-                            backgroundColor = Color.Black
-                        )
-                        if (isSelected) {
+                            // Green border overlay
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .border(3.dp, Color.Green)
                             )
+                            // X overlay on hover
                             Box(
                                 modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .background(Color.Green)
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .fillMaxSize()
+                                    .background(Color(0x40000000)),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = "✓",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
+                                Text("✕", color = Color.White, fontSize = MaterialTheme.typography.headlineLarge.fontSize)
                             }
                         }
                     }
                 }
-            }
-
-            // Bottom spacer so bottomBar content doesn't overlap grid
-            if (aiSelectedUris.isNotEmpty()) {
-                Spacer(Modifier.height(80.dp))
             }
         }
     }
