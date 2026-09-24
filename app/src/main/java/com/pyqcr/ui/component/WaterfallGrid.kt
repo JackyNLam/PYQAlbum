@@ -1,13 +1,20 @@
 package com.pyqcr.ui.component
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
@@ -16,13 +23,17 @@ import com.pyqcr.data.model.ImageItem
 
 /**
  * Pinterest-style waterfall/staggered grid.
- * Each column scrolls independently; images keep their original aspect ratio.
- * Uses LazyVerticalStaggeredGrid (Compose 1.6+ / Material3 built-in).
+ * Accepts onImageClick and onLongPress callbacks.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun WaterfallGrid(
     images: List<ImageItem>,
     columns: Int = 2,
+    isMultiSelectMode: Boolean = false,
+    selectedImageUris: Set<String> = emptySet(),
+    onImageClick: ((String) -> Unit)? = null,
+    onLongPress: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     LazyVerticalStaggeredGrid(
@@ -33,7 +44,38 @@ fun WaterfallGrid(
         modifier = modifier
     ) {
         items(images, key = { it.uri }) { image ->
-            WaterfallTile(image = image)
+            val isSelected = image.uri in selectedImageUris
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(
+                        onClick = { onImageClick?.invoke(image.uri) },
+                        onLongClick = { onLongPress?.invoke(image.uri) }
+                    )
+            ) {
+                WaterfallTile(image = image)
+
+                if (isMultiSelectMode && isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0x80000000))
+                    )
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .background(Color.Green)
+                            .padding(4.dp)
+                    ) {
+                        androidx.compose.material3.Text(
+                            text = "✓",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -52,7 +94,7 @@ private fun WaterfallTile(image: ImageItem) {
         contentDescription = image.displayName,
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(ratio),  // Keep original aspect ratio
+            .aspectRatio(ratio),
         contentScale = ContentScale.Fit
     )
 }

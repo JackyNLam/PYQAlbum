@@ -1,6 +1,8 @@
 package com.pyqcr.ui.screen
 
 import android.net.Uri
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -13,6 +15,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -30,8 +34,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
- * Single image detail screen.
- * Shows the image full-screen with tags, rating editing, and metadata.
+ * Full-screen image detail view.
+ * Tap anywhere on the image to toggle the top/bottom bars (immersive view).
+ * Shows tags, rating editing, and metadata below the image.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,6 +57,7 @@ fun ImageDetailScreen(
     var rating by remember { mutableFloatStateOf(0f) }
     var newTagName by remember { mutableStateOf("") }
     var showAddTag by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(true) }  // Toggle UI overlays
     val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(imageUri) {
@@ -80,14 +86,16 @@ fun ImageDetailScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(imageItem?.displayName ?: "Image") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+            if (showControls) {
+                TopAppBar(
+                    title = { Text(imageItem?.displayName ?: "Image") },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        }
                     }
-                }
-            )
+                )
+            }
         }
     ) { paddingValues ->
         Column(
@@ -96,23 +104,32 @@ fun ImageDetailScreen(
                 .padding(paddingValues)
                 .verticalScroll(rememberScrollState())
         ) {
-            // Full-width image
-            SubcomposeAsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(imageUri)
-                    .size(1200)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = imageItem?.displayName,
+            // Full-width image with tap-to-toggle controls
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(
-                        if (imageItem?.height != null && imageItem?.height!! > 0)
-                            (imageItem?.width?.toFloat() ?: 1f) / (imageItem?.height?.toFloat() ?: 1f)
-                        else 1f
-                    ),
-                contentScale = ContentScale.Fit
-            )
+                    .background(Color.Black)
+                    .pointerInput(Unit) {
+                        detectTapGestures { showControls = !showControls }
+                    }
+            ) {
+                SubcomposeAsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(imageUri)
+                        .size(1200)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = imageItem?.displayName,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(
+                            if (imageItem?.height != null && imageItem?.height!! > 0)
+                                (imageItem?.width?.toFloat() ?: 1f) / (imageItem?.height?.toFloat() ?: 1f)
+                            else 1f
+                        ),
+                    contentScale = ContentScale.Fit
+                )
+            }
 
             // Metadata section
             Card(
@@ -249,6 +266,30 @@ fun ImageDetailScreen(
                                 Text("Add")
                             }
                         }
+                    }
+
+                    // AI Select button — add to selected images list
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = {
+                            // Add this image to AI selected set
+                            val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
+                            val current = prefs.getStringSet("ai_selected_uris", emptySet())?.toMutableSet() ?: mutableSetOf()
+                            if (imageUri in current) {
+                                current.remove(imageUri)
+                            } else {
+                                current.add(imageUri)
+                            }
+                            prefs.edit().putStringSet("ai_selected_uris", current).apply()
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text("Toggle AI Selection")
                     }
                 }
             }

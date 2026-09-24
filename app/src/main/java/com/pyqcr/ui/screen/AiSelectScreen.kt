@@ -1,20 +1,20 @@
 package com.pyqcr.ui.screen
 
 import android.content.Context
-import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,9 +24,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
 import com.pyqcr.PyqCrApp
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
@@ -34,8 +31,8 @@ import com.pyqcr.ui.component.ImageThumbnail
 
 /**
  * Screen for selecting images to be used in AI rating.
- * Selected images will appear in the "AI Sel" tab on the AlbumScreen.
- * Navigates to AiRatingScreen with the selected URIs.
+ * Selected images are saved to SharedPreferences.
+ * Tap the Submit button at the bottom to go to the AI Rating screen.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,13 +53,12 @@ fun AiSelectScreen(
         }
     }
 
-    // Load previously selected AI URIs from shared prefs
     LaunchedEffect(Unit) {
-        aiSelectedUris = loadAiSelectedUris(context)
+        val saved = loadAiSelectedUris(context)
+        aiSelectedUris = saved
     }
 
     if (showAiRatingScreen) {
-        // Inline AI rating flow with selected URIs
         AiRatingScreen(
             initialSelectedUris = aiSelectedUris,
             onBack = { showAiRatingScreen = false },
@@ -82,22 +78,64 @@ fun AiSelectScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                     }
-                },
-                actions = {
-                    // Go to AI Rating with selected images
-                    IconButton(
-                        onClick = {
-                            if (aiSelectedUris.isEmpty()) {
-                                Toast.makeText(context, "Select some images first", Toast.LENGTH_SHORT).show()
-                            } else {
-                                showAiRatingScreen = true
-                            }
-                        }
-                    ) {
-                        Icon(Icons.Default.AutoAwesome, contentDescription = "AI Rate")
-                    }
                 }
             )
+        },
+        bottomBar = {
+            // Submit button bar — always visible
+            if (aiSelectedUris.isNotEmpty()) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    tonalElevation = 8.dp,
+                    shadowElevation = 4.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "${aiSelectedUris.size} selected",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            // Clear all
+                            OutlinedButton(
+                                onClick = {
+                                    aiSelectedUris = emptySet()
+                                    saveAiSelectedUris(context, emptySet())
+                                }
+                            ) {
+                                Text("Clear")
+                            }
+
+                            // Submit button
+                            Button(
+                                onClick = {
+                                    if (aiSelectedUris.isEmpty()) {
+                                        Toast.makeText(context, "Select some images first", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        showAiRatingScreen = true
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Submit & Rate")
+                            }
+                        }
+                    }
+                }
+            }
         }
     ) { paddingValues ->
         Column(
@@ -105,7 +143,7 @@ fun AiSelectScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // Selected images preview region (top strip)
+            // Selected images preview strip
             if (aiSelectedUris.isNotEmpty()) {
                 Text(
                     text = "Selected for AI: ${aiSelectedUris.size} images",
@@ -115,7 +153,6 @@ fun AiSelectScreen(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                 )
 
-                // Horizontal scroll of selected images
                 val selectedImages = allImages.filter { it.uri in aiSelectedUris }
                 LazyRow(
                     modifier = Modifier
@@ -128,7 +165,6 @@ fun AiSelectScreen(
                             modifier = Modifier
                                 .size(64.dp)
                                 .clickable {
-                                    // Remove from selection on tap
                                     aiSelectedUris = aiSelectedUris - image.uri
                                     saveAiSelectedUris(context, aiSelectedUris)
                                 }
@@ -143,7 +179,7 @@ fun AiSelectScreen(
                                     .background(Color.Black.copy(alpha = 0.3f)),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text("✕", color = Color.White)
+                                Text("✕", color = Color.White, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -154,15 +190,24 @@ fun AiSelectScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(24.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "Tap images below to select them for AI rating.\nThen tap ✨ to start rating.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "Tap images below to select them for AI rating.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "Then tap Submit & Rate at the bottom.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
@@ -195,7 +240,6 @@ fun AiSelectScreen(
                             backgroundColor = Color.Black
                         )
                         if (isSelected) {
-                            // Green checkmark overlay
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -218,21 +262,20 @@ fun AiSelectScreen(
                     }
                 }
             }
+
+            // Bottom spacer so bottomBar content doesn't overlap grid
+            if (aiSelectedUris.isNotEmpty()) {
+                Spacer(Modifier.height(80.dp))
+            }
         }
     }
 }
 
-/**
- * Load AI selected URIs from SharedPreferences.
- */
 private fun loadAiSelectedUris(context: Context): Set<String> {
     val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
     return prefs.getStringSet("ai_selected_uris", emptySet()) ?: emptySet()
 }
 
-/**
- * Save AI selected URIs to SharedPreferences.
- */
 private fun saveAiSelectedUris(context: Context, uris: Set<String>) {
     val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
     prefs.edit().putStringSet("ai_selected_uris", uris).apply()

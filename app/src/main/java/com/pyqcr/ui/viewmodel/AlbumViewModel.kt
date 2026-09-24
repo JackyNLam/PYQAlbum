@@ -71,4 +71,20 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
             repository.updateRating(uri, rating)
         }
     }
+
+    fun addTagToImage(uri: String, tagName: String) {
+        viewModelScope.launch {
+            val app = getApplication<PyqCrApp>()
+            val tagDao = app.database.tagDao()
+            var tag = tagDao.getTagByName(tagName)
+            val tagId = if (tag != null) {
+                tag.id
+            } else {
+                tagDao.insertTag(com.pyqcr.data.db.TagEntity(name = tagName))
+            }
+            if (tagDao.hasTag(uri, tagId) == 0) {
+                tagDao.addTagToImage(com.pyqcr.data.db.ImageTagCrossRef(imageUri = uri, tagId = tagId))
+            }
+        }
+    }
 }
