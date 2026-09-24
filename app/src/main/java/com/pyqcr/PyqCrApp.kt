@@ -16,22 +16,22 @@ class PyqCrApp : Application() {
         AppDatabase.getInstance(this)
     }
 
-    lateinit var imageLoader: ImageLoader
-        private set
-
     override fun onCreate() {
         super.onCreate()
-        imageLoader = ImageLoader.Builder(this)
+    }
+
+    fun newImageLoader(context: android.content.Context): ImageLoader {
+        return ImageLoader.Builder(context)
             .memoryCachePolicy(CachePolicy.ENABLED)
             .memoryCache {
                 MemoryCache.Builder()
-                    .maxSizePercent(this, 0.25)
+                    .maxSizePercent(context, 0.25)
                     .build()
             }
             .diskCachePolicy(CachePolicy.ENABLED)
             .diskCache {
                 DiskCache.Builder()
-                    .directory(cacheDir.resolve("image_cache").toOkioPath())
+                    .directory(context.cacheDir.resolve("image_cache").toOkioPath())
                     .maxSizeBytes(100 * 1024 * 1024) // 100 MB
                     .build()
             }
