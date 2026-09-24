@@ -1,32 +1,42 @@
 package com.pyqcr
 
 import android.app.Application
-import coil.ImageLoader
-import coil.ImageLoaderFactory
-import coil.disk.DiskCache
-import coil.memory.MemoryCache
-import coil.request.CachePolicy
-import coil.util.DebugLogger
+import android.content.Context
+import coil3.ImageLoader
+import coil3.disk.DiskCache
+import coil3.memory.MemoryCache
+import coil3.request.CachePolicy
+import coil3.request.crossfade
+import coil3.util.DebugLogger
 import com.pyqcr.data.db.AppDatabase
+import okio.Path.Companion.toOkioPath
 
-class PyqCrApp : Application(), ImageLoaderFactory {
+class PyqCrApp : Application() {
 
     val database: AppDatabase by lazy {
         AppDatabase.getInstance(this)
     }
 
-    override fun newImageLoader(): ImageLoader {
-        return ImageLoader.Builder(this)
+    lateinit var imageLoader: ImageLoader
+        private set
+
+    override fun onCreate() {
+        super.onCreate()
+        imageLoader = newImageLoader(this)
+    }
+
+    private fun newImageLoader(context: Context): ImageLoader {
+        return ImageLoader.Builder(context)
             .memoryCachePolicy(CachePolicy.ENABLED)
             .memoryCache {
                 MemoryCache.Builder()
-                    .maxSizePercent(0.25)
+                    .maxSizePercent(context, 0.25)
                     .build()
             }
             .diskCachePolicy(CachePolicy.ENABLED)
             .diskCache {
                 DiskCache.Builder()
-                    .directory(cacheDir.resolve("image_cache"))
+                    .directory(context.cacheDir.resolve("image_cache").toOkioPath())
                     .maxSizeBytes(100 * 1024 * 1024) // 100 MB
                     .build()
             }

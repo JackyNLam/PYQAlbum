@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.pyqcr.PyqCrApp
 import com.pyqcr.ai.AiRatingService
@@ -101,7 +102,7 @@ fun AiRatingScreen(
                             label = { Text("DashScope API Key") },
                             placeholder = { Text("sk-...") },
                             visualTransformation = if (showApiKey)
-                                null else PasswordVisualTransformation(),
+                                VisualTransformation.None else PasswordVisualTransformation(),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                             trailingIcon = {
