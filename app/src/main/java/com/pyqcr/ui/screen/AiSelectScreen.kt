@@ -7,9 +7,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -115,7 +117,7 @@ fun AiSelectScreen(
 
                 // Horizontal scroll of selected images
                 val selectedImages = allImages.filter { it.uri in aiSelectedUris }
-                androidx.compose.foundation.lazy.LazyRow(
+                LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp, vertical = 4.dp),
@@ -174,7 +176,7 @@ fun AiSelectScreen(
                     .fillMaxSize()
                     .background(Color.Black)
             ) {
-                items(allImages, key = { it.uri }) { image ->
+                gridItems(allImages, key = { it.uri }) { image ->
                     val isSelected = image.uri in aiSelectedUris
                     Box(
                         modifier = Modifier
