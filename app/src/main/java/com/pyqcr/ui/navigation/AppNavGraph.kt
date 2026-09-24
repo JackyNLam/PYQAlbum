@@ -1,0 +1,90 @@
+package com.pyqcr.ui.navigation
+
+import androidx.compose.runtime.Composable
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.pyqcr.ui.screen.*
+
+object Routes {
+    const val ALBUM = "album"
+    const val TAG = "tag"
+    const val RATING = "rating"
+    const val IMAGE_DETAIL = "image_detail/{imageUri}"
+    const val AI_RATING = "ai_rating"
+    const val BATCH_EDIT = "batch_edit/{mode}"
+
+    fun imageDetail(imageUri: String) = "image_detail/$imageUri"
+    fun batchEdit(mode: String) = "batch_edit/$mode"
+}
+
+@Composable
+fun AppNavGraph() {
+    val navController = rememberNavController()
+
+    NavHost(
+        navController = navController,
+        startDestination = Routes.ALBUM
+    ) {
+        composable(Routes.ALBUM) {
+            AlbumScreen(
+                onImageClick = { imageUri ->
+                    navController.navigate(Routes.imageDetail(imageUri))
+                },
+                onNavigateToAiRating = {
+                    navController.navigate(Routes.AI_RATING)
+                }
+            )
+        }
+
+        composable(Routes.TAG) {
+            TagScreen(
+                onImageClick = { imageUri ->
+                    navController.navigate(Routes.imageDetail(imageUri))
+                }
+            )
+        }
+
+        composable(Routes.RATING) {
+            RatingScreen(
+                onImageClick = { imageUri ->
+                    navController.navigate(Routes.imageDetail(imageUri))
+                }
+            )
+        }
+
+        composable(
+            route = Routes.IMAGE_DETAIL,
+            arguments = listOf(
+                navArgument("imageUri") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val imageUri = backStackEntry.arguments?.getString("imageUri") ?: return@composable
+            ImageDetailScreen(
+                imageUri = imageUri,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.AI_RATING) {
+            AiRatingScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(
+            route = Routes.BATCH_EDIT,
+            arguments = listOf(
+                navArgument("mode") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val mode = backStackEntry.arguments?.getString("mode") ?: "tag"
+            BatchEditScreen(
+                mode = mode,
+                onBack = { navController.popBackStack() }
+            )
+        }
+    }
+}

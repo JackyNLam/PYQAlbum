@@ -1,0 +1,255 @@
+package com.pyqcr.ui.screen
+
+import android.net.Uri
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import coil3.compose.SubcomposeAsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
+import com.pyqcr.PyqCrApp
+import com.pyqcr.data.db.ImageTagCrossRef
+import com.pyqcr.data.db.TagEntity
+import com.pyqcr.data.model.ImageItem
+import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.ui.component.RatingBar
+import com.pyqcr.ui.component.TagChip
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+
+/**
+ * Single image detail screen.
+ * Shows the image full-screen with tags, rating editing, and metadata.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ImageDetailScreen(
+    imageUri: String,
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    val app = context.applicationContext as PyqCrApp
+    val imageDao = app.database.imageDao()
+    val tagDao = app.database.tagDao()
+    val repository = remember {
+        AlbumRepository(context, app.database)
+    }
+
+    var imageItem by remember { mutableStateOf<ImageItem?>(null) }
+    var tags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+    var rating by remember { mutableFloatStateOf(0f) }
+    var newTagName by remember { mutableStateOf("") }
+    var showAddTag by remember { mutableStateOf(false) }
+
+    LaunchedEffect(imageUri) {
+        val entity = imageDao.getImageByUri(imageUri)
+        imageItem = entity?.let {
+            ImageItem(
+                uri = it.uri,
+                displayName = it.displayName,
+                rating = it.rating,
+                width = it.width,
+                height = it.height,
+                sizeBytes = it.sizeBytes,
+                dateAdded = it.dateAdded,
+                folderName = it.folderName,
+                aiScore = it.aiScore
+            )
+        }
+        rating = entity?.rating ?: 0f
+    }
+
+    LaunchedEffect(imageUri) {
+        tagDao.getTagsForImage(imageUri).collect { tagList ->
+            tags = tagList
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(imageItem?.displayName ?: "Image") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .verticalScroll(rememberScrollState())
+        ) {
+            // Full-width image
+            SubcomposeAsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(imageUri)
+                    .size(1200)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = imageItem?.displayName,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(
+                        if (imageItem?.height != null && imageItem?.height!! > 0)
+                            (imageItem?.width?.toFloat() ?: 1f) / (imageItem?.height?.toFloat() ?: 1f)
+                        else 1f
+                    ),
+                contentScale = ContentScale.Fit
+            )
+
+            // Metadata section
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // File info
+                    Text(
+                        text = imageItem?.displayName ?: "",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "Folder: ${imageItem?.folderName ?: "Unknown"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (imageItem?.width != null && imageItem?.height != null) {
+                        Text(
+                            text = "${imageItem?.width} x ${imageItem?.height}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    // Rating bar
+                    Text(
+                        text = "Rating",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    RatingBar(
+                        rating = rating,
+                        onRatingChange = { newRating ->
+                            rating = newRating
+                            repository.updateRating(imageUri, newRating)
+                        }
+                    )
+
+                    // AI Score display
+                    imageItem?.aiScore?.let { aiScore ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "AI Score: ${String.format("%.1f", aiScore)}/100",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    // Tags
+                    Text(
+                        text = "Tags",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+
+                    if (tags.isNotEmpty()) {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        ) {
+                            items(tags) { tag ->
+                                TagChip(
+                                    text = tag.name,
+                                    onRemove = {
+                                        tagDao.removeTagFromImage(imageUri, tag.id)
+                                    }
+                                )
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = "No tags",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    }
+
+                    // Add tag button
+                    if (!showAddTag) {
+                        OutlinedButton(
+                            onClick = { showAddTag = true },
+                            modifier = Modifier.padding(top = 4.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Add,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("Add Tag")
+                        }
+                    } else {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = 8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = newTagName,
+                                onValueChange = { newTagName = it },
+                                label = { Text("Tag name") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    if (newTagName.isNotBlank()) {
+                                        val scope = rememberCoroutineScope()
+                                        scope.launch {
+                                            var tag = tagDao.getTagByName(newTagName.trim())
+                                            val tagId = if (tag != null) {
+                                                tag.id
+                                            } else {
+                                                tagDao.insertTag(TagEntity(name = newTagName.trim()))
+                                            }
+                                            if (tagDao.hasTag(imageUri, tagId) == 0) {
+                                                tagDao.addTagToImage(
+                                                    ImageTagCrossref(imageUri = imageUri, tagId = tagId)
+                                                )
+                                            }
+                                            newTagName = ""
+                                            showAddTag = false
+                                        }
+                                    }
+                                }
+                            ) {
+                                Text("Add")
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
