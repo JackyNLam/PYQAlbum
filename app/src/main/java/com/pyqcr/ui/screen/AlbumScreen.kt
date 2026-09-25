@@ -578,7 +578,7 @@ fun AlbumScreen(
                                         verticalArrangement = Arrangement.spacedBy(2.dp),
                                         modifier = Modifier
                                             .fillMaxSize()
-                                            .background(Color.Black)
+                                            .background(Color.White)
                                     ) {
                                         items(tagImages, key = { it.uri }) { image ->
                                             Box(
@@ -596,7 +596,8 @@ fun AlbumScreen(
                                                     imageUri = image.uri,
                                                     modifier = Modifier.fillMaxSize(),
                                                     contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                                                    backgroundColor = Color.Black
+                                                    backgroundColor = Color.White,
+                                                    rating = image.rating
                                                 )
                                                 // AI selection indicator
                                                 if (image.uri in aiSelectedUris) {
@@ -607,13 +608,13 @@ fun AlbumScreen(
                                                                 MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
                                                                 shape = MaterialTheme.shapes.small
                                                             )
-                                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                            .padding(horizontal = 4.dp, vertical = 2.dp)
                                                     ) {
-                                                        Text(
-                                                            text = "★",
-                                                            color = Color.White,
-                                                            fontWeight = FontWeight.Bold,
-                                                            style = MaterialTheme.typography.labelSmall
+                                                        Icon(
+                                                            imageVector = Icons.Default.AutoAwesome,
+                                                            contentDescription = "AI Selected",
+                                                            tint = Color.White,
+                                                            modifier = Modifier.size(14.dp)
                                                         )
                                                     }
                                                 }
@@ -939,7 +940,7 @@ private fun ImageGridView(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black)
+                    .background(Color.White)
             ) {
                 items(images, key = { it.uri }) { image ->
                     val isSelected = image.uri in selectedImageUris
@@ -955,9 +956,10 @@ private fun ImageGridView(
                             imageUri = image.uri,
                             modifier = Modifier.fillMaxSize(),
                             contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                            backgroundColor = Color.Black
+                            backgroundColor = Color.White,
+                            rating = image.rating
                         )
-                        // AI selection indicator (star badge)
+                        // AI selection indicator (AutoAwesome icon)
                         if (image.uri in aiSelectedUris) {
                             Box(
                                 modifier = Modifier
@@ -966,13 +968,13 @@ private fun ImageGridView(
                                         MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
                                         shape = MaterialTheme.shapes.small
                                     )
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
                             ) {
-                                Text(
-                                    text = "★",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.labelSmall
+                                Icon(
+                                    imageVector = Icons.Default.AutoAwesome,
+                                    contentDescription = "AI Selected",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
                                 )
                             }
                         }

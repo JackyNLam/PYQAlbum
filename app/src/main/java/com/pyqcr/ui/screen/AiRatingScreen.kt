@@ -330,19 +330,24 @@ fun AiRatingScreen(
                             saveModelNameToPrefs(context, modelName)
 
                             // Step 2: Resize images
+                            val totalSelected = selectedImages.size
                             val resizedPaths = selectedImages.mapNotNull { uriString ->
-                                currentStatus = "Resizing: ${uriString.substringAfterLast('/')}"
-                                resizer.resizeForAi(Uri.parse(uriString))
+                                currentStatus = "Resizing (${progress + 1}/$totalSelected): ${uriString.substringAfterLast('/')}"
+                                resizer.resizeForAi(Uri.parse(uriString)).also {
+                                    progress++
+                                }
                             }
 
                             if (resizedPaths.isEmpty()) {
-                                currentStatus = "Failed to resize any images"
+                                currentStatus = "❌ Failed to resize any images"
                                 isRunning = false
+                                Toast.makeText(context, "Failed to resize any images. Check permissions.", Toast.LENGTH_LONG).show()
                                 return@launch
                             }
 
                             // Step 3: Rate images
-                            currentStatus = "Sending to AI for rating..."
+                            progress = 0
+                            currentStatus = "Sending ${resizedPaths.size} images to AI for rating..."
                             val ratingResults = service.rateImages(
                                 apiKey = apiKey,
                                 modelName = modelName,
@@ -350,33 +355,40 @@ fun AiRatingScreen(
                                 onProgress = { current, total ->
                                     progress = current
                                     totalCount = total
-                                    currentStatus = "Rating: $current/$total"
+                                    val batchNum = (current / 10) + 1
+                                    val totalBatches = (total + 9) / 10
+                                    currentStatus = "AI Rating in progress — batch $batchNum/$totalBatches ($current/$total images processed)"
                                 }
                             )
 
                             // Step 4: Save results to DB
-                            currentStatus = "Saving results..."
-                            for (result in ratingResults) {
-                                val origUri = allImages.find { img ->
-                                    result.imageName == img.displayName ||
-                                            resizedPaths.indexOfFirst { it.endsWith(result.imageName) } >= 0
-                                }?.uri
-                                if (origUri != null) {
-                                    repository.updateAiScore(origUri, result.score)
+                            if (ratingResults.isNotEmpty()) {
+                                currentStatus = "Saving ${ratingResults.size} scores to database..."
+                                var savedCount = 0
+                                for (result in ratingResults) {
+                                    val origUri = allImages.find { img ->
+                                        result.imageName == img.displayName ||
+                                                resizedPaths.indexOfFirst { it.endsWith(result.imageName) } >= 0
+                                    }?.uri
+                                    if (origUri != null) {
+                                        repository.updateAiScore(origUri, result.score)
+                                        savedCount++
+                                    }
                                 }
+                                results = ratingResults
+                                resizer.clearCache()
+                                currentStatus = "✅ Completed! ${ratingResults.size} images rated, $savedCount scores saved to database."
+                            } else {
+                                currentStatus = "❌ AI returned no results. Check your API key and try again."
                             }
-
-                            results = ratingResults
-                            resizer.clearCache()
-                            currentStatus = "Completed: ${ratingResults.size} images rated"
                             isRunning = false
 
                             if (ratingResults.isEmpty()) {
-                                Toast.makeText(context, "No results from AI", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "❌ No results from AI. Check API key and network.", Toast.LENGTH_LONG).show()
                             } else {
                                 Toast.makeText(
                                     context,
-                                    "Rated ${ratingResults.size} images",
+                                    "✅ Rated ${ratingResults.size} images",
                                     Toast.LENGTH_SHORT
                                 ).show()
                             }
@@ -399,7 +411,7 @@ fun AiRatingScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(Modifier.width(6.dp))
-                    Text(if (isRunning) "Running..." else "Submit to AI Rating")
+                    Text(if (isRunning) currentStatus.take(50) + if (currentStatus.length > 50) "…" else "" else "Submit to AI Rating")
                 }
             }
 

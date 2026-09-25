@@ -20,6 +20,8 @@ import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.pyqcr.data.model.ImageItem
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 
 /**
  * Pinterest-style waterfall/staggered grid.
@@ -42,20 +44,40 @@ fun WaterfallGrid(
         contentPadding = PaddingValues(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalItemSpacing = 4.dp,
-        modifier = modifier.background(Color.Black)
+        modifier = modifier.background(Color.White)
     ) {
         items(images, key = { it.uri }) { image ->
             val isSelected = image.uri in selectedImageUris
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color.Black)
+                    .background(Color.White)
                     .combinedClickable(
                         onClick = { onImageClick?.invoke(image.uri) },
                         onLongClick = { onLongPress?.invoke(image.uri) }
                     )
             ) {
                 WaterfallTile(image = image)
+
+                // Rating badge
+                if (image.rating > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .background(
+                                Color(0xCC000000),
+                                shape = androidx.compose.material3.MaterialTheme.shapes.small
+                            )
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    ) {
+                        androidx.compose.material3.Text(
+                            text = String.format("%.1f", image.rating),
+                            color = Color(0xFFFFD700),
+                            fontSize = androidx.compose.material3.MaterialTheme.typography.labelSmall.fontSize,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
 
                 // AI selection indicator
                 if (image.uri in aiSelectedUris) {
@@ -66,13 +88,13 @@ fun WaterfallGrid(
                                 androidx.compose.material3.MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
                                 shape = androidx.compose.material3.MaterialTheme.shapes.small
                             )
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
-                        androidx.compose.material3.Text(
-                            text = "★",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            style = androidx.compose.material3.MaterialTheme.typography.labelSmall
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "AI Selected",
+                            tint = Color.White,
+                            modifier = Modifier.size(14.dp)
                         )
                     }
                 }

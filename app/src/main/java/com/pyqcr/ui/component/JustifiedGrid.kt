@@ -23,6 +23,8 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import coil3.size.Scale
 import com.pyqcr.data.model.ImageItem
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 
 /**
  * Simple justified grid: 3 images per row, fixed height, dynamic width
@@ -55,7 +57,7 @@ fun JustifiedGrid(
     val availableWidth = screenWidthDp.toFloat() - totalSpacingPerRow
 
     LazyColumn(
-        modifier = modifier.background(Color.Black),
+        modifier = modifier.background(Color.White),
         verticalArrangement = Arrangement.spacedBy(spacing)
     ) {
         items(rows) { row ->
@@ -84,7 +86,7 @@ fun JustifiedGrid(
                         modifier = Modifier
                             .width(itemWidthDp.dp)
                             .fillMaxHeight()
-                            .background(Color.Black)
+                            .background(Color.White)
                             .then(
                                 Modifier.combinedClickable(
                                     onClick = { onImageClick?.invoke(image.uri) },
@@ -103,6 +105,25 @@ fun JustifiedGrid(
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop
                         )
+                        // Rating badge
+                        if (image.rating > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .background(
+                                        Color(0xCC000000),
+                                        shape = MaterialTheme.shapes.small
+                                    )
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    text = String.format("%.1f", image.rating),
+                                    color = Color(0xFFFFD700),
+                                    fontSize = MaterialTheme.typography.labelSmall.fontSize,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                         // AI selection indicator
                         if (image.uri in aiSelectedUris) {
                             Box(
@@ -112,13 +133,13 @@ fun JustifiedGrid(
                                         MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
                                         shape = MaterialTheme.shapes.small
                                     )
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
                             ) {
-                                Text(
-                                    text = "★",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.labelSmall
+                                Icon(
+                                    imageVector = Icons.Default.AutoAwesome,
+                                    contentDescription = "AI Selected",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
                                 )
                             }
                         }
