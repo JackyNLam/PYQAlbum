@@ -7,7 +7,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -278,6 +277,7 @@ fun AlbumScreen(
                             )
                             BrowseMode.TAG -> Text(selectedTag?.name ?: "Tags")
                             BrowseMode.RATING -> Text("Rating")
+                            BrowseMode.AI_SELECTED -> Text("AI Selected")
                         }
                     },
                     actions = {
@@ -1013,9 +1013,9 @@ private fun ImageGridView(
     }
 }
 
-private enum class BrowseMode { FOLDER, TAG, RATING, AI_SELECTED }
+enum class BrowseMode { FOLDER, TAG, RATING, AI_SELECTED }
 private enum class ViewLayout { GRID, WATERFALL, JUSTIFIED }
-private enum class SortMode { USER_RATING_DESC, AI_SCORE_DESC }
+enum class SortMode { USER_RATING_DESC, AI_SCORE_DESC }
 
 // ---------- SharedPreferences helpers for AI selection ----------
 private fun loadAiSelectedUris(context: Context): Set<String> {

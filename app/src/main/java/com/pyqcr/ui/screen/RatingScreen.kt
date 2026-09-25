@@ -158,8 +158,3 @@ fun RatingScreen(
         }
     }
 }
-
-private enum class SortMode {
-    USER_RATING_DESC,
-    AI_SCORE_DESC
-}
