@@ -29,7 +29,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** rating, tags, and AI selection panel; **swipe left/right** to navigate to next/previous image in the same folder/tag
 - **AI-selected images** are marked with an ✨ AutoAwesome icon badge in all grid layouts (Grid, Waterfall, Justified) and TAG grid view
 - **User ratings** are shown as gold-on-black score badges on thumbnails
-- **Tag assignment** shows ALL existing tags (from any image) as selectable options before allowing custom tag creation — both from long-press dialog and batch tag mode
+- **Tag assignment** shows ALL existing tags (from any image) as selectable options before allowing custom tag creation — both from long-press dialog and batch tag mode (always collected regardless of browse mode)
 - **Ratings persist** across app restarts — MediaStore refresh preserves existing ratings and AI scores
 
 ---
@@ -178,7 +178,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Detailed Debug Log** panel — dark terminal-style card that records every step:
   - Timestamped entries (`[14:23:45] Resizing [3/10]: IMG_123.jpg`)
   - Per-image resize success/failure with file size
-  - API endpoint called and batch progress
+  - API endpoint called and batch progress (fixed: shows correct pass count instead of overflowing)
   - Each AI result (name, score, reason)
   - DB save status per image
   - All errors/warnings clearly marked

@@ -384,10 +384,10 @@ fun AiRatingScreen(
                                 onProgress = { current, total ->
                                     progress = current
                                     totalCount = total
-                                    val batchNum = (current / 10) + 1
-                                    val totalBatches = (total + 9) / 10
-                                    currentStatus = "AI Rating in progress — batch $batchNum/$totalBatches ($current/$total images processed)"
-                                    log("Progress: batch $batchNum/$totalBatches ($current/$total)")
+                                    val passNum = (current / 10) + 1
+                                    val totalPasses = (total + 9) / 10
+                                    currentStatus = "AI Rating — $current/$total images rated ($passNum/$totalPasses passes)"
+                                    log("Progress: $current/$total successes ($passNum/$totalPasses passes)")
                                 }
                             )
 

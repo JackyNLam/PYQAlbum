@@ -44,7 +44,7 @@ class AiRatingService {
     ): List<AiRatingResult> = withContext(Dispatchers.IO) {
         val batchSize = 10
         val allResults = mutableListOf<AiRatingResult>()
-        var processedCount = 0
+        var succeededCount = 0
         val pendingPaths = resizedImagePaths.toMutableList()
 
         val prompt = """你是一位資深攝影編輯和社交媒體專家。
@@ -59,11 +59,16 @@ class AiRatingService {
 你不需要返回 file 欄位，只需返回 score 和 reason：
 [{ "score": 85.5, "reason": "簡短理由"}, { "score": 70.0, "reason": "簡短理由"}]"""
 
+        var batchNum = 0
+        val totalBatches = (resizedImagePaths.size + batchSize - 1) / batchSize
+
         while (pendingPaths.isNotEmpty()) {
             val batch = pendingPaths.take(batchSize)
             pendingPaths.removeAll(batch)
+            batchNum++
 
-            onProgress(processedCount, resizedImagePaths.size)
+            // Report progress before API call
+            onProgress(succeededCount, resizedImagePaths.size)
 
             val content = mutableListOf<Map<String, Any>>()
             batch.forEach { path ->
@@ -100,7 +105,6 @@ class AiRatingService {
                 if (!response.isSuccessful) {
                     // Put back to pending for retry
                     pendingPaths.addAll(batch)
-                    processedCount += batch.size
                     continue
                 }
 
@@ -109,7 +113,6 @@ class AiRatingService {
                 val choices = jsonResponse.getAsJsonArray("choices")
                 if (choices == null || choices.size() == 0) {
                     pendingPaths.addAll(batch)
-                    processedCount += batch.size
                     continue
                 }
 
@@ -122,12 +125,12 @@ class AiRatingService {
                 val jsonArrayMatch = Regex("""\[[\s\S]*\]""").find(messageContent)
                 if (jsonArrayMatch == null) {
                     pendingPaths.addAll(batch)
-                    processedCount += batch.size
                     continue
                 }
 
                 val scoresArray = JsonParser.parseString(jsonArrayMatch.value).asJsonArray
 
+                var batchSucceeded = 0
                 for ((idx, item) in scoresArray.withIndex()) {
                     if (idx < batch.size) {
                         val obj = item.asJsonObject
@@ -143,6 +146,7 @@ class AiRatingService {
                                 imageName = File(originalPath).name
                             )
                         )
+                        batchSucceeded++
                     }
                 }
 
@@ -152,11 +156,11 @@ class AiRatingService {
                     pendingPaths.addAll(missingPaths)
                 }
 
-                processedCount += batch.size
+                succeededCount += batchSucceeded
+                onProgress(succeededCount, resizedImagePaths.size)
 
             } catch (e: Exception) {
                 pendingPaths.addAll(batch)
-                processedCount += batch.size
             }
         }
 

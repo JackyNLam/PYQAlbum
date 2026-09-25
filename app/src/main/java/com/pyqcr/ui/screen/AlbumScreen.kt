@@ -134,12 +134,10 @@ fun AlbumScreen(
         return
     }
 
-    // Load tags for Tag mode
-    LaunchedEffect(selectedBrowseMode) {
-        if (selectedBrowseMode == BrowseMode.TAG) {
-            tagDao.getAllTags().collect { tagList ->
-                allTags = tagList
-            }
+    // Load all tags (needed for tag assignment dialog in any browse mode)
+    LaunchedEffect(Unit) {
+        tagDao.getAllTags().collect { tagList ->
+            allTags = tagList
         }
     }
 
