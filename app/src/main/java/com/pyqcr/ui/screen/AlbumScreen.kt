@@ -67,8 +67,8 @@ fun AlbumScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
-    var selectedBrowseMode by remember { mutableStateOf(BrowseMode.FOLDER) }
-    var selectedViewLayout by remember { mutableStateOf(ViewLayout.GRID) }
+    var selectedBrowseMode by rememberSaveable { mutableStateOf(BrowseMode.FOLDER) }
+    var selectedViewLayout by rememberSaveable { mutableStateOf(ViewLayout.GRID) }
     var selectedFolder by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTag by rememberSaveable { mutableStateOf<TagEntity?>(null) }
 
@@ -77,7 +77,7 @@ fun AlbumScreen(
     var selectedImageUris by remember { mutableStateOf(setOf<String>()) }
 
     // AI rating selection image URIs
-    var aiSelectedUris by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var aiSelectedUris by rememberSaveable { mutableStateOf<Set<String>>(emptySet()) }
 
     // Long-press dialog state
     var longPressedImageUri by remember { mutableStateOf<String?>(null) }
@@ -88,7 +88,7 @@ fun AlbumScreen(
     var tagImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
 
     // Folder sort state — sort images inside a folder by rating
-    var folderSortMode by remember { mutableStateOf(FolderSortMode.DEFAULT) }
+    var folderSortMode by rememberSaveable { mutableStateOf(FolderSortMode.DEFAULT) }
 
     // Load AI selected URIs
     LaunchedEffect(Unit) {
@@ -412,7 +412,7 @@ fun AlbumScreen(
                                     ElevatedCard(
                                         onClick = {
                                             selectedFolder = folder
-                                            viewModel.loadImagesByFolder(folder)
+                                            folderSortMode = FolderSortMode.DEFAULT
                                         },
                                         modifier = Modifier.fillMaxWidth()
                                     ) {

@@ -41,13 +41,14 @@ fun WaterfallGrid(
         contentPadding = PaddingValues(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalItemSpacing = 4.dp,
-        modifier = modifier
+        modifier = modifier.background(Color.Black)
     ) {
         items(images, key = { it.uri }) { image ->
             val isSelected = image.uri in selectedImageUris
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .background(Color.Black)
                     .combinedClickable(
                         onClick = { onImageClick?.invoke(image.uri) },
                         onLongClick = { onLongPress?.invoke(image.uri) }

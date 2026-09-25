@@ -8,6 +8,7 @@ import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 
 class AlbumViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = AlbumRepository(
@@ -24,12 +25,21 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    // Jobs to cancel previous collectors when switching modes
+    private var imagesJob: Job? = null
+
     init {
         repository.getAllFolders().onEach { folderList ->
             _folders.value = folderList
         }.launchIn(viewModelScope)
 
-        repository.getAllImages().onEach { imageList ->
+        // Start collecting all images (default view)
+        collectAllImages()
+    }
+
+    private fun collectAllImages() {
+        imagesJob?.cancel()
+        imagesJob = repository.getAllImages().onEach { imageList ->
             _images.value = imageList
         }.launchIn(viewModelScope)
     }
@@ -43,18 +53,20 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadImagesByFolder(folderName: String) {
-        repository.getImagesByFolder(folderName).onEach { imageList ->
+        imagesJob?.cancel()
+        imagesJob = repository.getImagesByFolder(folderName).onEach { imageList ->
             _images.value = imageList
         }.launchIn(viewModelScope)
     }
 
     fun loadImagesByFolderSorted(folderName: String, sortByUserRating: Boolean, sortByAiScore: Boolean) {
+        imagesJob?.cancel()
         val flow = when {
             sortByUserRating -> repository.getImagesSortedByUserRatingDesc()
             sortByAiScore -> repository.getImagesSortedByAiScoreDesc()
             else -> repository.getImagesByFolder(folderName)
         }
-        flow.onEach { allImages ->
+        imagesJob = flow.onEach { allImages ->
             _images.value = if (sortByUserRating || sortByAiScore)
                 allImages.filter { it.folderName == folderName }
             else
@@ -63,19 +75,22 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadImagesByTag(tagName: String) {
-        repository.getImagesByTag(tagName).onEach { imageList ->
+        imagesJob?.cancel()
+        imagesJob = repository.getImagesByTag(tagName).onEach { imageList ->
             _images.value = imageList
         }.launchIn(viewModelScope)
     }
 
     fun loadImagesByRating(min: Float, max: Float) {
-        repository.getImagesByRating(min, max).onEach { imageList ->
+        imagesJob?.cancel()
+        imagesJob = repository.getImagesByRating(min, max).onEach { imageList ->
             _images.value = imageList
         }.launchIn(viewModelScope)
     }
 
     fun sortByAiScoreDesc() {
-        repository.getImagesSortedByAiScoreDesc().onEach { imageList ->
+        imagesJob?.cancel()
+        imagesJob = repository.getImagesSortedByAiScoreDesc().onEach { imageList ->
             _images.value = imageList
         }.launchIn(viewModelScope)
     }

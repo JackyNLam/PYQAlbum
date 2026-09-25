@@ -56,6 +56,12 @@ interface ImageDao {
     @Query("UPDATE images SET aiScore = :score WHERE uri = :uri")
     suspend fun updateAiScore(uri: String, score: Float)
 
+    @Query("SELECT uri, rating FROM images")
+    suspend fun getAllUriRatings(): List<UriRating>
+
+    @Query("SELECT uri, aiScore FROM images")
+    suspend fun getAllUriAiScores(): List<UriAiScore>
+
     @Query("DELETE FROM images")
     suspend fun deleteAll()
 

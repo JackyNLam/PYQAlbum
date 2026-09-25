@@ -15,3 +15,13 @@ data class ImageEntity(
     val folderName: String,
     val aiScore: Float? = null              // AI score (1-100), optional
 )
+
+data class UriRating(
+    val uri: String,
+    val rating: Float
+)
+
+data class UriAiScore(
+    val uri: String,
+    val aiScore: Float?
+)

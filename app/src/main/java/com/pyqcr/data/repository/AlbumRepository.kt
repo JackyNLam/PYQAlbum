@@ -79,7 +79,16 @@ class AlbumRepository(
     }
 
     suspend fun refreshImagesFromMediaStore() = withContext(ioDispatcher) {
-        val images = loadImagesFromMediaStore()
+        // Preserve existing ratings and AI scores so they aren't wiped by re-insert
+        val existingRatings = imageDao.getAllUriRatings().associate { it.uri to it.rating }
+        val existingAiScores = imageDao.getAllUriAiScores().associate { it.uri to it.aiScore }
+
+        val images = loadImagesFromMediaStore().map { entity ->
+            entity.copy(
+                rating = existingRatings[entity.uri] ?: entity.rating,
+                aiScore = existingAiScores[entity.uri] ?: entity.aiScore
+            )
+        }
         imageDao.deleteAll()
         imageDao.insertImages(images)
     }
