@@ -68,6 +68,7 @@ fun ImageDetailScreen(
 
     var imageItem by remember { mutableStateOf<ImageItem?>(null) }
     var tags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+    var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var rating by remember { mutableFloatStateOf(0f) }
     var newTagName by remember { mutableStateOf("") }
     var showAddTag by remember { mutableStateOf(false) }
@@ -102,6 +103,12 @@ fun ImageDetailScreen(
     LaunchedEffect(imageUri) {
         tagDao.getTagsForImage(imageUri).collect { tagList ->
             tags = tagList
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        tagDao.getAllTags().collect { tagList ->
+            allTags = tagList
         }
     }
 
@@ -326,7 +333,7 @@ fun ImageDetailScreen(
                         )
                     }
 
-                    // Add tag
+                    // Add tag — pick from existing or create new
                     if (!showAddTag) {
                         OutlinedButton(
                             onClick = { showAddTag = true },
@@ -341,58 +348,111 @@ fun ImageDetailScreen(
                             Text("Add Tag")
                         }
                     } else {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(top = 8.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = newTagName,
-                                onValueChange = { newTagName = it },
-                                label = { Text("Tag name") },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Button(
-                                onClick = {
-                                    if (newTagName.isNotBlank()) {
-                                        coroutineScope.launch {
-                                            var tag = tagDao.getTagByName(newTagName.trim())
-                                            val tagId = if (tag != null) {
-                                                tag.id
-                                            } else {
-                                                tagDao.insertTag(TagEntity(name = newTagName.trim()))
-                                            }
-                                            if (tagDao.hasTag(imageUri, tagId) == 0) {
-                                                tagDao.addTagToImage(
-                                                    ImageTagCrossRef(imageUri = imageUri, tagId = tagId)
+                        Column(modifier = Modifier.padding(top = 8.dp)) {
+                            // Existing tags not already applied to this image
+                            val existingTagNames = tags.map { it.name }.toSet()
+                            val availableTags = allTags.filter { it.name !in existingTagNames }
+
+                            if (availableTags.isNotEmpty()) {
+                                Text(
+                                    text = "Select existing tag:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                // Show available tags in a wrap layout built with FlowRow-like Row
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    availableTags.chunked(3).forEach { row ->
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            row.forEach { tag ->
+                                                SuggestionChip(
+                                                    onClick = {
+                                                        coroutineScope.launch {
+                                                            if (tagDao.hasTag(imageUri, tag.id) == 0) {
+                                                                tagDao.addTagToImage(
+                                                                    ImageTagCrossRef(imageUri = imageUri, tagId = tag.id)
+                                                                )
+                                                            }
+                                                            showAddTag = false
+                                                        }
+                                                    },
+                                                    label = { Text(tag.name, style = MaterialTheme.typography.bodySmall) }
                                                 )
                                             }
-                                            newTagName = ""
-                                            showAddTag = false
                                         }
                                     }
                                 }
+                            }
+
+                            Spacer(Modifier.height(8.dp))
+
+                            // Create new tag input
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Add")
+                                OutlinedTextField(
+                                    value = newTagName,
+                                    onValueChange = { newTagName = it },
+                                    label = { Text("Create new tag") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Button(
+                                    onClick = {
+                                        if (newTagName.isNotBlank()) {
+                                            coroutineScope.launch {
+                                                val tag = tagDao.getTagByName(newTagName.trim())
+                                                val tagId = if (tag != null) {
+                                                    tag.id
+                                                } else {
+                                                    tagDao.insertTag(TagEntity(name = newTagName.trim()))
+                                                }
+                                                if (tagDao.hasTag(imageUri, tagId) == 0) {
+                                                    tagDao.addTagToImage(
+                                                        ImageTagCrossRef(imageUri = imageUri, tagId = tagId)
+                                                    )
+                                                }
+                                                newTagName = ""
+                                                showAddTag = false
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Text("Add")
+                                }
+                            }
+
+                            Spacer(Modifier.height(4.dp))
+                            TextButton(onClick = { showAddTag = false }) {
+                                Text("Cancel", color = MaterialTheme.colorScheme.error)
                             }
                         }
                     }
 
                     Spacer(Modifier.height(12.dp))
 
-                    // ====== AI Select ======
-                    OutlinedButton(
+                    // ====== AI Ranking toggle ======
+                    var isSelectedForAi by remember { mutableStateOf(imageUri in getSelectedAiUris(context)) }
+
+                    Button(
                         onClick = {
                             val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
                             val current = prefs.getStringSet("ai_selected_uris", emptySet())?.toMutableSet() ?: mutableSetOf()
                             if (imageUri in current) {
                                 current.remove(imageUri)
+                                isSelectedForAi = false
                             } else {
                                 current.add(imageUri)
+                                isSelectedForAi = true
                             }
                             prefs.edit().putStringSet("ai_selected_uris", current).apply()
-                        }
+                        },
+                        colors = if (isSelectedForAi)
+                            ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        else
+                            ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(
                             Icons.Default.AutoAwesome,
@@ -400,8 +460,21 @@ fun ImageDetailScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(Modifier.width(4.dp))
-                        Text("Toggle AI Selection")
+                        Text(
+                            if (isSelectedForAi) "✓ AI Ranking" else "AI Ranking",
+                            color = if (isSelectedForAi) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
+                        )
                     }
+                }
+            }
+        }
+    }
+}
+
+private fun getSelectedAiUris(context: Context): Set<String> {
+    val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
+    return prefs.getStringSet("ai_selected_uris", emptySet()) ?: emptySet()
+}
                 }
             }
         }
