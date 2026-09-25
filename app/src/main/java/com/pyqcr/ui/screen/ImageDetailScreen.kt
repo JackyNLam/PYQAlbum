@@ -475,8 +475,3 @@ private fun getSelectedAiUris(context: Context): Set<String> {
     val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
     return prefs.getStringSet("ai_selected_uris", emptySet()) ?: emptySet()
 }
-                }
-            }
-        }
-    }
-}
