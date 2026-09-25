@@ -23,13 +23,13 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   2. Or tap drawer ✨ AI Rating to go directly to AI Rating view
   3. The AI Rating screen shows all selected images in a **square grid** (no separate list view)
   4. **Save Config** button persists API Key + Model name
-  5. **Submit to AI Rating** button runs the scoring with real-time progress feedback
+  5. **Submit to AI Rating** button runs the scoring with real-time progress feedback and a full debug log
   6. Selection persists across app launches (SharedPreferences)
 - **Multi-select mode**: long-press enters multi-select; bottom bar has batch Tag / Rate / Remove Tags / AI Select
 - **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** rating, tags, and AI selection panel; **swipe left/right** to navigate to next/previous image in the same folder/tag
 - **AI-selected images** are marked with an ✨ AutoAwesome icon badge in all grid layouts (Grid, Waterfall, Justified) and TAG grid view
 - **User ratings** are shown as gold-on-black score badges on thumbnails
-- **Tag assignment** shows existing tags as selectable options before allowing custom tag creation
+- **Tag assignment** shows ALL existing tags (from any image) as selectable options before allowing custom tag creation — both from long-press dialog and batch tag mode
 - **Ratings persist** across app restarts — MediaStore refresh preserves existing ratings and AI scores
 
 ---
@@ -175,6 +175,14 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - Saving status (`Saving 10 scores to database...`)
   - Final completion message with count
   - The button text displays the current status during operation
+- **Detailed Debug Log** panel — dark terminal-style card that records every step:
+  - Timestamped entries (`[14:23:45] Resizing [3/10]: IMG_123.jpg`)
+  - Per-image resize success/failure with file size
+  - API endpoint called and batch progress
+  - Each AI result (name, score, reason)
+  - DB save status per image
+  - All errors/warnings clearly marked
+  - "Clear Debug Log" button to reset
 - **Progress bar** with percentage indicator
 - Results section: sorted by score descending, shows score + AI reasoning
 - "Clear All" action in top bar to reset selection

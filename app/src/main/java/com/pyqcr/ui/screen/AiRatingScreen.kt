@@ -38,6 +38,10 @@ import com.pyqcr.ui.component.ImageThumbnail
 import kotlinx.coroutines.launch
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * AI Rating screen: configure API Key/Model, select images, run AI rating.
@@ -73,6 +77,7 @@ fun AiRatingScreen(
     var totalCount by remember { mutableIntStateOf(0) }
     var results by remember { mutableStateOf<List<AiRatingResult>>(emptyList()) }
     var currentStatus by remember { mutableStateOf("") }
+    var debugLog by remember { mutableStateOf<List<String>>(emptyList()) }
 
     LaunchedEffect(Unit) {
         repository.getAllImages().collect { images ->
@@ -318,9 +323,19 @@ fun AiRatingScreen(
                         scope.launch {
                             isRunning = true
                             results = emptyList()
+                            debugLog = emptyList()
                             currentStatus = "Resizing images..."
                             progress = 0
                             totalCount = selectedImages.size
+
+                            fun log(msg: String) {
+                                val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                                debugLog = debugLog + "[$ts] $msg"
+                            }
+
+                            log("=== AI Rating Session Started ===")
+                            log("Model: $modelName")
+                            log("Selected ${selectedImages.size} images")
 
                             val resizer = ImageResizer(context)
                             val service = AiRatingService()
@@ -328,26 +343,40 @@ fun AiRatingScreen(
                             // Step 1: Save config
                             saveApiKeyToPrefs(context, apiKey)
                             saveModelNameToPrefs(context, modelName)
+                            log("API config saved")
 
                             // Step 2: Resize images
                             val totalSelected = selectedImages.size
-                            val resizedPaths = selectedImages.mapNotNull { uriString ->
-                                currentStatus = "Resizing (${progress + 1}/$totalSelected): ${uriString.substringAfterLast('/')}"
-                                resizer.resizeForAi(Uri.parse(uriString)).also {
-                                    progress++
+                            val resizedPaths = mutableListOf<String>()
+                            for ((idx, uriString) in selectedImages.withIndex()) {
+                                currentStatus = "Resizing (${idx + 1}/$totalSelected): ${uriString.substringAfterLast('/')}"
+                                log("Resizing [${idx + 1}/$totalSelected]: ${uriString.substringAfterLast('/')}")
+                                val resized = resizer.resizeForAi(Uri.parse(uriString))
+                                if (resized != null) {
+                                    resizedPaths.add(resized)
+                                    log("  -> OK: $resized (${File(resized).length()} bytes)")
+                                } else {
+                                    log("  -> FAILED: $uriString")
                                 }
+                                progress = idx + 1
                             }
 
                             if (resizedPaths.isEmpty()) {
                                 currentStatus = "❌ Failed to resize any images"
+                                log("❌ FAILED: No images could be resized")
                                 isRunning = false
                                 Toast.makeText(context, "Failed to resize any images. Check permissions.", Toast.LENGTH_LONG).show()
                                 return@launch
                             }
 
+                            log("Resize complete: ${resizedPaths.size}/$totalSelected resized OK")
+
                             // Step 3: Rate images
                             progress = 0
                             currentStatus = "Sending ${resizedPaths.size} images to AI for rating..."
+                            log("Sending ${resizedPaths.size} images to DashScope API...")
+                            log("API endpoint: https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions")
+
                             val ratingResults = service.rateImages(
                                 apiKey = apiKey,
                                 modelName = modelName,
@@ -358,14 +387,19 @@ fun AiRatingScreen(
                                     val batchNum = (current / 10) + 1
                                     val totalBatches = (total + 9) / 10
                                     currentStatus = "AI Rating in progress — batch $batchNum/$totalBatches ($current/$total images processed)"
+                                    log("Progress: batch $batchNum/$totalBatches ($current/$total)")
                                 }
                             )
+
+                            log("AI returned ${ratingResults.size} results")
 
                             // Step 4: Save results to DB
                             if (ratingResults.isNotEmpty()) {
                                 currentStatus = "Saving ${ratingResults.size} scores to database..."
+                                log("Saving results to database...")
                                 var savedCount = 0
-                                for (result in ratingResults) {
+                                for ((idx, result) in ratingResults.withIndex()) {
+                                    log("  Result #${idx + 1}: name=${result.imageName}, score=${result.score}, reason=${result.reason}")
                                     val origUri = allImages.find { img ->
                                         result.imageName == img.displayName ||
                                                 resizedPaths.indexOfFirst { it.endsWith(result.imageName) } >= 0
@@ -373,13 +407,18 @@ fun AiRatingScreen(
                                     if (origUri != null) {
                                         repository.updateAiScore(origUri, result.score)
                                         savedCount++
+                                        log("  -> Saved to DB: $origUri")
+                                    } else {
+                                        log("  -> WARN: Could not find original image for ${result.imageName}")
                                     }
                                 }
                                 results = ratingResults
                                 resizer.clearCache()
-                                currentStatus = "✅ Completed! ${ratingResults.size} images rated, $savedCount scores saved to database."
+                                currentStatus = "✅ Completed! ${ratingResults.size} images rated, $savedCount scores saved."
+                                log("✅ DONE: $savedCount scores saved")
                             } else {
                                 currentStatus = "❌ AI returned no results. Check your API key and try again."
+                                log("❌ AI returned 0 results — API key or network issue?")
                             }
                             isRunning = false
 
@@ -434,6 +473,36 @@ fun AiRatingScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+            }
+
+            // ======== Debug Log section (always visible during/after run) ========
+            if (debugLog.isNotEmpty()) {
+                item {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    TextButton(onClick = { debugLog = emptyList() }) {
+                        Text("Clear Debug Log", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF1E1E2E)
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            debugLog.forEach { line ->
+                                Text(
+                                    text = line,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFCDD6F4),    // light text on dark bg
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    fontSize = MaterialTheme.typography.labelSmall.fontSize
+                                )
+                            }
+                        }
                     }
                 }
             }
