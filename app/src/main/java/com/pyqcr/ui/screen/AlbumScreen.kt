@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -49,7 +50,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun AlbumScreen(
-    onImageClick: (String) -> Unit,
+    onImageClick: (String, imageList: List<String>) -> Unit,
     onNavigateToAiSelection: () -> Unit,
     viewModel: AlbumViewModel = viewModel()
 ) {
@@ -68,8 +69,8 @@ fun AlbumScreen(
 
     var selectedBrowseMode by remember { mutableStateOf(BrowseMode.FOLDER) }
     var selectedViewLayout by remember { mutableStateOf(ViewLayout.GRID) }
-    var selectedFolder by remember { mutableStateOf<String?>(null) }
-    var selectedTag by remember { mutableStateOf<TagEntity?>(null) }
+    var selectedFolder by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedTag by rememberSaveable { mutableStateOf<TagEntity?>(null) }
 
     // Multi-select state
     var isMultiSelectMode by remember { mutableStateOf(false) }
@@ -230,27 +231,8 @@ fun AlbumScreen(
                     }
                 )
 
-                DrawerItem(
-                    icon = Icons.Default.Star,
-                    label = "Rating",
-                    selected = selectedBrowseMode == BrowseMode.FOLDER && folderSortMode == FolderSortMode.USER_RATING_DESC,
-                    onClick = {
-                        if (selectedFolder == null) {
-                            // If no folder selected, pick first folder and sort by rating
-                            if (folders.isNotEmpty()) {
-                                selectedFolder = folders.first()
-                                viewModel.loadImagesByFolderSorted(
-                                    folders.first(),
-                                    sortByUserRating = true,
-                                    sortByAiScore = false
-                                )
-                            }
-                        } else {
-                            folderSortMode = FolderSortMode.USER_RATING_DESC
-                        }
-                        scope.launch { drawerState.close() }
-                    }
-                )
+                // Rating tab removed — sorting by rating is now done via the Sort button
+                // inside a folder's image grid view.
 
                 Spacer(Modifier.weight(1f))
 
@@ -508,7 +490,7 @@ fun AlbumScreen(
                                                 else
                                                     selectedImageUris + uri
                                             } else {
-                                                onImageClick(uri)
+                                                onImageClick(uri, images.map { it.uri })
                                             }
                                         },
                                         onLongPress = { uri ->
@@ -588,12 +570,13 @@ fun AlbumScreen(
                                             .fillMaxSize()
                                             .background(Color.Black)
                                     ) {
+                                        val tagImageUris = remember(tagImages) { tagImages.map { it.uri } }
                                         items(tagImages, key = { it.uri }) { image ->
                                             Box(
                                                 modifier = Modifier
                                                     .aspectRatio(1f)
                                                     .combinedClickable(
-                                                        onClick = { onImageClick(image.uri) },
+                                                        onClick = { onImageClick(image.uri, tagImageUris) },
                                                         onLongClick = {
                                                             longPressedImageUri = image.uri
                                                             showActionDialog = true
@@ -877,14 +860,16 @@ private fun PermissionRequestScreen(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
+@Composable
 private fun ImageGridView(
     images: List<ImageItem>,
     viewLayout: ViewLayout,
     isMultiSelectMode: Boolean,
     selectedImageUris: Set<String>,
-    onImageClick: (String) -> Unit,
+    onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit
 ) {
+    val imageUris = remember(images) { images.map { it.uri } }
     when (viewLayout) {
         ViewLayout.GRID -> {
             LazyVerticalGrid(
@@ -902,7 +887,7 @@ private fun ImageGridView(
                         modifier = Modifier
                             .aspectRatio(1f)
                             .combinedClickable(
-                                onClick = { onImageClick(image.uri) },
+                                onClick = { onImageClick(image.uri, imageUris) },
                                 onLongClick = { onLongPress(image.uri) }
                             )
                     ) {
@@ -938,23 +923,25 @@ private fun ImageGridView(
         }
 
         ViewLayout.WATERFALL -> {
+            val gridClick: (String) -> Unit = { uri -> onImageClick(uri, imageUris) }
             WaterfallGrid(
                 images = images,
                 columns = 3,
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
-                onImageClick = onImageClick,
+                onImageClick = gridClick,
                 onLongPress = onLongPress,
                 modifier = Modifier.fillMaxSize()
             )
         }
 
         ViewLayout.JUSTIFIED -> {
+            val justifiedClick: (String) -> Unit = { uri -> onImageClick(uri, imageUris) }
             JustifiedGrid(
                 images = images,
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
-                onImageClick = onImageClick,
+                onImageClick = justifiedClick,
                 onLongPress = onLongPress,
                 modifier = Modifier.fillMaxSize()
             )

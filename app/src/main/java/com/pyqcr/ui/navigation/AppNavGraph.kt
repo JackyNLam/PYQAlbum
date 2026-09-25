@@ -1,12 +1,15 @@
 package com.pyqcr.ui.navigation
 
 import android.net.Uri
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.pyqcr.data.model.ImageItem
 import com.pyqcr.ui.screen.*
 
 object Routes {
@@ -31,13 +34,35 @@ object Routes {
 fun AppNavGraph() {
     val navController = rememberNavController()
 
+    // Track current image list so ImageDetailScreen can navigate prev/next
+    var currentImages by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
+    var currentImageIndex by remember { mutableIntStateOf(-1) }
+
+    fun getNextImageUri(currentUri: String): String? {
+        val idx = currentImages.indexOf(currentUri)
+        if (idx >= 0 && idx + 1 < currentImages.size) {
+            return currentImages[idx + 1]
+        }
+        return null
+    }
+
+    fun getPreviousImageUri(currentUri: String): String? {
+        val idx = currentImages.indexOf(currentUri)
+        if (idx > 0) {
+            return currentImages[idx - 1]
+        }
+        return null
+    }
+
     NavHost(
         navController = navController,
         startDestination = Routes.ALBUM
     ) {
         composable(Routes.ALBUM) {
             AlbumScreen(
-                onImageClick = { imageUri ->
+                onImageClick = { imageUri, imageList ->
+                    currentImages = imageList
+                    currentImageIndex = imageList.indexOf(imageUri)
                     navController.navigate(Routes.imageDetail(imageUri))
                 },
                 onNavigateToAiSelection = {
@@ -69,9 +94,26 @@ fun AppNavGraph() {
             )
         ) { backStackEntry ->
             val imageUriRaw = backStackEntry.arguments?.getString("imageUri") ?: return@composable
+            val imageUri = Uri.decode(imageUriRaw)
             ImageDetailScreen(
                 imageUriRaw = imageUriRaw,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onNextImage = {
+                    getNextImageUri(imageUri)?.let { nextUri ->
+                        navController.navigate(Routes.imageDetail(nextUri)) {
+                            popUpTo(Routes.ALBUM) { inclusive = false }
+                            launchSingleTop = true
+                        }
+                    }
+                },
+                onPreviousImage = {
+                    getPreviousImageUri(imageUri)?.let { prevUri ->
+                        navController.navigate(Routes.imageDetail(prevUri)) {
+                            popUpTo(Routes.ALBUM) { inclusive = false }
+                            launchSingleTop = true
+                        }
+                    }
+                }
             )
         }
 

@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
@@ -50,7 +51,9 @@ import kotlinx.coroutines.launch
 @Composable
 fun ImageDetailScreen(
     imageUriRaw: String,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onNextImage: () -> Unit = {},
+    onPreviousImage: () -> Unit = {}
 ) {
     // URL-decode the URI — Navigation Compose encodes it to avoid path-segment issues
     val imageUri = Uri.decode(imageUriRaw)
@@ -72,8 +75,10 @@ fun ImageDetailScreen(
     var showDetailPanel by remember { mutableStateOf(false) } // Swipe-up panel
     val coroutineScope = rememberCoroutineScope()
 
-    // Used to detect vertical drag distance for swipe gestures
-    var dragAccumulator by remember { mutableFloatStateOf(0f) }
+    // Used to detect gesture directions with thresholds
+    val swipeThreshold = with(LocalDensity.current) { 60.dp.toPx() }
+    var dragVerticalAccum by remember { mutableFloatStateOf(0f) }
+    var dragHorizontalAccum by remember { mutableFloatStateOf(0f) }
 
     LaunchedEffect(imageUri) {
         val entity = imageDao.getImageByUri(imageUri)
@@ -100,7 +105,8 @@ fun ImageDetailScreen(
     }
 
     // Toggle between "show image only" and "show image + detail panel"
-    val displayModeThreshold = 100f // pixels of drag to toggle
+    // Toggle between "show image only" and "show image + detail panel"
+    // (threshold replaced by swipeThreshold)
 
     Scaffold(
         topBar = {
@@ -140,21 +146,37 @@ fun ImageDetailScreen(
                     .background(Color.Black)
                     .clipToBounds()
                     .pointerInput(Unit) {
+                        // Detect vertical swipes (down → go back, up → show panel)
                         detectVerticalDragGestures(
                             onDragEnd = {
-                                if (dragAccumulator > displayModeThreshold) {
-                                    // swipe down → go back
+                                if (dragVerticalAccum > swipeThreshold) {
                                     onBack()
-                                } else if (dragAccumulator < -displayModeThreshold) {
-                                    // swipe up → show detail panel
+                                } else if (dragVerticalAccum < -swipeThreshold) {
                                     showDetailPanel = true
                                     showControls = false
                                 }
-                                dragAccumulator = 0f
+                                dragVerticalAccum = 0f
                             },
                             onVerticalDrag = { change, dragAmount ->
                                 change.consume()
-                                dragAccumulator += dragAmount
+                                dragVerticalAccum += dragAmount
+                            }
+                        )
+                    }
+                    .pointerInput(Unit) {
+                        // Detect horizontal swipes (left → next, right → previous)
+                        detectHorizontalDragGestures(
+                            onDragEnd = {
+                                if (dragHorizontalAccum < -swipeThreshold) {
+                                    onNextImage()
+                                } else if (dragHorizontalAccum > swipeThreshold) {
+                                    onPreviousImage()
+                                }
+                                dragHorizontalAccum = 0f
+                            },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                dragHorizontalAccum += dragAmount
                             }
                         )
                     },
@@ -189,16 +211,16 @@ fun ImageDetailScreen(
                             .pointerInput(Unit) {
                                 detectVerticalDragGestures(
                                     onDragEnd = {
-                                        if (dragAccumulator > displayModeThreshold) {
+                                        if (dragVerticalAccum > swipeThreshold) {
                                             // swipe down on panel → hide panel
                                             showDetailPanel = false
                                             showControls = true
                                         }
-                                        dragAccumulator = 0f
+                                        dragVerticalAccum = 0f
                                     },
                                     onVerticalDrag = { change, dragAmount ->
                                         change.consume()
-                                        dragAccumulator += dragAmount
+                                        dragVerticalAccum += dragAmount
                                     }
                                 )
                             },
