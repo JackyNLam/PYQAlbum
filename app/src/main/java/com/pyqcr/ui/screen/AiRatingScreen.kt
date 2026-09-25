@@ -328,10 +328,10 @@ fun AiRatingScreen(
                             progress = 0
                             totalCount = selectedImages.size
 
-                            fun log(msg: String) {
+                            suspend fun log(msg: String) {
                                 val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                                 val entry = "[$ts] $msg"
-                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                withContext(kotlinx.coroutines.Dispatchers.Main) {
                                     debugLog = debugLog + entry
                                 }
                             }
