@@ -330,7 +330,10 @@ fun AiRatingScreen(
 
                             fun log(msg: String) {
                                 val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-                                debugLog = debugLog + "[$ts] $msg"
+                                val entry = "[$ts] $msg"
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    debugLog = debugLog + entry
+                                }
                             }
 
                             log("=== AI Rating Session Started ===")

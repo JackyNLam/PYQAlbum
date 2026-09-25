@@ -109,50 +109,86 @@ class AiRatingService {
             while (!batchDone && retryCount < maxRetries) {
                 retryCount++
                 try {
-                    onDebug("Sending batch $batchNum/$totalBatches (${batch.size} images, attempt $retryCount/$maxRetries)...")
+                    onDebug("▶️ Sending batch $batchNum/$totalBatches (${batch.size} images, attempt $retryCount/$maxRetries)...")
+                    val startTime = System.currentTimeMillis()
                     val response = client.newCall(request).execute()
+                    val elapsedMs = System.currentTimeMillis() - startTime
                     val responseCode = response.code
-                    val responseBody = response.body?.string() ?: "<empty body>"
+                    val responseHeaders = response.headers.toString()
 
-                    onDebug("HTTP $responseCode for batch $batchNum (attempt $retryCount/$maxRetries)")
-                    onDebug("Full response body (first 3000 chars): ${responseBody.take(3000)}")
+                    onDebug("✅ Response received in ${elapsedMs}ms — HTTP $responseCode")
+                    onDebug("Response headers: $responseHeaders")
+
+                    // Read body in a separate step to ensure we capture it even on error
+                    val rawBody = response.body?.string() ?: "<NULL BODY>"
+                    onDebug("RAW BODY (${rawBody.length} chars):")
+                    // Print the full body — chunked to avoid overwhelming the log
+                    if (rawBody.length > 4000) {
+                        onDebug(rawBody.take(4000) + "\n... [${rawBody.length - 4000} more chars truncated]")
+                    } else {
+                        onDebug(rawBody)
+                    }
 
                     if (!response.isSuccessful) {
-                        onDebug("❌ HTTP $responseCode — batch $batchNum will be retried (attempt $retryCount/$maxRetries)")
+                        onDebug("❌ HTTP $responseCode is not success — retrying (attempt $retryCount/$maxRetries)")
                         if (retryCount >= maxRetries) {
                             onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
                         }
                         continue
                     }
 
-                    val jsonResponse = JsonParser.parseString(responseBody).asJsonObject
+                    val jsonResponse = try {
+                        JsonParser.parseString(rawBody).asJsonObject
+                    } catch (e: Exception) {
+                        onDebug("❌ Failed to parse JSON response: ${e.message}")
+                        onDebug("Body starts with: ${rawBody.take(200)}")
+                        if (retryCount >= maxRetries) {
+                            onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
+                        }
+                        continue
+                    }
+
                     val choices = jsonResponse.getAsJsonArray("choices")
                     if (choices == null || choices.size() == 0) {
-                        onDebug("❌ No 'choices' in response — retrying batch $batchNum (attempt $retryCount/$maxRetries)")
+                        onDebug("❌ 'choices' is null or empty in response — retrying (attempt $retryCount/$maxRetries)")
                         if (retryCount >= maxRetries) {
                             onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
                         }
                         continue
                     }
 
-                    val messageContent = choices[0].asJsonObject
-                        .getAsJsonObject("message")
-                        .get("content")
-                        .asString
+                    val messageObj = choices[0].asJsonObject.getAsJsonObject("message")
+                    if (messageObj == null) {
+                        onDebug("❌ No 'message' object in choices[0] — retrying (attempt $retryCount/$maxRetries)")
+                        if (retryCount >= maxRetries) {
+                            onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
+                        }
+                        continue
+                    }
 
-                    onDebug("Raw message content (first 800 chars): ${messageContent.take(800)}")
+                    val messageContent = messageObj.get("content")?.asString ?: ""
+                    onDebug("Content from AI (first 800 chars): ${messageContent.take(800)}")
 
                     // Extract JSON array from response (handles potential text wrapping)
                     val jsonArrayMatch = Regex("""\[[\s\S]*\]""").find(messageContent)
                     if (jsonArrayMatch == null) {
-                        onDebug("❌ Could not extract JSON array from content — retrying batch $batchNum (attempt $retryCount/$maxRetries)")
+                        onDebug("❌ Could not find JSON array in content — retrying (attempt $retryCount/$maxRetries)")
                         if (retryCount >= maxRetries) {
                             onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
                         }
                         continue
                     }
 
-                    val scoresArray = JsonParser.parseString(jsonArrayMatch.value).asJsonArray
+                    val scoresArray = try {
+                        JsonParser.parseString(jsonArrayMatch.value).asJsonArray
+                    } catch (e: Exception) {
+                        onDebug("❌ Failed to parse extracted JSON array: ${e.message}")
+                        onDebug("Extracted text: ${jsonArrayMatch.value.take(300)}")
+                        if (retryCount >= maxRetries) {
+                            onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
+                        }
+                        continue
+                    }
 
                     var batchSucceeded = 0
                     for ((idx, item) in scoresArray.withIndex()) {
@@ -184,10 +220,11 @@ class AiRatingService {
                     succeededCount += batchSucceeded
                     onProgress(succeededCount, resizedImagePaths.size)
                     batchDone = true
+                    onDebug("✅ Batch $batchNum completed — $batchSucceeded images scored successfully")
 
                 } catch (e: Exception) {
-                    onDebug("❌ Exception for batch $batchNum (attempt $retryCount/$maxRetries): ${e::class.simpleName}: ${e.message}")
-                    onDebug("Stack trace: ${e.stackTraceToString().take(500)}")
+                    onDebug("❌ EXCEPTION for batch $batchNum (attempt $retryCount/$maxRetries): ${e::class.simpleName}: ${e.message}")
+                    onDebug("Stack trace: ${e.stackTraceToString().take(1000)}")
                     e.printStackTrace()
                     if (retryCount >= maxRetries) {
                         onDebug("❌ Gave up on batch $batchNum after $maxRetries retries — last error: ${e.message}")
