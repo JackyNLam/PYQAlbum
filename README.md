@@ -179,9 +179,12 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - Timestamped entries (`[14:23:45] Resizing [3/10]: IMG_123.jpg`)
   - Per-image resize success/failure with file size
   - API endpoint called and batch progress (fixed: shows correct pass count instead of overflowing)
+  - Full HTTP response body (status code + raw JSON, up to 3000 chars) — so you see actual API errors
   - Each AI result (name, score, reason)
   - DB save status per image
-  - All errors/warnings clearly marked
+  - All exceptions with stack traces (timeout, connection errors, etc.)
+  - Retry tracking (up to 3 attempts per batch)
+  - All errors/warnings clearly marked with ❌ or ⚠️
   - "Clear Debug Log" button to reset
 - **Progress bar** with percentage indicator
 - Results section: sorted by score descending, shows score + AI reasoning

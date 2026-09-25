@@ -21,9 +21,9 @@ import java.util.concurrent.TimeUnit
 class AiRatingService {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(300, TimeUnit.SECONDS)
+        .writeTimeout(120, TimeUnit.SECONDS)
         .build()
 
     private val gson = Gson()
@@ -35,12 +35,14 @@ class AiRatingService {
      * @param modelName The model name (e.g. qwen-vl-plus)
      * @param resizedImagePaths Paths to already-resized images (max 800px)
      * @param onProgress Callback with (current, total) progress
+     * @param onDebug Callback for debug log messages (full HTTP response, errors, etc.)
      */
     suspend fun rateImages(
         apiKey: String,
         modelName: String,
         resizedImagePaths: List<String>,
-        onProgress: (Int, Int) -> Unit = { _, _ -> }
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+        onDebug: (String) -> Unit = {}
     ): List<AiRatingResult> = withContext(Dispatchers.IO) {
         val batchSize = 10
         val allResults = mutableListOf<AiRatingResult>()
@@ -100,67 +102,103 @@ class AiRatingService {
                 .post(jsonBody.toRequestBody(jsonMediaType))
                 .build()
 
-            try {
-                val response = client.newCall(request).execute()
-                if (!response.isSuccessful) {
-                    // Put back to pending for retry
-                    pendingPaths.addAll(batch)
-                    continue
-                }
+            val maxRetries = 3
+            var retryCount = 0
+            var batchDone = false
 
-                val responseBody = response.body?.string() ?: continue
-                val jsonResponse = JsonParser.parseString(responseBody).asJsonObject
-                val choices = jsonResponse.getAsJsonArray("choices")
-                if (choices == null || choices.size() == 0) {
-                    pendingPaths.addAll(batch)
-                    continue
-                }
+            while (!batchDone && retryCount < maxRetries) {
+                retryCount++
+                try {
+                    onDebug("Sending batch $batchNum/$totalBatches (${batch.size} images, attempt $retryCount/$maxRetries)...")
+                    val response = client.newCall(request).execute()
+                    val responseCode = response.code
+                    val responseBody = response.body?.string() ?: "<empty body>"
 
-                val messageContent = choices[0].asJsonObject
-                    .getAsJsonObject("message")
-                    .get("content")
-                    .asString
+                    onDebug("HTTP $responseCode for batch $batchNum (attempt $retryCount/$maxRetries)")
+                    onDebug("Full response body (first 3000 chars): ${responseBody.take(3000)}")
 
-                // Extract JSON array from response (handles potential text wrapping)
-                val jsonArrayMatch = Regex("""\[[\s\S]*\]""").find(messageContent)
-                if (jsonArrayMatch == null) {
-                    pendingPaths.addAll(batch)
-                    continue
-                }
-
-                val scoresArray = JsonParser.parseString(jsonArrayMatch.value).asJsonArray
-
-                var batchSucceeded = 0
-                for ((idx, item) in scoresArray.withIndex()) {
-                    if (idx < batch.size) {
-                        val obj = item.asJsonObject
-                        val score = obj.get("score")?.asFloat ?: 0f
-                        val reason = obj.get("reason")?.asString ?: "N/A"
-                        val originalPath = batch[idx]
-
-                        allResults.add(
-                            AiRatingResult(
-                                score = score,
-                                reason = reason,
-                                imageUri = originalPath,
-                                imageName = File(originalPath).name
-                            )
-                        )
-                        batchSucceeded++
+                    if (!response.isSuccessful) {
+                        onDebug("❌ HTTP $responseCode — batch $batchNum will be retried (attempt $retryCount/$maxRetries)")
+                        if (retryCount >= maxRetries) {
+                            onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
+                        }
+                        continue
                     }
+
+                    val jsonResponse = JsonParser.parseString(responseBody).asJsonObject
+                    val choices = jsonResponse.getAsJsonArray("choices")
+                    if (choices == null || choices.size() == 0) {
+                        onDebug("❌ No 'choices' in response — retrying batch $batchNum (attempt $retryCount/$maxRetries)")
+                        if (retryCount >= maxRetries) {
+                            onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
+                        }
+                        continue
+                    }
+
+                    val messageContent = choices[0].asJsonObject
+                        .getAsJsonObject("message")
+                        .get("content")
+                        .asString
+
+                    onDebug("Raw message content (first 800 chars): ${messageContent.take(800)}")
+
+                    // Extract JSON array from response (handles potential text wrapping)
+                    val jsonArrayMatch = Regex("""\[[\s\S]*\]""").find(messageContent)
+                    if (jsonArrayMatch == null) {
+                        onDebug("❌ Could not extract JSON array from content — retrying batch $batchNum (attempt $retryCount/$maxRetries)")
+                        if (retryCount >= maxRetries) {
+                            onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
+                        }
+                        continue
+                    }
+
+                    val scoresArray = JsonParser.parseString(jsonArrayMatch.value).asJsonArray
+
+                    var batchSucceeded = 0
+                    for ((idx, item) in scoresArray.withIndex()) {
+                        if (idx < batch.size) {
+                            val obj = item.asJsonObject
+                            val score = obj.get("score")?.asFloat ?: 0f
+                            val reason = obj.get("reason")?.asString ?: "N/A"
+                            val originalPath = batch[idx]
+
+                            allResults.add(
+                                AiRatingResult(
+                                    score = score,
+                                    reason = reason,
+                                    imageUri = originalPath,
+                                    imageName = File(originalPath).name
+                                )
+                            )
+                            batchSucceeded++
+                        }
+                    }
+
+                    // If AI returned fewer results than batch, retry the missing ones
+                    if (scoresArray.size() < batch.size) {
+                        val missingPaths = batch.subList(scoresArray.size(), batch.size)
+                        pendingPaths.addAll(missingPaths)
+                        onDebug("⚠️ Batch $batchNum: got ${scoresArray.size()}/${batch.size} results, missing ${missingPaths.size} will be retried separately")
+                    }
+
+                    succeededCount += batchSucceeded
+                    onProgress(succeededCount, resizedImagePaths.size)
+                    batchDone = true
+
+                } catch (e: Exception) {
+                    onDebug("❌ Exception for batch $batchNum (attempt $retryCount/$maxRetries): ${e::class.simpleName}: ${e.message}")
+                    onDebug("Stack trace: ${e.stackTraceToString().take(500)}")
+                    e.printStackTrace()
+                    if (retryCount >= maxRetries) {
+                        onDebug("❌ Gave up on batch $batchNum after $maxRetries retries — last error: ${e.message}")
+                    }
+                    break
                 }
+            }
 
-                // If AI returned fewer results than batch, retry the missing ones
-                if (scoresArray.size() < batch.size) {
-                    val missingPaths = batch.subList(scoresArray.size(), batch.size)
-                    pendingPaths.addAll(missingPaths)
-                }
-
-                succeededCount += batchSucceeded
-                onProgress(succeededCount, resizedImagePaths.size)
-
-            } catch (e: Exception) {
-                pendingPaths.addAll(batch)
+            // If batch wasn't completed successfully, log and skip it (don't put back to avoid infinite loop)
+            if (!batchDone) {
+                onDebug("⚠️ Batch $batchNum failed after $maxRetries attempts — SKIPPING ${batch.size} images")
             }
         }
 

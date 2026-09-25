@@ -388,7 +388,8 @@ fun AiRatingScreen(
                                     val totalPasses = (total + 9) / 10
                                     currentStatus = "AI Rating — $current/$total images rated ($passNum/$totalPasses passes)"
                                     log("Progress: $current/$total successes ($passNum/$totalPasses passes)")
-                                }
+                                },
+                                onDebug = { msg -> log(msg) }
                             )
 
                             log("AI returned ${ratingResults.size} results")
