@@ -347,15 +347,17 @@ fun AiRatingScreen(
                             saveModelNameToPrefs(context, modelName)
                             log("API config saved")
 
-                            // Step 2: Resize images
+                            // Step 2: Resize images and track original URI mapping
                             val totalSelected = selectedImages.size
                             val resizedPaths = mutableListOf<String>()
+                            val resizedToOriginalUri = mutableMapOf<String, String>() // resizedPath -> originalUri
                             for ((idx, uriString) in selectedImages.withIndex()) {
                                 currentStatus = "Resizing (${idx + 1}/$totalSelected): ${uriString.substringAfterLast('/')}"
                                 log("Resizing [${idx + 1}/$totalSelected]: ${uriString.substringAfterLast('/')}")
                                 val resized = resizer.resizeForAi(Uri.parse(uriString))
                                 if (resized != null) {
                                     resizedPaths.add(resized)
+                                    resizedToOriginalUri[resized] = uriString
                                     log("  -> OK: $resized (${File(resized).length()} bytes)")
                                 } else {
                                     log("  -> FAILED: $uriString")
@@ -396,24 +398,34 @@ fun AiRatingScreen(
 
                             log("AI returned ${ratingResults.size} results")
 
-                            // Step 4: Save results to DB
+                            // Step 4: Save results to DB — use the resized-to-original URI map for reliable matching
                             if (ratingResults.isNotEmpty()) {
                                 currentStatus = "Saving ${ratingResults.size} scores to database..."
                                 log("Saving results to database...")
                                 var savedCount = 0
                                 for ((idx, result) in ratingResults.withIndex()) {
                                     log("  Result #${idx + 1}: name=${result.imageName}, score=${result.score}, reason=${result.reason}")
-                                    val origUri = allImages.find { img ->
-                                        result.imageName == img.displayName ||
-                                                resizedPaths.indexOfFirst { it.endsWith(result.imageName) } >= 0
-                                    }?.uri
+
+                                    // Match by exact resized path -> original URI mapping
+                                    val origUri = resizedToOriginalUri[result.imageUri]
+                                        ?: resizedToOriginalUri.entries.firstOrNull { it.key.endsWith(result.imageName) }?.value
+                                        ?: allImages.find { img ->
+                                            result.imageName == img.displayName ||
+                                                    resizedPaths.indexOfFirst { it.endsWith(result.imageName) } >= 0
+                                        }?.uri
+
                                     if (origUri != null) {
-                                        repository.updateAiScore(origUri, result.score)
-                                        repository.updateAiReason(origUri, result.reason)
+                                        if (result.score > 0f) {
+                                            repository.updateAiScore(origUri, result.score)
+                                            log("  -> Saved score $result.score to $origUri")
+                                        }
+                                        if (result.reason.isNotBlank()) {
+                                            repository.updateAiReason(origUri, result.reason)
+                                            log("  -> Saved reason to $origUri")
+                                        }
                                         savedCount++
-                                        log("  -> Saved to DB: $origUri (score=${result.score}, reason=${result.reason})")
                                     } else {
-                                        log("  -> WARN: Could not find original image for ${result.imageName}")
+                                        log("  -> WARN: Could not find original URI for ${result.imageName}")
                                     }
                                 }
                                 results = ratingResults
