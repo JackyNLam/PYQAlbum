@@ -135,7 +135,6 @@ fun AlbumScreen(
     }
 
     // Load tags for Tag mode
-    var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     LaunchedEffect(selectedBrowseMode) {
         if (selectedBrowseMode == BrowseMode.TAG) {
             tagDao.getAllTags().collect { tagList ->
