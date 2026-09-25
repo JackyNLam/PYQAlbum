@@ -76,10 +76,13 @@ class AiRatingService {
             batch.forEach { path ->
                 val base64 = encodeImageToBase64(path)
                 if (base64 != null) {
-                    content.add(mapOf("image" to "data:image/jpeg;base64,$base64"))
+                    content.add(mapOf(
+                        "type" to "image_url",
+                        "image_url" to mapOf("url" to "data:image/jpeg;base64,$base64")
+                    ))
                 }
             }
-            content.add(mapOf("text" to prompt))
+            content.add(mapOf("type" to "text", "text" to prompt))
 
             val messages = listOf(
                 mapOf(
