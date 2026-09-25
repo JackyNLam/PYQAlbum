@@ -7,13 +7,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -21,20 +23,25 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.pyqcr.PyqCrApp
+import com.pyqcr.data.db.TagEntity
 import com.pyqcr.data.model.ImageItem
+import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.*
 import com.pyqcr.ui.viewmodel.AlbumViewModel
+import kotlinx.coroutines.launch
 
 /**
  * Main album screen.
  *
- * Browse modes: Folder / Tag / Rating (3 tabs at bottom)
+ * Browse modes: Folder / Tag / Rating (3 options in left drawer)
  * View layouts: Grid / Waterfall / Justified (toolbar toggles)
  *
  * Long-press any image → opens a dialog to assign rating, add tag,
@@ -50,14 +57,22 @@ fun AlbumScreen(
     viewModel: AlbumViewModel = viewModel()
 ) {
     val context = LocalContext.current
+    val app = context.applicationContext as PyqCrApp
+    val repository = remember { AlbumRepository(context, app.database) }
+    val tagDao = app.database.tagDao()
+
     val images by viewModel.images.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
 
+    // Drawer state
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+
     var selectedBrowseMode by remember { mutableStateOf(BrowseMode.FOLDER) }
     var selectedViewLayout by remember { mutableStateOf(ViewLayout.GRID) }
     var selectedFolder by remember { mutableStateOf<String?>(null) }
-    var selectedTag by remember { mutableStateOf<String?>(null) }
+    var selectedTag by remember { mutableStateOf<TagEntity?>(null) }
 
     // Multi-select state
     var isMultiSelectMode by remember { mutableStateOf(false) }
@@ -69,6 +84,15 @@ fun AlbumScreen(
     // Long-press dialog state
     var longPressedImageUri by remember { mutableStateOf<String?>(null) }
     var showActionDialog by remember { mutableStateOf(false) }
+
+    // Tag mode local state
+    var tags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+    var tagImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
+
+    // Rating mode local state
+    var ratingImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
+    var sortMode by remember { mutableStateOf(SortMode.USER_RATING_DESC) }
+    var showSortMenu by remember { mutableStateOf(false) }
 
     // Load AI selected URIs
     LaunchedEffect(Unit) {
@@ -113,6 +137,35 @@ fun AlbumScreen(
         return
     }
 
+    // Load tags for Tag mode
+    LaunchedEffect(selectedBrowseMode) {
+        if (selectedBrowseMode == BrowseMode.TAG) {
+            tagDao.getAllTags().collect { tagList ->
+                tags = tagList
+            }
+        }
+    }
+
+    // Load tag images when a tag is selected
+    LaunchedEffect(selectedTag) {
+        selectedTag?.let { tag ->
+            repository.getImagesByTag(tag.name).collect { imageList ->
+                tagImages = imageList
+            }
+        }
+    }
+
+    // Load rating images when sort mode changes
+    LaunchedEffect(sortMode) {
+        val flow = when (sortMode) {
+            SortMode.USER_RATING_DESC -> repository.getImagesSortedByUserRatingDesc()
+            SortMode.AI_SCORE_DESC -> repository.getImagesSortedByAiScoreDesc()
+        }
+        flow.collect { imageList ->
+            ratingImages = imageList
+        }
+    }
+
     // Long-press action dialog
     if (showActionDialog && longPressedImageUri != null) {
         val imageUri = longPressedImageUri!!
@@ -145,194 +198,469 @@ fun AlbumScreen(
         )
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("pyqAlbum") },
-                actions = {
-                    // View layout toggle buttons
-                    IconButton(onClick = { selectedViewLayout = ViewLayout.GRID }) {
-                        Icon(
-                            Icons.Default.GridView,
-                            contentDescription = "Grid",
-                            tint = if (selectedViewLayout == ViewLayout.GRID)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(onClick = { selectedViewLayout = ViewLayout.WATERFALL }) {
-                        Text(
-                            "🌊",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = if (selectedViewLayout == ViewLayout.WATERFALL)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(onClick = { selectedViewLayout = ViewLayout.JUSTIFIED }) {
-                        Text(
-                            "▭",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = if (selectedViewLayout == ViewLayout.JUSTIFIED)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    // AI Select screen button
-                    IconButton(onClick = { onNavigateToAiSelection() }) {
-                        Icon(Icons.Default.AutoAwesome, contentDescription = "AI Select")
-                    }
-                }
-            )
-        },
-        bottomBar = {
-            if (isMultiSelectMode) {
-                BatchMultiSelectBar(
-                    selectedCount = selectedImageUris.size,
-                    onCancel = {
-                        isMultiSelectMode = false
-                        selectedImageUris = emptySet()
-                    },
-                    onAddTag = {
-                        // Batch add tag — use ViewModel
-                        isMultiSelectMode = false
-                        selectedImageUris = emptySet()
-                    },
-                    onRate = {
-                        // Batch rate — use ViewModel
-                        isMultiSelectMode = false
-                        selectedImageUris = emptySet()
-                    },
-                    onRemoveTags = {
-                        isMultiSelectMode = false
-                        selectedImageUris = emptySet()
-                    },
-                    onSelectForAi = {
-                        // Add all selected to AI set
-                        val current = aiSelectedUris.toMutableSet()
-                        current.addAll(selectedImageUris)
-                        aiSelectedUris = current
-                        saveAiSelectedUris(context, current)
-                        isMultiSelectMode = false
-                        selectedImageUris = emptySet()
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(modifier = Modifier.width(280.dp)) {
+                Spacer(Modifier.height(16.dp))
+
+                Text(
+                    text = "pyqAlbum",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)
+                )
+
+                HorizontalDivider()
+
+                DrawerItem(
+                    icon = Icons.Default.Folder,
+                    label = "Folder",
+                    selected = selectedBrowseMode == BrowseMode.FOLDER,
+                    onClick = {
+                        selectedBrowseMode = BrowseMode.FOLDER
+                        selectedTag = null
+                        scope.launch { drawerState.close() }
                     }
                 )
-            } else {
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = selectedBrowseMode == BrowseMode.FOLDER,
-                        onClick = { selectedBrowseMode = BrowseMode.FOLDER },
-                        icon = { Icon(Icons.Default.Folder, contentDescription = "Folder") },
-                        label = { Text("Folder") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedBrowseMode == BrowseMode.TAG,
-                        onClick = { selectedBrowseMode = BrowseMode.TAG },
-                        icon = { Icon(Icons.Default.Label, contentDescription = "Tag") },
-                        label = { Text("Tag") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedBrowseMode == BrowseMode.RATING,
-                        onClick = { selectedBrowseMode = BrowseMode.RATING },
-                        icon = { Icon(Icons.Default.Star, contentDescription = "Rating") },
-                        label = { Text("Rating") }
+
+                DrawerItem(
+                    icon = Icons.Default.Label,
+                    label = "Tag",
+                    selected = selectedBrowseMode == BrowseMode.TAG,
+                    onClick = {
+                        selectedBrowseMode = BrowseMode.TAG
+                        selectedTag = null
+                        scope.launch { drawerState.close() }
+                    }
+                )
+
+                DrawerItem(
+                    icon = Icons.Default.Star,
+                    label = "Rating",
+                    selected = selectedBrowseMode == BrowseMode.RATING,
+                    onClick = {
+                        selectedBrowseMode = BrowseMode.RATING
+                        scope.launch { drawerState.close() }
+                    }
+                )
+
+                Spacer(Modifier.weight(1f))
+
+                HorizontalDivider()
+
+                DrawerItem(
+                    icon = Icons.Default.AutoAwesome,
+                    label = "AI Rating",
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onNavigateToAiSelection()
+                    }
+                )
+            }
+        }
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    navigationIcon = {
+                        IconButton(onClick = {
+                            scope.launch { drawerState.open() }
+                        }) {
+                            Icon(Icons.Default.Menu, contentDescription = "Menu")
+                        }
+                    },
+                    title = {
+                        when (selectedBrowseMode) {
+                            BrowseMode.FOLDER -> Text(
+                                if (selectedFolder != null) selectedFolder!! else "pyqAlbum"
+                            )
+                            BrowseMode.TAG -> Text(selectedTag?.name ?: "Tags")
+                            BrowseMode.RATING -> Text("Rating")
+                        }
+                    },
+                    actions = {
+                        // View layout toggle buttons (only for FOLDER mode)
+                        if (selectedBrowseMode == BrowseMode.FOLDER) {
+                            IconButton(onClick = { selectedViewLayout = ViewLayout.GRID }) {
+                                Icon(
+                                    Icons.Default.GridView,
+                                    contentDescription = "Grid",
+                                    tint = if (selectedViewLayout == ViewLayout.GRID)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(onClick = { selectedViewLayout = ViewLayout.WATERFALL }) {
+                                Text(
+                                    "🌊",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = if (selectedViewLayout == ViewLayout.WATERFALL)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(onClick = { selectedViewLayout = ViewLayout.JUSTIFIED }) {
+                                Text(
+                                    "▭",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = if (selectedViewLayout == ViewLayout.JUSTIFIED)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // Sort button for Rating mode
+                        if (selectedBrowseMode == BrowseMode.RATING) {
+                            Box {
+                                IconButton(onClick = { showSortMenu = true }) {
+                                    Icon(Icons.Default.Sort, contentDescription = "Sort")
+                                }
+                                DropdownMenu(
+                                    expanded = showSortMenu,
+                                    onDismissRequest = { showSortMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("User Rating ↓") },
+                                        onClick = {
+                                            sortMode = SortMode.USER_RATING_DESC
+                                            showSortMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("AI Score ↓") },
+                                        onClick = {
+                                            sortMode = SortMode.AI_SCORE_DESC
+                                            showSortMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                )
+            },
+            bottomBar = {
+                if (isMultiSelectMode) {
+                    BatchMultiSelectBar(
+                        selectedCount = selectedImageUris.size,
+                        onCancel = {
+                            isMultiSelectMode = false
+                            selectedImageUris = emptySet()
+                        },
+                        onAddTag = {
+                            // Batch add tag — use ViewModel
+                            isMultiSelectMode = false
+                            selectedImageUris = emptySet()
+                        },
+                        onRate = {
+                            // Batch rate — use ViewModel
+                            isMultiSelectMode = false
+                            selectedImageUris = emptySet()
+                        },
+                        onRemoveTags = {
+                            isMultiSelectMode = false
+                            selectedImageUris = emptySet()
+                        },
+                        onSelectForAi = {
+                            val current = aiSelectedUris.toMutableSet()
+                            current.addAll(selectedImageUris)
+                            aiSelectedUris = current
+                            saveAiSelectedUris(context, current)
+                            isMultiSelectMode = false
+                            selectedImageUris = emptySet()
+                        }
                     )
                 }
             }
-        }
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            when (selectedBrowseMode) {
-                BrowseMode.FOLDER -> {
-                    FolderSelector(
-                        folders = folders,
-                        selectedFolder = selectedFolder,
-                        onFolderSelected = { folder ->
-                            selectedFolder = folder
-                            viewModel.loadImagesByFolder(folder)
-                        },
-                        onAllSelected = {
-                            selectedFolder = null
-                            viewModel.refreshImages()
-                        }
-                    )
+        ) { paddingValues ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+            ) {
+                when (selectedBrowseMode) {
+                    BrowseMode.FOLDER -> {
+                        FolderSelector(
+                            folders = folders,
+                            selectedFolder = selectedFolder,
+                            onFolderSelected = { folder ->
+                                selectedFolder = folder
+                                viewModel.loadImagesByFolder(folder)
+                            },
+                            onAllSelected = {
+                                selectedFolder = null
+                                viewModel.refreshImages()
+                            }
+                        )
 
-                    if (isLoading) {
+                        if (isLoading) {
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator()
+                            }
+                        } else {
+                            ImageGridView(
+                                images = images,
+                                viewLayout = selectedViewLayout,
+                                isMultiSelectMode = isMultiSelectMode,
+                                selectedImageUris = selectedImageUris,
+                                onImageClick = { uri ->
+                                    if (isMultiSelectMode) {
+                                        selectedImageUris = if (uri in selectedImageUris)
+                                            selectedImageUris - uri
+                                        else
+                                            selectedImageUris + uri
+                                    } else {
+                                        onImageClick(uri)
+                                    }
+                                },
+                                onLongPress = { uri ->
+                                    if (isMultiSelectMode) {
+                                        selectedImageUris = if (uri in selectedImageUris)
+                                            selectedImageUris - uri
+                                        else
+                                            selectedImageUris + uri
+                                    } else {
+                                        longPressedImageUri = uri
+                                        showActionDialog = true
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    BrowseMode.TAG -> {
+                        if (selectedTag == null) {
+                            // Show tag list as a grid
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(3),
+                                contentPadding = PaddingValues(16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                items(tags) { tag ->
+                                    ElevatedCard(
+                                        onClick = { selectedTag = tag },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = tag.name,
+                                            modifier = Modifier.padding(16.dp),
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                // Back button row
+                                TextButton(
+                                    onClick = { selectedTag = null },
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.ArrowBack,
+                                        contentDescription = "Back",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("All Tags")
+                                }
+
+                                if (tagImages.isEmpty()) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "No images for this tag",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                } else {
+                                    LazyVerticalGrid(
+                                        columns = GridCells.Fixed(3),
+                                        contentPadding = PaddingValues(2.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color.Black)
+                                    ) {
+                                        items(tagImages, key = { it.uri }) { image ->
+                                            Box(
+                                                modifier = Modifier
+                                                    .aspectRatio(1f)
+                                                    .combinedClickable(
+                                                        onClick = { onImageClick(image.uri) },
+                                                        onLongClick = {
+                                                            longPressedImageUri = image.uri
+                                                            showActionDialog = true
+                                                        }
+                                                    )
+                                            ) {
+                                                ImageThumbnail(
+                                                    imageUri = image.uri,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                                                    backgroundColor = Color.Black
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    BrowseMode.RATING -> {
+                        if (ratingImages.isEmpty()) {
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = "No rated images yet",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = "Long-press an image to assign a rating",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                items(ratingImages, key = { it.uri }) { image ->
+                                    ElevatedCard(
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .combinedClickable(
+                                                    onClick = { onImageClick(image.uri) },
+                                                    onLongClick = {
+                                                        longPressedImageUri = image.uri
+                                                        showActionDialog = true
+                                                    }
+                                                )
+                                                .padding(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            ImageThumbnail(
+                                                imageUri = image.uri,
+                                                modifier = Modifier.size(72.dp)
+                                            )
+
+                                            Spacer(Modifier.width(12.dp))
+
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = image.displayName,
+                                                    fontWeight = FontWeight.Medium,
+                                                    style = MaterialTheme.typography.bodyMedium
+                                                )
+                                                Text(
+                                                    text = image.folderName,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                Spacer(Modifier.height(4.dp))
+
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("⭐ ", style = MaterialTheme.typography.bodySmall)
+                                                    RatingBar(
+                                                        rating = image.rating,
+                                                        starSize = 24.dp,
+                                                        modifier = Modifier.weight(1f)
+                                                    )
+                                                }
+
+                                                image.aiScore?.let { aiScore ->
+                                                    Text(
+                                                        text = "AI: ${String.format("%.1f", aiScore)}/100",
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                            }
+
+                                            if (image.rating > 0) {
+                                                Text(
+                                                    text = String.format("%.1f", image.rating),
+                                                    style = MaterialTheme.typography.titleLarge,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.padding(start = 8.dp)
+                                                )
+                                            }
+                                        }
+
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    BrowseMode.AI_SELECTED -> {
                         Box(
                             modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center
                         ) {
-                            CircularProgressIndicator()
+                            Text(
+                                text = "AI Selected view removed.\nUse toolbar ✨ to select images.",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                    } else {
-                        ImageGridView(
-                            images = images,
-                            viewLayout = selectedViewLayout,
-                            isMultiSelectMode = isMultiSelectMode,
-                            selectedImageUris = selectedImageUris,
-                            onImageClick = { uri ->
-                                if (isMultiSelectMode) {
-                                    selectedImageUris = if (uri in selectedImageUris)
-                                        selectedImageUris - uri
-                                    else
-                                        selectedImageUris + uri
-                                } else {
-                                    onImageClick(uri)
-                                }
-                            },
-                            onLongPress = { uri ->
-                                if (isMultiSelectMode) {
-                                    selectedImageUris = if (uri in selectedImageUris)
-                                        selectedImageUris - uri
-                                    else
-                                        selectedImageUris + uri
-                                } else {
-                                    longPressedImageUri = uri
-                                    showActionDialog = true
-                                }
-                            }
-                        )
-                    }
-                }
-
-                BrowseMode.TAG -> {
-                    Text(
-                        text = "Tag browsing will navigate to TagScreen",
-                        modifier = Modifier.padding(16.dp)
-                    )
-                }
-
-                BrowseMode.RATING -> {
-                    // Show images sorted by rating or AI score
-                    Text(
-                        text = "Rating browsing will navigate to RatingScreen",
-                        modifier = Modifier.padding(16.dp)
-                    )
-                }
-
-                BrowseMode.AI_SELECTED -> {
-                    // Removed from bottom nav — still accessible via AI Select screen
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "AI Selected view removed.\nUse toolbar ✨ to select images.",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                 }
             }
         }
     }
+}
+
+/**
+ * A single row item for the navigation drawer.
+ */
+@Composable
+private fun DrawerItem(
+    icon: ImageVector,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val contentColor = if (selected)
+        MaterialTheme.colorScheme.primary
+    else
+        MaterialTheme.colorScheme.onSurface
+
+    NavigationDrawerItem(
+        icon = { Icon(icon, contentDescription = label) },
+        label = { Text(label, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal) },
+        selected = selected,
+        onClick = onClick,
+        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+    )
 }
 
 /**
@@ -685,8 +1013,9 @@ private fun ImageGridView(
     }
 }
 
-enum class BrowseMode { FOLDER, TAG, RATING, AI_SELECTED }
-enum class ViewLayout { GRID, WATERFALL, JUSTIFIED }
+private enum class BrowseMode { FOLDER, TAG, RATING, AI_SELECTED }
+private enum class ViewLayout { GRID, WATERFALL, JUSTIFIED }
+private enum class SortMode { USER_RATING_DESC, AI_SCORE_DESC }
 
 // ---------- SharedPreferences helpers for AI selection ----------
 private fun loadAiSelectedUris(context: Context): Set<String> {

@@ -14,6 +14,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
   - **Grid**: 3 columns, square thumbnails (1:1 aspect ratio)
   - **Waterfall (River)**: 3 columns, Pinterest-style staggered heights
   - **Justified Grid**: 3 images per row, fixed height (120dp), dynamic width proportional to aspect ratio
+- **Navigation**: Left-side drawer menu (☰) — replaces old bottom tabs
 - **Click thumbnail** → full-screen detail view (safe null handling, no crash)
 - **Long-press** → action dialog: assign rating / add tag / select for AI ranking
 - **AI Rating flow (streamlined)**:
@@ -69,9 +70,9 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 
 | Route | Screen | Purpose |
 |-------|--------|---------|
-| `album` | `AlbumScreen` | Main album browser: 3 browse modes × 3 layouts |
-| `tag` | `TagScreen` | Tag list → images per tag |
-| `rating` | `RatingScreen` | Sort/filter by user rating or AI score |
+| `album` | `AlbumScreen` | Main album browser: 3 browse modes × 3 layouts, left drawer menu |
+| `tag` | `TagScreen` | Tag list → images per tag *(can be discovered via drawer, or navigated separately)* |
+| `rating` | `RatingScreen` | Sort/filter by user rating or AI score *(can be discovered via drawer, or navigated separately)* |
 | `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, tap to toggle controls |
 | `ai_rating` | `AiRatingScreen` | **Direct entry point for AI features**: config + selected image grid + submit |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
@@ -83,13 +84,34 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 
 | Action | Result |
 |--------|--------|
+| **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / Rating / AI Rating |
 | **Tap thumbnail** | Opens full-screen detail view (safe null handling — never crashes) |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking |
 | **Tap full-screen image** | Toggle visibility of toolbar and controls |
-| **Bottom nav tabs** | Folder / Tag / Rating (3 tabs) |
-| **Toolbar icons** | Layout toggle: Grid (▦) / Waterfall (🌊) / Justified (▭) + ✨ AI Rating |
-| **AI Rating screen** | Unified view: API Config → Save Config → select images in square grid → Submit to AI Rating |
+| **Left drawer** | Switch between Folder, Tag, Rating browse modes, or go to AI Rating |
+| **Toolbar icons** (Folder mode) | Layout toggle: Grid (▦) / Waterfall (🌊) / Justified (▭) |
+| **AI Rating** | Via drawer or toolbar ✨ icon |
 | **Multi-select mode** | Batch actions: Tag / Rate / Remove Tags / Select for AI |
+
+### Browse Modes (via Left Drawer)
+
+#### Folder mode (default)
+- Shows images organized by device folder
+- Horizontal folder chip row at top — tap to filter
+- View layout toggles in toolbar: Grid / Waterfall / Justified
+
+#### Tag mode
+- Grid of tag cards — tap a tag to see all images with that tag
+- Tap **All Tags** back button to return to tag list
+- Tags are assigned via long-press → **Add Tag** action
+- Tagged images appear immediately in this view
+
+#### Rating mode
+- List view showing images sorted by **User Rating** (descending) or **AI Score** (descending)
+- Sort toggle in toolbar (↕ icon)
+- Each card shows: thumbnail, name, folder, star rating bar, AI score
+- Long-press a card to edit rating/tags
+- After assigning a rating via long-press dialog, images appear here
 
 ---
 
@@ -146,6 +168,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 - Tag creation checks for existing tags before inserting (prevents duplicates)
 - Image-tag cross-reference stored in `image_tag_cross_ref` table
 - Works reliably from both long-press dialog and full-screen detail view
+- **Tag/Rating views are now embedded directly in AlbumScreen** via left drawer — after assigning a tag or rating, switch to the respective mode to see the images
 
 ---
 
