@@ -10,11 +10,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -282,7 +280,7 @@ fun AlbumScreen(
                     },
                     actions = {
                         // View layout toggle buttons (only for FOLDER mode)
-                        if (selectedBrowseMode == BrowseMode.FOLDER) {
+                        if (selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null) {
                             IconButton(onClick = { selectedViewLayout = ViewLayout.GRID }) {
                                 Icon(
                                     Icons.Default.GridView,
@@ -386,54 +384,114 @@ fun AlbumScreen(
             ) {
                 when (selectedBrowseMode) {
                     BrowseMode.FOLDER -> {
-                        FolderSelector(
-                            folders = folders,
-                            selectedFolder = selectedFolder,
-                            onFolderSelected = { folder ->
-                                selectedFolder = folder
-                                viewModel.loadImagesByFolder(folder)
-                            },
-                            onAllSelected = {
-                                selectedFolder = null
-                                viewModel.refreshImages()
-                            }
-                        )
-
-                        if (isLoading) {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
+                        if (selectedFolder == null) {
+                            // Step 1: Show only folder list — no images
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(2),
+                                contentPadding = PaddingValues(16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier.fillMaxSize()
                             ) {
-                                CircularProgressIndicator()
-                            }
-                        } else {
-                            ImageGridView(
-                                images = images,
-                                viewLayout = selectedViewLayout,
-                                isMultiSelectMode = isMultiSelectMode,
-                                selectedImageUris = selectedImageUris,
-                                onImageClick = { uri ->
-                                    if (isMultiSelectMode) {
-                                        selectedImageUris = if (uri in selectedImageUris)
-                                            selectedImageUris - uri
-                                        else
-                                            selectedImageUris + uri
-                                    } else {
-                                        onImageClick(uri)
-                                    }
-                                },
-                                onLongPress = { uri ->
-                                    if (isMultiSelectMode) {
-                                        selectedImageUris = if (uri in selectedImageUris)
-                                            selectedImageUris - uri
-                                        else
-                                            selectedImageUris + uri
-                                    } else {
-                                        longPressedImageUri = uri
-                                        showActionDialog = true
+                                items(folders) { folder ->
+                                    ElevatedCard(
+                                        onClick = {
+                                            selectedFolder = folder
+                                            viewModel.loadImagesByFolder(folder)
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(24.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Folder,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(48.dp),
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                            Spacer(Modifier.height(12.dp))
+                                            Text(
+                                                text = folder,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Medium,
+                                                textAlign = TextAlign.Center
+                                            )
+                                        }
                                     }
                                 }
-                            )
+                            }
+                        } else {
+                            // Step 2: Show images for selected folder with back button
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                // Back button row
+                                TextButton(
+                                    onClick = {
+                                        selectedFolder = null
+                                        viewModel.refreshImages()
+                                    },
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.ArrowBack,
+                                        contentDescription = "Back",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("All Folders")
+                                }
+
+                                if (isLoading) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        CircularProgressIndicator()
+                                    }
+                                } else if (images.isEmpty()) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "No images in this folder",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                } else {
+                                    ImageGridView(
+                                        images = images,
+                                        viewLayout = selectedViewLayout,
+                                        isMultiSelectMode = isMultiSelectMode,
+                                        selectedImageUris = selectedImageUris,
+                                        onImageClick = { uri ->
+                                            if (isMultiSelectMode) {
+                                                selectedImageUris = if (uri in selectedImageUris)
+                                                    selectedImageUris - uri
+                                                else
+                                                    selectedImageUris + uri
+                                            } else {
+                                                onImageClick(uri)
+                                            }
+                                        },
+                                        onLongPress = { uri ->
+                                            if (isMultiSelectMode) {
+                                                selectedImageUris = if (uri in selectedImageUris)
+                                                    selectedImageUris - uri
+                                                else
+                                                    selectedImageUris + uri
+                                            } else {
+                                                longPressedImageUri = uri
+                                                showActionDialog = true
+                                            }
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
 
@@ -873,38 +931,6 @@ private fun BatchMultiSelectBar(
 }
 
 @Composable
-private fun FolderSelector(
-    folders: List<String>,
-    selectedFolder: String?,
-    onFolderSelected: (String) -> Unit,
-    onAllSelected: () -> Unit
-) {
-    LazyRow(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        item {
-            FilterChip(
-                selected = selectedFolder == null,
-                onClick = onAllSelected,
-                label = { Text("All", fontWeight = FontWeight.Bold) },
-                modifier = Modifier.height(40.dp)
-            )
-        }
-        items(folders) { folder ->
-            FilterChip(
-                selected = folder == selectedFolder,
-                onClick = { onFolderSelected(folder) },
-                label = { Text(folder, maxLines = 1) },
-                modifier = Modifier.height(40.dp)
-            )
-        }
-    }
-}
-
 @Composable
 private fun PermissionRequestScreen(
     onRequestPermission: () -> Unit

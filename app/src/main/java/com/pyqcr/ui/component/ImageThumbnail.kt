@@ -31,7 +31,6 @@ fun ImageThumbnail(
         modifier = modifier
             .aspectRatio(1f)          // Force square
             .background(backgroundColor)
-            .wrapContentSize(align = Alignment.Center, unbounded = true)
     ) {
         SubcomposeAsyncImage(
             model = ImageRequest.Builder(context)

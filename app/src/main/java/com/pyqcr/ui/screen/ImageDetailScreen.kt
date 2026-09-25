@@ -109,31 +109,27 @@ fun ImageDetailScreen(
                 .padding(paddingValues)
                 .verticalScroll(rememberScrollState())
         ) {
-            // Full-width image with tap-to-toggle controls
-            val aspectRatio = remember(imageItem) {
-                val item = imageItem
-                if (item != null && item.height > 0)
-                    item.width.toFloat() / item.height.toFloat()
-                else 1f
-            }
+            // Full-screen image — fill screen width, constrain height to ~40% of screen,
+            // and scale with Fit so no clipping occurs
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .defaultMinSize(minHeight = 200.dp)
+                    .heightIn(max = 600.dp)
                     .background(Color.Black)
                     .pointerInput(Unit) {
                         detectTapGestures { showControls = !showControls }
-                    }
+                    },
+                contentAlignment = Alignment.Center
             ) {
                 SubcomposeAsyncImage(
                     model = ImageRequest.Builder(context)
                         .data(imageUri)
-                        .size(1200)
+                        .size(1600)
                         .crossfade(true)
                         .build(),
                     contentDescription = imageItem?.displayName,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(aspectRatio),
+                    modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit
                 )
             }
