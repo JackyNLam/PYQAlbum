@@ -9,7 +9,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.items
@@ -87,10 +86,8 @@ fun AlbumScreen(
     var tags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var tagImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
 
-    // Rating mode local state
-    var ratingImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
-    var sortMode by remember { mutableStateOf(SortMode.USER_RATING_DESC) }
-    var showSortMenu by remember { mutableStateOf(false) }
+    // Folder sort state — sort images inside a folder by rating
+    var folderSortMode by remember { mutableStateOf(FolderSortMode.DEFAULT) }
 
     // Load AI selected URIs
     LaunchedEffect(Unit) {
@@ -153,14 +150,14 @@ fun AlbumScreen(
         }
     }
 
-    // Load rating images when sort mode changes
-    LaunchedEffect(sortMode) {
-        val flow = when (sortMode) {
-            SortMode.USER_RATING_DESC -> repository.getImagesSortedByUserRatingDesc()
-            SortMode.AI_SCORE_DESC -> repository.getImagesSortedByAiScoreDesc()
-        }
-        flow.collect { imageList ->
-            ratingImages = imageList
+    // Re-sort folder images when folderSortMode changes
+    LaunchedEffect(folderSortMode, selectedFolder) {
+        if (selectedFolder != null) {
+            viewModel.loadImagesByFolderSorted(
+                folderName = selectedFolder!!,
+                sortByUserRating = folderSortMode == FolderSortMode.USER_RATING_DESC,
+                sortByAiScore = folderSortMode == FolderSortMode.AI_SCORE_DESC
+            )
         }
     }
 
@@ -236,9 +233,21 @@ fun AlbumScreen(
                 DrawerItem(
                     icon = Icons.Default.Star,
                     label = "Rating",
-                    selected = selectedBrowseMode == BrowseMode.RATING,
+                    selected = selectedBrowseMode == BrowseMode.FOLDER && folderSortMode == FolderSortMode.USER_RATING_DESC,
                     onClick = {
-                        selectedBrowseMode = BrowseMode.RATING
+                        if (selectedFolder == null) {
+                            // If no folder selected, pick first folder and sort by rating
+                            if (folders.isNotEmpty()) {
+                                selectedFolder = folders.first()
+                                viewModel.loadImagesByFolderSorted(
+                                    folders.first(),
+                                    sortByUserRating = true,
+                                    sortByAiScore = false
+                                )
+                            }
+                        } else {
+                            folderSortMode = FolderSortMode.USER_RATING_DESC
+                        }
                         scope.launch { drawerState.close() }
                     }
                 )
@@ -275,48 +284,64 @@ fun AlbumScreen(
                                 if (selectedFolder != null) selectedFolder!! else "pyqAlbum"
                             )
                             BrowseMode.TAG -> Text(selectedTag?.name ?: "Tags")
-                            BrowseMode.RATING -> Text("Rating")
-                            BrowseMode.AI_SELECTED -> Text("AI Selected")
                         }
                     },
                     actions = {
-                        // View layout toggle buttons (only for FOLDER mode)
+                        // View layout selector drop-down + sort button (only for FOLDER mode, inside a folder)
                         if (selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null) {
-                            IconButton(onClick = { selectedViewLayout = ViewLayout.GRID }) {
-                                Icon(
-                                    Icons.Default.GridView,
-                                    contentDescription = "Grid",
-                                    tint = if (selectedViewLayout == ViewLayout.GRID)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            IconButton(onClick = { selectedViewLayout = ViewLayout.WATERFALL }) {
-                                Text(
-                                    "🌊",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = if (selectedViewLayout == ViewLayout.WATERFALL)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            IconButton(onClick = { selectedViewLayout = ViewLayout.JUSTIFIED }) {
-                                Text(
-                                    "▭",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = if (selectedViewLayout == ViewLayout.JUSTIFIED)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-
-                        // Sort button for Rating mode
-                        if (selectedBrowseMode == BrowseMode.RATING) {
+                            // Layout selector button
                             Box {
+                                var showLayoutMenu by remember { mutableStateOf(false) }
+                                IconButton(onClick = { showLayoutMenu = true }) {
+                                    when (selectedViewLayout) {
+                                        ViewLayout.GRID -> Icon(
+                                            Icons.Default.GridView,
+                                            contentDescription = "Layout",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                        ViewLayout.WATERFALL -> Text(
+                                            "🌊",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        ViewLayout.JUSTIFIED -> Text(
+                                            "▭",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                                DropdownMenu(
+                                    expanded = showLayoutMenu,
+                                    onDismissRequest = { showLayoutMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Grid") },
+                                        onClick = {
+                                            selectedViewLayout = ViewLayout.GRID
+                                            showLayoutMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Waterfall") },
+                                        onClick = {
+                                            selectedViewLayout = ViewLayout.WATERFALL
+                                            showLayoutMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Justified") },
+                                        onClick = {
+                                            selectedViewLayout = ViewLayout.JUSTIFIED
+                                            showLayoutMenu = false
+                                        }
+                                    )
+                                }
+                            }
+
+                            // Sort button — sort images in the folder by rating
+                            Box {
+                                var showSortMenu by remember { mutableStateOf(false) }
                                 IconButton(onClick = { showSortMenu = true }) {
                                     Icon(Icons.Default.Sort, contentDescription = "Sort")
                                 }
@@ -325,16 +350,23 @@ fun AlbumScreen(
                                     onDismissRequest = { showSortMenu = false }
                                 ) {
                                     DropdownMenuItem(
+                                        text = { Text("Default") },
+                                        onClick = {
+                                            folderSortMode = FolderSortMode.DEFAULT
+                                            showSortMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
                                         text = { Text("User Rating ↓") },
                                         onClick = {
-                                            sortMode = SortMode.USER_RATING_DESC
+                                            folderSortMode = FolderSortMode.USER_RATING_DESC
                                             showSortMenu = false
                                         }
                                     )
                                     DropdownMenuItem(
                                         text = { Text("AI Score ↓") },
                                         onClick = {
-                                            sortMode = SortMode.AI_SCORE_DESC
+                                            folderSortMode = FolderSortMode.AI_SCORE_DESC
                                             showSortMenu = false
                                         }
                                     )
@@ -582,116 +614,7 @@ fun AlbumScreen(
                         }
                     }
 
-                    BrowseMode.RATING -> {
-                        if (ratingImages.isEmpty()) {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text(
-                                        text = "No rated images yet",
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(Modifier.height(8.dp))
-                                    Text(
-                                        text = "Long-press an image to assign a rating",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        } else {
-                            LazyColumn(
-                                modifier = Modifier.fillMaxSize(),
-                                contentPadding = PaddingValues(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                items(ratingImages, key = { it.uri }) { image ->
-                                    ElevatedCard(
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .combinedClickable(
-                                                    onClick = { onImageClick(image.uri) },
-                                                    onLongClick = {
-                                                        longPressedImageUri = image.uri
-                                                        showActionDialog = true
-                                                    }
-                                                )
-                                                .padding(8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            ImageThumbnail(
-                                                imageUri = image.uri,
-                                                modifier = Modifier.size(72.dp)
-                                            )
 
-                                            Spacer(Modifier.width(12.dp))
-
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = image.displayName,
-                                                    fontWeight = FontWeight.Medium,
-                                                    style = MaterialTheme.typography.bodyMedium
-                                                )
-                                                Text(
-                                                    text = image.folderName,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                                Spacer(Modifier.height(4.dp))
-
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    Text("⭐ ", style = MaterialTheme.typography.bodySmall)
-                                                    RatingBar(
-                                                        rating = image.rating,
-                                                        starSize = 24.dp,
-                                                        modifier = Modifier.weight(1f)
-                                                    )
-                                                }
-
-                                                image.aiScore?.let { aiScore ->
-                                                    Text(
-                                                        text = "AI: ${String.format("%.1f", aiScore)}/100",
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = MaterialTheme.colorScheme.primary
-                                                    )
-                                                }
-                                            }
-
-                                            if (image.rating > 0) {
-                                                Text(
-                                                    text = String.format("%.1f", image.rating),
-                                                    style = MaterialTheme.typography.titleLarge,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.padding(start = 8.dp)
-                                                )
-                                            }
-                                        }
-
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    BrowseMode.AI_SELECTED -> {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "AI Selected view removed.\nUse toolbar ✨ to select images.",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
                 }
             }
         }
@@ -1039,8 +962,11 @@ private fun ImageGridView(
     }
 }
 
-enum class BrowseMode { FOLDER, TAG, RATING, AI_SELECTED }
+enum class BrowseMode { FOLDER, TAG }
 private enum class ViewLayout { GRID, WATERFALL, JUSTIFIED }
+private enum class FolderSortMode { DEFAULT, USER_RATING_DESC, AI_SCORE_DESC }
+
+// Used by RatingScreen.kt (still accessible via nav route)
 enum class SortMode { USER_RATING_DESC, AI_SCORE_DESC }
 
 // ---------- SharedPreferences helpers for AI selection ----------

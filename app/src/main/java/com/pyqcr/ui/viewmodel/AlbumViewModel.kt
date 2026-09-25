@@ -48,6 +48,20 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
         }.launchIn(viewModelScope)
     }
 
+    fun loadImagesByFolderSorted(folderName: String, sortByUserRating: Boolean, sortByAiScore: Boolean) {
+        val flow = when {
+            sortByUserRating -> repository.getImagesSortedByUserRatingDesc()
+            sortByAiScore -> repository.getImagesSortedByAiScoreDesc()
+            else -> repository.getImagesByFolder(folderName)
+        }
+        flow.onEach { allImages ->
+            _images.value = if (sortByUserRating || sortByAiScore)
+                allImages.filter { it.folderName == folderName }
+            else
+                allImages
+        }.launchIn(viewModelScope)
+    }
+
     fun loadImagesByTag(tagName: String) {
         repository.getImagesByTag(tagName).onEach { imageList ->
             _images.value = imageList

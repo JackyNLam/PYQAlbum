@@ -2,7 +2,7 @@
 
 An Android album management app with AI-powered photo rating, built with **Kotlin + Jetpack Compose**.
 
-pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder / tag / rating**, and uses **DashScope (Alibaba Cloud Bailian) AI** to automatically score photos (1-100) via `qwen-vl-plus` multimodal Vision-Language Model.
+pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder** or **tag**, and uses **DashScope (Alibaba Cloud Bailian) AI** to automatically score photos (1-100) via `qwen-vl-plus` multimodal Vision-Language Model.
 
 ---
 
@@ -10,13 +10,14 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 
 - **App name**: pyqAlbum
 - **Grid background**: Black for all empty areas in image squares
-- **View layouts**: Grid / Waterfall / Justified
+- **View layouts**: Grid / Waterfall / Justified (single dropdown button in toolbar)
   - **Grid**: 3 columns, square thumbnails (1:1 aspect ratio)
   - **Waterfall (River)**: 3 columns, Pinterest-style staggered heights
   - **Justified Grid**: 3 images per row, fixed height (120dp), dynamic width proportional to aspect ratio
-- **Navigation**: Left-side drawer menu (☰) — replaces old bottom tabs
+- **Navigation**: Left-side drawer menu (☰) — Folder, Tag, Rating (sort inside folder), AI Rating
 - **Click thumbnail** → full-screen detail view (safe null handling, no crash)
 - **Long-press** → action dialog: assign rating / add tag / select for AI ranking
+- **Sort inside a folder**: Use the Sort (↕) button in the toolbar to sort images by User Rating (descending) or AI Score (descending)
 - **AI Rating flow (streamlined)**:
   1. Long-press any image in Album → choose **Select for AI Ranking**
   2. Or tap toolbar ✨ icon to go directly to AI Rating view
@@ -25,7 +26,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
   5. **Submit to AI Rating** button runs the scoring
   6. Selection persists across app launches (SharedPreferences)
 - **Multi-select mode**: long-press enters multi-select; bottom bar has batch Tag / Rate / Remove Tags / AI Select
-- **Full-screen image**: controls visible by default; tap image to toggle top bar + controls
+- **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid; **swipe up to reveal** rating, tags, and AI selection panel
 
 ---
 
@@ -70,10 +71,10 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 
 | Route | Screen | Purpose |
 |-------|--------|---------|
-| `album` | `AlbumScreen` | Main album browser: 3 browse modes × 3 layouts, left drawer menu |
+| `album` | `AlbumScreen` | Main album browser: folder grid → image grid with 3 view layouts, left drawer menu |
 | `tag` | `TagScreen` | Tag list → images per tag *(can be discovered via drawer, or navigated separately)* |
-| `rating` | `RatingScreen` | Sort/filter by user rating or AI score *(can be discovered via drawer, or navigated separately)* |
-| `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, tap to toggle controls |
+| `rating` | `RatingScreen` | Sort/filter by user rating or AI score *(still accessible via nav route)* |
+| `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, swipe down to go back, swipe up for controls |
 | `ai_rating` | `AiRatingScreen` | **Direct entry point for AI features**: config + selected image grid + submit |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
@@ -85,37 +86,38 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 | Action | Result |
 |--------|--------|
 | **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / Rating / AI Rating |
-| **Tap thumbnail** | Opens full-screen detail view (safe null handling — never crashes) |
+| **Tap folder card** (Folder mode) | Enter folder to see images in selected layout |
+| **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking |
-| **Tap full-screen image** | Toggle visibility of toolbar and controls |
-| **Left drawer** | Switch between Folder, Tag, Rating browse modes, or go to AI Rating |
-| **Toolbar icons** (Folder mode) | Layout toggle: Grid (▦) / Waterfall (🌊) / Justified (▭) |
+| **Swipe down on image** (detail view) | Go back to thumbnail grid |
+| **Swipe up on image** (detail view) | Reveal rating bar, tags, AI selection panel |
+| **Toolbar Layout button** (inside folder) | Dropdown: Grid (▦) / Waterfall (🌊) / Justified (▭) |
+| **Toolbar Sort button** (inside folder) | Dropdown: Default / User Rating ↓ / AI Score ↓ |
+| **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Rating |
 | **AI Rating** | Via drawer or toolbar ✨ icon |
 | **Multi-select mode** | Batch actions: Tag / Rate / Remove Tags / Select for AI |
 
 ### Browse Modes (via Left Drawer)
 
-#### Folder mode (default)
-- Shows images organized by device folder
-- Horizontal folder chip row at top — tap to filter
-- View layout toggles in toolbar: Grid / Waterfall / Justified
+#### Folder mode (default — no drawer tab selected)
+- **Step 1**: Shows a 2-column folder grid with folder icons
+- **Step 2**: Tap a folder → images displayed in the selected layout (Grid/Waterfall/Justified)
+- Layout toggle and sort button appear in toolbar when inside a folder
+- Sort options: **Default** (folder order), **User Rating ↓**, **AI Score ↓**
 
 #### Tag mode
 - Grid of tag cards — tap a tag to see all images with that tag
 - Tap **All Tags** back button to return to tag list
 - Tags are assigned via long-press → **Add Tag** action
-- Tagged images appear immediately in this view
-
-#### Rating mode
-- List view showing images sorted by **User Rating** (descending) or **AI Score** (descending)
-- Sort toggle in toolbar (↕ icon)
-- Each card shows: thumbnail, name, folder, star rating bar, AI score
-- Long-press a card to edit rating/tags
-- After assigning a rating via long-press dialog, images appear here
 
 ---
 
 ## Details on Key Features
+
+### Folder View
+- **Step 1**: 2-column grid of `ElevatedCard`s with folder icons
+- **Step 2**: Tap a folder → "← All Folders" back button at top, then image grid
+- Sort images inside a folder by rating or AI score via the Sort button
 
 ### Grid View
 - **3 columns** of square thumbnails (1:1 aspect ratio)
@@ -127,20 +129,19 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 - **3 columns**, Pinterest-style staggered heights
 - Each column has images of varying heights based on their aspect ratio
 - `ContentScale.Fit` preserves original image proportions
-- Supports multi-select and click/long-press interactions
 
 ### Justified Grid
 - **Always 3 images per row**
 - Each image width = `(imageRatio / sumRatiosInRow) * availableWidth`
 - Fixed `rowHeight = 120.dp`, 2dp gaps between images
 - Black background, `ContentScale.Crop` fills each cell
-- Last row: if fewer than 3 images, remaining space left empty
-- Supports `combinedClickable` (click → detail, long-press → dialog)
 
 ### Image Detail Screen
-- `.aspectRatio()` pre-calculated via `remember` with safe null handling — uses `item.width` / `item.height` with null check, never `!!`
-- Controls visible by default (`showControls = true`), tap to toggle
-- Shows: metadata, rating bar (0.5-star increments), AI score, tags, add tag, toggle AI selection
+- **Full-screen image** — no `.aspectRatio()` constraint; uses `fillMaxSize()` + `ContentScale.Fit` inside a `Box` that fills available screen space
+- **Swipe down** anywhere on the image → navigates back to thumbnail grid
+- **Swipe up** → reveals detail panel with rating bar, tags, AI selection, metadata
+- Tap on image (when panel is hidden) to toggle top bar
+- Swipe down on the detail panel itself to hide it again
 
 ### AI Rating Screen (Redesigned)
 - **Single unified view** — no separate selection step
@@ -157,18 +158,13 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder 
 - Results section: sorted by score descending, shows score + AI reasoning
 - "Clear All" action in top bar to reset selection
 
-#### Key Fix: No More AiSelectScreen Intermediate Step
-- Tapping the ✨ toolbar icon now **directly** navigates to `AiRatingScreen`
-- `AiSelectScreen` acts as a transparent bridge that forwards immediately
-- All selection management happens inline on the AI Rating screen
-
 ### Tag/Rating Assignment
 - **Long-press dialog** assigns rating or tag directly to images
 - Rating updates persist correctly to Room DB via `AlbumViewModel.updateRating()`
 - Tag creation checks for existing tags before inserting (prevents duplicates)
 - Image-tag cross-reference stored in `image_tag_cross_ref` table
 - Works reliably from both long-press dialog and full-screen detail view
-- **Tag/Rating views are now embedded directly in AlbumScreen** via left drawer — after assigning a tag or rating, switch to the respective mode to see the images
+- **Tag view** is embedded directly in AlbumScreen via left drawer
 
 ---
 

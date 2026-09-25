@@ -2,8 +2,9 @@ package com.pyqcr.ui.screen
 
 import android.content.Context
 import android.net.Uri
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -17,10 +18,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
@@ -37,8 +40,11 @@ import kotlinx.coroutines.launch
 
 /**
  * Full-screen image detail view.
- * Tap anywhere on the image to toggle the top/bottom bars (immersive view).
- * Shows tags, rating editing, and metadata below the image.
+ *
+ * - Swipe down anywhere on the image → go back to the thumbnail grid.
+ * - Swipe up → reveal rating / tags / AI selection panel.
+ * - Image fills available screen space on either width or height (ContentScale.Fit,
+ *   constrained by parent Box) — no cropping, no overflow.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,8 +68,12 @@ fun ImageDetailScreen(
     var rating by remember { mutableFloatStateOf(0f) }
     var newTagName by remember { mutableStateOf("") }
     var showAddTag by remember { mutableStateOf(false) }
-    var showControls by remember { mutableStateOf(true) }  // Toggle UI overlays
+    var showControls by remember { mutableStateOf(true) }  // Toggle top/bottom bar
+    var showDetailPanel by remember { mutableStateOf(false) } // Swipe-up panel
     val coroutineScope = rememberCoroutineScope()
+
+    // Used to detect vertical drag distance for swipe gestures
+    var dragAccumulator by remember { mutableFloatStateOf(0f) }
 
     LaunchedEffect(imageUri) {
         val entity = imageDao.getImageByUri(imageUri)
@@ -89,9 +99,12 @@ fun ImageDetailScreen(
         }
     }
 
+    // Toggle between "show image only" and "show image + detail panel"
+    val displayModeThreshold = 100f // pixels of drag to toggle
+
     Scaffold(
         topBar = {
-            if (showControls) {
+            if (showControls && !showDetailPanel) {
                 TopAppBar(
                     title = { Text(imageItem?.displayName ?: "Image") },
                     navigationIcon = {
@@ -103,22 +116,47 @@ fun ImageDetailScreen(
             }
         }
     ) { paddingValues ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
         ) {
-            // Full-screen image — fill screen width, constrain height to ~40% of screen,
-            // and scale with Fit so no clipping occurs
-            Box(
-                modifier = Modifier
+            // ===================== IMAGE AREA =====================
+            // Fill the available space: if detail panel is visible, take top half;
+            // otherwise fill entire screen.
+            val imageModifier = if (showDetailPanel) {
+                Modifier
                     .fillMaxWidth()
-                    .defaultMinSize(minHeight = 200.dp)
-                    .heightIn(max = 600.dp)
+                    .fillMaxHeight(0.5f)
+                    .align(Alignment.TopCenter)
+            } else {
+                Modifier
+                    .fillMaxSize()
+                    .align(Alignment.Center)
+            }
+
+            Box(
+                modifier = imageModifier
                     .background(Color.Black)
+                    .clipToBounds()
                     .pointerInput(Unit) {
-                        detectTapGestures { showControls = !showControls }
+                        detectVerticalDragGestures(
+                            onDragEnd = {
+                                if (dragAccumulator > displayModeThreshold) {
+                                    // swipe down → go back
+                                    onBack()
+                                } else if (dragAccumulator < -displayModeThreshold) {
+                                    // swipe up → show detail panel
+                                    showDetailPanel = true
+                                    showControls = false
+                                }
+                                dragAccumulator = 0f
+                            },
+                            onVerticalDrag = { change, dragAmount ->
+                                change.consume()
+                                dragAccumulator += dragAmount
+                            }
+                        )
                     },
                 contentAlignment = Alignment.Center
             ) {
@@ -134,14 +172,53 @@ fun ImageDetailScreen(
                 )
             }
 
-            // Metadata section
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    // File info
+            // ===================== DETAIL PANEL (swipe-up) =====================
+            if (showDetailPanel) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.5f)
+                        .align(Alignment.BottomCenter)
+                        .verticalScroll(rememberScrollState())
+                        .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp)
+                ) {
+                    // Handle area + pull-down hint
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .pointerInput(Unit) {
+                                detectVerticalDragGestures(
+                                    onDragEnd = {
+                                        if (dragAccumulator > displayModeThreshold) {
+                                            // swipe down on panel → hide panel
+                                            showDetailPanel = false
+                                            showControls = true
+                                        }
+                                        dragAccumulator = 0f
+                                    },
+                                    onVerticalDrag = { change, dragAmount ->
+                                        change.consume()
+                                        dragAccumulator += dragAmount
+                                    }
+                                )
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        // Drag handle indicator
+                        Box(
+                            modifier = Modifier
+                                .width(40.dp)
+                                .height(4.dp)
+                                .background(
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                    shape = MaterialTheme.shapes.small
+                                )
+                        )
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    // ====== Metadata ======
                     Text(
                         text = imageItem?.displayName ?: "",
                         style = MaterialTheme.typography.titleMedium
@@ -160,7 +237,7 @@ fun ImageDetailScreen(
 
                     Spacer(Modifier.height(16.dp))
 
-                    // Rating bar
+                    // ====== Rating ======
                     Text(
                         text = "Rating",
                         style = MaterialTheme.typography.titleSmall
@@ -175,7 +252,7 @@ fun ImageDetailScreen(
                         }
                     )
 
-                    // AI Score display
+                    // AI Score
                     imageItem?.aiScore?.let { aiScore ->
                         Spacer(Modifier.height(8.dp))
                         Text(
@@ -187,7 +264,7 @@ fun ImageDetailScreen(
 
                     Spacer(Modifier.height(16.dp))
 
-                    // Tags
+                    // ====== Tags ======
                     Text(
                         text = "Tags",
                         style = MaterialTheme.typography.titleSmall
@@ -218,7 +295,7 @@ fun ImageDetailScreen(
                         )
                     }
 
-                    // Add tag button
+                    // Add tag
                     if (!showAddTag) {
                         OutlinedButton(
                             onClick = { showAddTag = true },
@@ -271,11 +348,11 @@ fun ImageDetailScreen(
                         }
                     }
 
-                    // AI Select button — add to selected images list
                     Spacer(Modifier.height(12.dp))
+
+                    // ====== AI Select ======
                     OutlinedButton(
                         onClick = {
-                            // Add this image to AI selected set
                             val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
                             val current = prefs.getStringSet("ai_selected_uris", emptySet())?.toMutableSet() ?: mutableSetOf()
                             if (imageUri in current) {
@@ -296,8 +373,6 @@ fun ImageDetailScreen(
                     }
                 }
             }
-
-            Spacer(Modifier.height(16.dp))
         }
     }
 }
