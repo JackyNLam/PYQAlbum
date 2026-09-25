@@ -8,6 +8,9 @@ interface ImageDao {
     @Query("SELECT * FROM images ORDER BY dateAdded DESC")
     fun getAllImages(): Flow<List<ImageEntity>>
 
+    @Query("SELECT * FROM images ORDER BY displayName ASC")
+    fun getAllImagesByNameAsc(): Flow<List<ImageEntity>>
+
     @Query("SELECT * FROM images WHERE folderName = :folderName ORDER BY dateAdded DESC")
     fun getImagesByFolder(folderName: String): Flow<List<ImageEntity>>
 
@@ -70,6 +73,12 @@ interface ImageDao {
 
     @Query("DELETE FROM images")
     suspend fun deleteAll()
+
+    @Query("SELECT folderName, COUNT(*) AS imageCount, MAX(dateAdded) AS lastModified FROM images GROUP BY folderName ORDER BY MAX(dateAdded) DESC")
+    fun getAllFoldersWithInfo(): Flow<List<FolderInfo>>
+
+    @Query("SELECT folderName, COUNT(*) AS imageCount, MAX(dateAdded) AS lastModified FROM images GROUP BY folderName ORDER BY folderName ASC")
+    fun getAllFoldersWithInfoByName(): Flow<List<FolderInfo>>
 
     @Query("SELECT DISTINCT folderName FROM images ORDER BY folderName")
     fun getAllFolders(): Flow<List<String>>

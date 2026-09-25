@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -34,8 +35,13 @@ import com.pyqcr.data.db.TagEntity
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.*
+import com.pyqcr.data.db.FolderInfo
 import com.pyqcr.ui.viewmodel.AlbumViewModel
+import com.pyqcr.ui.viewmodel.FolderSortMode
+import com.pyqcr.ui.viewmodel.GroupByMode
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.*
 
 /**
  * Main album screen.
@@ -62,6 +68,7 @@ fun AlbumScreen(
 
     val images by viewModel.images.collectAsState()
     val folders by viewModel.folders.collectAsState()
+    val folderInfos by viewModel.folderInfos.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
 
     // Drawer state
@@ -88,8 +95,9 @@ fun AlbumScreen(
     var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var tagImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
 
-    // Folder sort state — sort images inside a folder by rating
-    var folderSortMode by rememberSaveable { mutableStateOf(FolderSortMode.DEFAULT) }
+    // Folder sort state — sort images inside a folder
+    var folderSortMode by remember { mutableStateOf(FolderSortMode.MODIFIED_DATE_DESC) }
+    var groupByMode by remember { mutableStateOf(GroupByMode.NONE) }
 
     // Load AI selected URIs
     LaunchedEffect(Unit) {
@@ -161,7 +169,8 @@ fun AlbumScreen(
             viewModel.loadImagesByFolderSorted(
                 folderName = selectedFolder!!,
                 sortByUserRating = folderSortMode == FolderSortMode.USER_RATING_DESC,
-                sortByAiScore = folderSortMode == FolderSortMode.AI_SCORE_DESC
+                sortByAiScore = folderSortMode == FolderSortMode.AI_SCORE_DESC,
+                sortByName = folderSortMode == FolderSortMode.NAME_ASC
             )
         }
     }
@@ -326,37 +335,161 @@ fun AlbumScreen(
                                 }
                             }
 
-                            // Sort button — sort images in the folder by rating
+                            // Sort button — sort images in the folder
                             Box {
                                 var showSortMenu by remember { mutableStateOf(false) }
+                                var showGroupSubmenu by remember { mutableStateOf(false) }
                                 IconButton(onClick = { showSortMenu = true }) {
                                     Icon(Icons.Default.Sort, contentDescription = "Sort")
                                 }
                                 DropdownMenu(
                                     expanded = showSortMenu,
-                                    onDismissRequest = { showSortMenu = false }
+                                    onDismissRequest = {
+                                        showSortMenu = false
+                                        showGroupSubmenu = false
+                                    }
                                 ) {
-                                    DropdownMenuItem(
-                                        text = { Text("Default") },
-                                        onClick = {
-                                            folderSortMode = FolderSortMode.DEFAULT
-                                            showSortMenu = false
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("User Rating ↓") },
-                                        onClick = {
-                                            folderSortMode = FolderSortMode.USER_RATING_DESC
-                                            showSortMenu = false
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("AI Score ↓") },
-                                        onClick = {
-                                            folderSortMode = FolderSortMode.AI_SCORE_DESC
-                                            showSortMenu = false
-                                        }
-                                    )
+                                    if (!showGroupSubmenu) {
+                                        // Sort options
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("↓Modified date", modifier = Modifier.weight(1f))
+                                                    if (folderSortMode == FolderSortMode.MODIFIED_DATE_DESC) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                folderSortMode = FolderSortMode.MODIFIED_DATE_DESC
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("↑Name", modifier = Modifier.weight(1f))
+                                                    if (folderSortMode == FolderSortMode.NAME_ASC) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                folderSortMode = FolderSortMode.NAME_ASC
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("Rating ↓", modifier = Modifier.weight(1f))
+                                                    if (folderSortMode == FolderSortMode.USER_RATING_DESC) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                folderSortMode = FolderSortMode.USER_RATING_DESC
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("AI Score ↓", modifier = Modifier.weight(1f))
+                                                    if (folderSortMode == FolderSortMode.AI_SCORE_DESC) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                folderSortMode = FolderSortMode.AI_SCORE_DESC
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                                        // Group by submenu entry
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("Group by", modifier = Modifier.weight(1f))
+                                                    Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                }
+                                            },
+                                            onClick = {
+                                                showGroupSubmenu = true
+                                            }
+                                        )
+                                    } else {
+                                        // Group by submenu
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(Icons.Default.ArrowBack, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    Spacer(Modifier.width(4.dp))
+                                                    Text("Sort options", modifier = Modifier.weight(1f))
+                                                }
+                                            },
+                                            onClick = { showGroupSubmenu = false }
+                                        )
+                                        HorizontalDivider()
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("None", modifier = Modifier.weight(1f))
+                                                    if (groupByMode == GroupByMode.NONE) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                groupByMode = GroupByMode.NONE
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("Day", modifier = Modifier.weight(1f))
+                                                    if (groupByMode == GroupByMode.DAY) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                groupByMode = GroupByMode.DAY
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("Month", modifier = Modifier.weight(1f))
+                                                    if (groupByMode == GroupByMode.MONTH) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                groupByMode = GroupByMode.MONTH
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("Year", modifier = Modifier.weight(1f))
+                                                    if (groupByMode == GroupByMode.YEAR) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                groupByMode = GroupByMode.YEAR
+                                                showSortMenu = false
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -413,18 +546,18 @@ fun AlbumScreen(
                                 verticalArrangement = Arrangement.spacedBy(12.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                items(folders) { folder ->
+                                items(folderInfos) { folderInfo ->
                                     ElevatedCard(
                                         onClick = {
-                                            selectedFolder = folder
-                                            folderSortMode = FolderSortMode.DEFAULT
+                                            selectedFolder = folderInfo.folderName
+                                            folderSortMode = FolderSortMode.MODIFIED_DATE_DESC
                                         },
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Column(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .padding(24.dp),
+                                                .padding(20.dp),
                                             horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
                                             Icon(
@@ -433,11 +566,18 @@ fun AlbumScreen(
                                                 modifier = Modifier.size(48.dp),
                                                 tint = MaterialTheme.colorScheme.primary
                                             )
-                                            Spacer(Modifier.height(12.dp))
+                                            Spacer(Modifier.height(8.dp))
                                             Text(
-                                                text = folder,
+                                                text = folderInfo.folderName,
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.Medium,
+                                                textAlign = TextAlign.Center
+                                            )
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                text = "${folderInfo.imageCount} images",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 textAlign = TextAlign.Center
                                             )
                                         }
@@ -489,6 +629,7 @@ fun AlbumScreen(
                                         isMultiSelectMode = isMultiSelectMode,
                                         selectedImageUris = selectedImageUris,
                                         aiSelectedUris = aiSelectedUris,
+                                        groupByMode = groupByMode,
                                         onImageClick = { uri, _ ->
                                             if (isMultiSelectMode) {
                                                 selectedImageUris = if (uri in selectedImageUris)
@@ -925,77 +1066,87 @@ private fun ImageGridView(
     isMultiSelectMode: Boolean,
     selectedImageUris: Set<String>,
     aiSelectedUris: Set<String>,
+    groupByMode: GroupByMode = GroupByMode.NONE,
     onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit
 ) {
     val imageUris = remember(images) { images.map { it.uri } }
+    // Group images by date if requested
+    val groups = remember(images, groupByMode) {
+        if (groupByMode == GroupByMode.NONE) {
+            emptyList()
+        } else {
+            val dateFormat = when (groupByMode) {
+                GroupByMode.DAY -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+                GroupByMode.MONTH -> SimpleDateFormat("yyyy-MM", Locale.getDefault())
+                GroupByMode.YEAR -> SimpleDateFormat("yyyy", Locale.getDefault())
+                else -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+            }
+            images.groupBy { image ->
+                image.dateAdded.let { dateFormat.format(Date(it * 1000)) }
+            }.entries.sortedByDescending { it.key }
+        }
+    }
+
     when (viewLayout) {
         ViewLayout.GRID -> {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(3),
-                contentPadding = PaddingValues(2.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.White)
-            ) {
-                items(images, key = { it.uri }) { image ->
-                    val isSelected = image.uri in selectedImageUris
-                    Box(
-                        modifier = Modifier
-                            .aspectRatio(1f)
-                            .combinedClickable(
-                                onClick = { onImageClick(image.uri, imageUris) },
-                                onLongClick = { onLongPress(image.uri) }
+            if (groupByMode != GroupByMode.NONE && groups.isNotEmpty()) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    contentPadding = PaddingValues(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.White)
+                ) {
+                    groups.forEach { (header, groupImages) ->
+                        // Date header spanning full width
+                        item(span = { GridItemSpan(3) }) {
+                            Text(
+                                text = header,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFFF5F5F5))
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
                             )
-                    ) {
-                        ImageThumbnail(
-                            imageUri = image.uri,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                            backgroundColor = Color.White,
-                            rating = image.rating
+                        }
+                        items(groupImages, key = { it.uri }) { image ->
+                            ImageGridCell(
+                                image = image,
+                                imageUris = imageUris,
+                                isMultiSelectMode = isMultiSelectMode,
+                                selectedImageUris = selectedImageUris,
+                                aiSelectedUris = aiSelectedUris,
+                                onImageClick = onImageClick,
+                                onLongPress = onLongPress
+                            )
+                        }
+                    }
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    contentPadding = PaddingValues(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.White)
+                ) {
+                    items(images, key = { it.uri }) { image ->
+                        ImageGridCell(
+                            image = image,
+                            imageUris = imageUris,
+                            isMultiSelectMode = isMultiSelectMode,
+                            selectedImageUris = selectedImageUris,
+                            aiSelectedUris = aiSelectedUris,
+                            onImageClick = onImageClick,
+                            onLongPress = onLongPress
                         )
-                        // AI selection indicator (AutoAwesome icon)
-                        if (image.uri in aiSelectedUris) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.BottomEnd)
-                                    .background(
-                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
-                                        shape = MaterialTheme.shapes.small
-                                    )
-                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.AutoAwesome,
-                                    contentDescription = "AI Selected",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            }
-                        }
-                        if (isMultiSelectMode && isSelected) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color(0x80000000))
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .background(MaterialTheme.colorScheme.primary)
-                                    .padding(4.dp)
-                            ) {
-                                Text(
-                                    text = "✓",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        }
                     }
                 }
             }
@@ -1030,9 +1181,78 @@ private fun ImageGridView(
     }
 }
 
+// Extracted grid cell composable to avoid duplication
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ImageGridCell(
+    image: ImageItem,
+    imageUris: List<String>,
+    isMultiSelectMode: Boolean,
+    selectedImageUris: Set<String>,
+    aiSelectedUris: Set<String>,
+    onImageClick: (String, List<String>) -> Unit,
+    onLongPress: (String) -> Unit
+) {
+    val isSelected = image.uri in selectedImageUris
+    Box(
+        modifier = Modifier
+            .aspectRatio(1f)
+            .combinedClickable(
+                onClick = { onImageClick(image.uri, imageUris) },
+                onLongClick = { onLongPress(image.uri) }
+            )
+    ) {
+        ImageThumbnail(
+            imageUri = image.uri,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+            backgroundColor = Color.White,
+            rating = image.rating
+        )
+        // AI selection indicator (AutoAwesome icon)
+        if (image.uri in aiSelectedUris) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .background(
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                        shape = MaterialTheme.shapes.small
+                    )
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = "AI Selected",
+                    tint = Color.White,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        }
+        if (isMultiSelectMode && isSelected) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x80000000))
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .background(MaterialTheme.colorScheme.primary)
+                    .padding(4.dp)
+            ) {
+                Text(
+                    text = "✓",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+    }
+}
+
 enum class BrowseMode { FOLDER, TAG }
 private enum class ViewLayout { GRID, WATERFALL, JUSTIFIED }
-private enum class FolderSortMode { DEFAULT, USER_RATING_DESC, AI_SCORE_DESC }
 
 // Used by RatingScreen.kt (still accessible via nav route)
 enum class SortMode { USER_RATING_DESC, AI_SCORE_DESC }

@@ -17,7 +17,12 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Rating
 - **Click thumbnail** → full-screen detail view (safe null handling, no crash)
 - **Long-press** → action dialog: assign rating / add tag / select for AI ranking
-- **Sort inside a folder**: Use the Sort (↕) button in the toolbar to sort images by User Rating (descending) or AI Score (descending)
+- **Sort inside a folder**: Use the Sort (↕) button in the toolbar:
+  - **↓Modified date** (default) — newest photos first
+  - **↑Name** — alphabetical by filename
+  - **Rating ↓** — by user rating (highest first)
+  - **AI Score ↓** — by AI rating (highest first)
+  - **Group by** submenu: None / Day / Month / Year — organize thumbnails into date-based sections
 - **AI Rating flow (streamlined)**:
   1. Long-press any image in Album → choose **Select for AI Ranking**
   2. Or tap drawer ✨ AI Rating to go directly to AI Rating view
@@ -90,7 +95,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | Action | Result |
 |--------|--------|
 | **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Rating |
-| **Tap folder card** (Folder mode) | Enter folder to see images in selected layout |
+| **Tap folder card** (Folder mode) | Enter folder to see images in selected layout (folder cards show image count, sorted by newest image first) |
 | **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking |
 | **Swipe down on image** (detail view) | Go back to thumbnail grid |
@@ -98,7 +103,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Swipe right** (detail view) | Previous image in same folder/tag |
 | **Swipe up on image** (detail view) | Reveal rating bar, tags, AI selection panel |
 | **Toolbar Layout button** (inside folder) | Dropdown: Grid (▦) / Waterfall (🌊) / Justified (▭) |
-| **Toolbar Sort button** (inside folder) | Dropdown: Default / User Rating ↓ / AI Score ↓ |
+| **Toolbar Sort button** (inside folder) | Dropdown: ↓Modified date (default) / ↑Name / Rating ↓ / AI Score ↓ / Group by submenu |
 | **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Rating |
 | **AI Rating** | Via drawer ✨ |
 | **Multi-select mode** | Batch actions: Tag / Rate / Remove Tags / Select for AI |
@@ -108,10 +113,12 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ### Browse Modes (via Left Drawer)
 
 #### Folder mode (default — no drawer tab selected)
-- **Step 1**: Shows a 2-column folder grid with folder icons
+- **Step 1**: Shows a 2-column folder grid with folder icons, image count per folder, sorted by latest modified date (newest folder first)
 - **Step 2**: Tap a folder → images displayed in the selected layout (Grid/Waterfall/Justified)
 - Layout toggle and sort button appear in toolbar when inside a folder
-- Sort options: **Default** (folder order), **User Rating ↓**, **AI Score ↓**
+- Default thumbnail sort: **↓Modified date** (newest first)
+- Sort options: **↓Modified date** (default) / **↑Name** / **Rating ↓** / **AI Score ↓** — with ✓ checkmark on active option
+- **Group by**: submenu with None / Day / Month / Year — sections thumbnails by date header
 
 #### Tag mode
 - Grid of tag cards — tap a tag to see all images with that tag
@@ -124,9 +131,14 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ## Details on Key Features
 
 ### Folder View
-- **Step 1**: 2-column grid of `ElevatedCard`s with folder icons
+- **Step 1**: 2-column grid of `ElevatedCard`s with folder icons, **image count** shown below folder name, sorted by **latest modified date (newest first)**
 - **Step 2**: Tap a folder → "← All Folders" back button at top, then image grid
-- Sort images inside a folder by rating or AI score via the Sort button
+- Sort images inside a folder via the Sort button (↕):
+  - **↓Modified date** (default) — newest first
+  - **↑Name** — alphabetical by filename
+  - **Rating ↓** — highest user rating first
+  - **AI Score ↓** — highest AI score first
+  - **Group by** submenu: organize thumbnails by Day, Month, or Year sections
 
 ### Grid View
 - **3 columns** of square thumbnails (1:1 aspect ratio)

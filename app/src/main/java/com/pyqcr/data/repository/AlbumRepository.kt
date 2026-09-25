@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
 import com.pyqcr.data.db.AppDatabase
+import com.pyqcr.data.db.FolderInfo
 import com.pyqcr.data.db.ImageEntity
 import com.pyqcr.data.model.ImageItem
 import kotlinx.coroutines.CoroutineDispatcher
@@ -58,8 +59,22 @@ class AlbumRepository(
         }
     }
 
+    fun getAllFoldersWithInfo(): Flow<List<FolderInfo>> {
+        return imageDao.getAllFoldersWithInfo()
+    }
+
+    fun getAllFoldersWithInfoByName(): Flow<List<FolderInfo>> {
+        return imageDao.getAllFoldersWithInfoByName()
+    }
+
     fun getAllFolders(): Flow<List<String>> {
         return imageDao.getAllFolders()
+    }
+
+    fun getAllImagesByNameAsc(): Flow<List<ImageItem>> {
+        return imageDao.getAllImagesByNameAsc().map { entities ->
+            entities.map { it.toImageItem() }
+        }
     }
 
     suspend fun getImageByUri(uri: String): ImageItem? {

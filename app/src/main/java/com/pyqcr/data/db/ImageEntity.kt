@@ -31,3 +31,9 @@ data class UriAiReason(
     val uri: String,
     val aiReason: String?
 )
+
+data class FolderInfo(
+    val folderName: String,
+    val imageCount: Int,
+    val lastModified: Long
+)
