@@ -35,7 +35,9 @@ import com.pyqcr.data.model.AiRatingResult
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.io.File
@@ -328,12 +330,9 @@ fun AiRatingScreen(
                             progress = 0
                             totalCount = selectedImages.size
 
-                            suspend fun log(msg: String) {
+                            fun log(msg: String) {
                                 val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-                                val entry = "[$ts] $msg"
-                                withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                    debugLog = debugLog + entry
-                                }
+                                debugLog = debugLog + "[$ts] $msg"
                             }
 
                             log("=== AI Rating Session Started ===")
