@@ -4,14 +4,18 @@ import android.content.Context
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -19,9 +23,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.pyqcr.PyqCrApp
 import com.pyqcr.ai.AiRatingService
@@ -30,7 +34,6 @@ import com.pyqcr.data.model.AiRatingResult
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
-import com.pyqcr.ui.component.RatingBar
 import kotlinx.coroutines.launch
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -38,9 +41,12 @@ import androidx.security.crypto.MasterKey
 /**
  * AI Rating screen: configure API Key/Model, select images, run AI rating.
  *
- * When called from AiSelectScreen, initialSelectedUris and onUrisChanged
- * allow sharing the selection state so the user can add/remove images
- * and the selection persists.
+ * This screen is now the main entry point for AI features.
+ * It shows:
+ *   - API config with Save Config button
+ *   - Selected images in a square grid (tap to deselect)
+ *   - Submit to AI button to run rating
+ *   - Results section
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,8 +60,8 @@ fun AiRatingScreen(
     val repository = remember { AlbumRepository(context, app.database) }
 
     // API key & model (persisted with EncryptedSharedPreferences)
-    var apiKey by remember { mutableStateOf(loadApiKey(context)) }
-    var modelName by remember { mutableStateOf("qwen-vl-plus") }
+    var apiKey by remember { mutableStateOf(loadApiKeyFromPrefs(context)) }
+    var modelName by remember { mutableStateOf(loadModelNameFromPrefs(context)) }
     var showApiKey by remember { mutableStateOf(false) }
 
     // State
@@ -88,292 +94,327 @@ fun AiRatingScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    // Clear all selection
+                    if (selectedImages.isNotEmpty()) {
+                        TextButton(onClick = {
+                            selectedImages = emptySet()
+                            onUrisChanged?.invoke(emptySet())
+                        }) {
+                            Text("Clear All", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
                 }
             )
         }
     ) { paddingValues ->
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues),
+                .padding(paddingValues)
+                .verticalScroll(rememberScrollState()),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // API Configuration section
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "API Configuration",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        Spacer(Modifier.height(12.dp))
-
-                        OutlinedTextField(
-                            value = apiKey,
-                            onValueChange = { apiKey = it },
-                            label = { Text("DashScope API Key") },
-                            placeholder = { Text("sk-...") },
-                            visualTransformation = if (showApiKey)
-                                VisualTransformation.None else PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            trailingIcon = {
-                                IconButton(onClick = { showApiKey = !showApiKey }) {
-                                    Text(if (showApiKey) "🙈" else "👁️")
-                                }
-                            }
-                        )
-
-                        Spacer(Modifier.height(8.dp))
-
-                        OutlinedTextField(
-                            value = modelName,
-                            onValueChange = { modelName = it },
-                            label = { Text("Model Name") },
-                            placeholder = { Text("qwen-vl-plus") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        Spacer(Modifier.height(8.dp))
-
-                        Text(
-                            text = "e.g. qwen-vl-plus, qwen-vl-max",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            // Selected images preview
-            if (selectedImages.isNotEmpty()) {
-                item {
+            // ======== API Configuration section ========
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "Selected: ${selectedImages.size} images",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    )
-                    val selImgs = allImages.filter { it.uri in selectedImages }
-                    LazyRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        items(selImgs, key = { it.uri }) { img ->
-                            Box(modifier = Modifier.size(56.dp)) {
-                                ImageThumbnail(
-                                    imageUri = img.uri,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Select mode / select all
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Select Images (${selectedImages.size} selected)",
-                        style = MaterialTheme.typography.titleSmall
-                    )
-                    TextButton(onClick = {
-                        val newSet = if (selectedImages.size == allImages.size)
-                            emptySet()
-                        else
-                            allImages.map { it.uri }.toSet()
-                        selectedImages = newSet
-                        onUrisChanged?.invoke(newSet)
-                    }) {
-                        Text(if (selectedImages.size == allImages.size) "Deselect All" else "Select All")
-                    }
-                }
-            }
-
-            // Image selection grid
-            val currentSelected = selectedImages
-            items(allImages) { image ->
-                val isSelected = image.uri in currentSelected
-                ElevatedCard(
-                    onClick = {
-                        val newSet = if (isSelected)
-                            currentSelected - image.uri
-                        else
-                            currentSelected + image.uri
-                        selectedImages = newSet
-                        onUrisChanged?.invoke(newSet)
-                    },
-                    colors = CardDefaults.elevatedCardColors(
-                        containerColor = if (isSelected)
-                            MaterialTheme.colorScheme.primaryContainer
-                        else
-                            MaterialTheme.colorScheme.surface
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = image.displayName,
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        if (isSelected) {
-                            Text(
-                                text = "✓",
-                                color = MaterialTheme.colorScheme.primary,
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Run button
-            item {
-                Button(
-                    onClick = {
-                        if (apiKey.isBlank()) {
-                            Toast.makeText(context, "Please enter API Key", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-                        if (selectedImages.isEmpty()) {
-                            Toast.makeText(context, "Please select images", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-
-                        scope.launch {
-                            isRunning = true
-                            results = emptyList()
-                            currentStatus = "Resizing images..."
-                            progress = 0
-                            totalCount = selectedImages.size
-
-                            val resizer = ImageResizer(context)
-                            val service = AiRatingService()
-
-                            // Step 1: Resize images
-                            val resizedPaths = selectedImages.mapNotNull { uriString ->
-                                currentStatus = "Resizing: ${uriString.substringAfterLast('/')}"
-                                resizer.resizeForAi(Uri.parse(uriString))
-                            }
-
-                            if (resizedPaths.isEmpty()) {
-                                currentStatus = "Failed to resize any images"
-                                isRunning = false
-                                return@launch
-                            }
-
-                            // Step 2: Save API key
-                            saveApiKey(context, apiKey)
-
-                            // Step 3: Rate images
-                            currentStatus = "Sending to AI for rating..."
-                            val ratingResults = service.rateImages(
-                                apiKey = apiKey,
-                                modelName = modelName,
-                                resizedImagePaths = resizedPaths,
-                                onProgress = { current, total ->
-                                    progress = current
-                                    totalCount = total
-                                    currentStatus = "Rating: $current/$total"
-                                }
-                            )
-
-                            // Step 4: Save results to DB
-                            currentStatus = "Saving results..."
-                            for (result in ratingResults) {
-                                // Find original URI for this result
-                                val origUri = allImages.find { img ->
-                                    result.imageName == img.displayName ||
-                                            resizedPaths.indexOfFirst { it.endsWith(result.imageName) } >= 0
-                                }?.uri
-                                if (origUri != null) {
-                                    repository.updateAiScore(origUri, result.score)
-                                }
-                            }
-
-                            results = ratingResults
-                            resizer.clearCache()
-                            currentStatus = "Completed: ${ratingResults.size} images rated"
-                            isRunning = false
-
-                            if (ratingResults.isEmpty()) {
-                                Toast.makeText(context, "No results from AI", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(
-                                    context,
-                                    "Rated ${ratingResults.size} images",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        }
-                    },
-                    enabled = !isRunning && apiKey.isNotBlank() && selectedImages.isNotEmpty(),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    if (isRunning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    Text(if (isRunning) "Running..." else "Run AI Rating")
-                }
-            }
-
-            // Progress indicator
-            if (isRunning) {
-                item {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        if (totalCount > 0) {
-                            LinearProgressIndicator(
-                                progress = { progress.toFloat() / totalCount.coerceAtLeast(1) },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = currentStatus,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            // Results section
-            if (results.isNotEmpty()) {
-                item {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    Text(
-                        text = "Results (sorted by score)",
+                        text = "API Configuration",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
+
+                    Spacer(Modifier.height(12.dp))
+
+                    OutlinedTextField(
+                        value = apiKey,
+                        onValueChange = { apiKey = it },
+                        label = { Text("DashScope API Key") },
+                        placeholder = { Text("sk-...") },
+                        visualTransformation = if (showApiKey)
+                            VisualTransformation.None else PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        trailingIcon = {
+                            IconButton(onClick = { showApiKey = !showApiKey }) {
+                                Text(if (showApiKey) "🙈" else "👁️")
+                            }
+                        }
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    OutlinedTextField(
+                        value = modelName,
+                        onValueChange = { modelName = it },
+                        label = { Text("Model Name") },
+                        placeholder = { Text("qwen-vl-plus") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Text(
+                        text = "e.g. qwen-vl-plus, qwen-vl-max",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+
+                    // Save Config button
+                    Button(
+                        onClick = {
+                            if (apiKey.isBlank()) {
+                                Toast.makeText(context, "API Key cannot be empty", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                            saveApiKeyToPrefs(context, apiKey)
+                            saveModelNameToPrefs(context, modelName)
+                            configSaved = true
+                            Toast.makeText(context, "Configuration saved", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            Icons.Default.Save,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Save Config")
+                    }
                 }
+            }
+
+            // ======== Select / Deselect controls ========
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Selected: ${selectedImages.size} images",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                TextButton(onClick = {
+                    val newSet = if (selectedImages.size == allImages.size)
+                        emptySet()
+                    else
+                        allImages.map { it.uri }.toSet()
+                    selectedImages = newSet
+                    onUrisChanged?.invoke(newSet)
+                }) {
+                    Text(if (selectedImages.size == allImages.size) "Deselect All" else "Select All")
+                }
+            }
+
+            // ======== Selected images square grid view ========
+            if (selectedImages.isNotEmpty()) {
+                val selImgs = allImages.filter { it.uri in selectedImages }
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    contentPadding = PaddingValues(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 600.dp)
+                        .background(Color.Black)
+                ) {
+                    gridItems(selImgs, key = { it.uri }) { image ->
+                        Box(
+                            modifier = Modifier
+                                .aspectRatio(1f)
+                                .clickable {
+                                    selectedImages = selectedImages - image.uri
+                                    onUrisChanged?.invoke(selectedImages)
+                                }
+                        ) {
+                            ImageThumbnail(
+                                imageUri = image.uri,
+                                modifier = Modifier.fillMaxSize(),
+                                backgroundColor = Color.Black
+                            )
+                            // Green border
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .border(3.dp, Color.Green)
+                            )
+                            // ✕ overlay
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color(0x40000000)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("✕", color = Color.White, fontSize = MaterialTheme.typography.headlineLarge.fontSize)
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Empty state
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "No images selected yet.",
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "Go to Album, long-press an image, and choose\nSelect for AI Ranking to add images here.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // ======== Submit to AI button ========
+            Button(
+                onClick = {
+                    if (apiKey.isBlank()) {
+                        Toast.makeText(context, "Please enter and save API Key first", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+                    if (selectedImages.isEmpty()) {
+                        Toast.makeText(context, "Please select images", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+
+                    scope.launch {
+                        isRunning = true
+                        results = emptyList()
+                        currentStatus = "Resizing images..."
+                        progress = 0
+                        totalCount = selectedImages.size
+
+                        val resizer = ImageResizer(context)
+                        val service = AiRatingService()
+
+                        // Step 1: Save config
+                        saveApiKeyToPrefs(context, apiKey)
+                        saveModelNameToPrefs(context, modelName)
+
+                        // Step 2: Resize images
+                        val resizedPaths = selectedImages.mapNotNull { uriString ->
+                            currentStatus = "Resizing: ${uriString.substringAfterLast('/')}"
+                            resizer.resizeForAi(Uri.parse(uriString))
+                        }
+
+                        if (resizedPaths.isEmpty()) {
+                            currentStatus = "Failed to resize any images"
+                            isRunning = false
+                            return@launch
+                        }
+
+                        // Step 3: Rate images
+                        currentStatus = "Sending to AI for rating..."
+                        val ratingResults = service.rateImages(
+                            apiKey = apiKey,
+                            modelName = modelName,
+                            resizedImagePaths = resizedPaths,
+                            onProgress = { current, total ->
+                                progress = current
+                                totalCount = total
+                                currentStatus = "Rating: $current/$total"
+                            }
+                        )
+
+                        // Step 4: Save results to DB
+                        currentStatus = "Saving results..."
+                        for (result in ratingResults) {
+                            val origUri = allImages.find { img ->
+                                result.imageName == img.displayName ||
+                                        resizedPaths.indexOfFirst { it.endsWith(result.imageName) } >= 0
+                            }?.uri
+                            if (origUri != null) {
+                                repository.updateAiScore(origUri, result.score)
+                            }
+                        }
+
+                        results = ratingResults
+                        resizer.clearCache()
+                        currentStatus = "Completed: ${ratingResults.size} images rated"
+                        isRunning = false
+
+                        if (ratingResults.isEmpty()) {
+                            Toast.makeText(context, "No results from AI", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(
+                                context,
+                                "Rated ${ratingResults.size} images",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                },
+                enabled = !isRunning && apiKey.isNotBlank() && selectedImages.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (isRunning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Icon(
+                    Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(if (isRunning) "Running..." else "Submit to AI Rating")
+            }
+
+            // ======== Progress indicator ========
+            if (isRunning) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    if (totalCount > 0) {
+                        LinearProgressIndicator(
+                            progress = { progress.toFloat() / totalCount.coerceAtLeast(1) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = currentStatus,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // ======== Results section ========
+            if (results.isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                Text(
+                    text = "Results (sorted by score)",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
 
                 val sortedResults = results.sortedByDescending { it.score }
-                items(sortedResults) { result ->
+                for (result in sortedResults) {
                     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Row(
@@ -402,40 +443,53 @@ fun AiRatingScreen(
                     }
                 }
             }
+
+            Spacer(Modifier.height(32.dp))
         }
     }
 }
 
-private fun loadApiKey(context: Context): String {
+// ---------- Persistence helpers ----------
+
+private const val PREFS_NAME = "pyqcr_secure_prefs"
+private const val KEY_API_KEY = "dashscope_api_key"
+private const val KEY_MODEL_NAME = "dashscope_model_name"
+
+private fun getEncryptedPrefs(context: Context): android.content.SharedPreferences? {
     return try {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
-        val prefs = EncryptedSharedPreferences.create(
+        EncryptedSharedPreferences.create(
             context,
-            "pyqcr_secure_prefs",
+            PREFS_NAME,
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
-        prefs.getString("dashscope_api_key", "") ?: ""
     } catch (e: Exception) {
-        ""
+        null
     }
 }
 
-private fun saveApiKey(context: Context, key: String) {
+private fun loadApiKeyFromPrefs(context: Context): String {
+    return try {
+        getEncryptedPrefs(context)?.getString(KEY_API_KEY, "") ?: ""
+    } catch (e: Exception) { "" }
+}
+
+private fun saveApiKeyToPrefs(context: Context, key: String) {
     try {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        val prefs = EncryptedSharedPreferences.create(
-            context,
-            "pyqcr_secure_prefs",
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-        prefs.edit().putString("dashscope_api_key", key).apply()
+        getEncryptedPrefs(context)?.edit()?.putString(KEY_API_KEY, key)?.apply()
     } catch (_: Exception) {}
+}
+
+private fun loadModelNameFromPrefs(context: Context): String {
+    val prefs = context.getSharedPreferences("pyqcr_ai_config", Context.MODE_PRIVATE)
+    return prefs.getString(KEY_MODEL_NAME, "qwen-vl-plus") ?: "qwen-vl-plus"
+}
+
+private fun saveModelNameToPrefs(context: Context, model: String) {
+    val prefs = context.getSharedPreferences("pyqcr_ai_config", Context.MODE_PRIVATE)
+    prefs.edit().putString(KEY_MODEL_NAME, model).apply()
 }

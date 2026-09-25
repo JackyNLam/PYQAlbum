@@ -108,8 +108,9 @@ fun ImageDetailScreen(
         ) {
             // Full-width image with tap-to-toggle controls
             val aspectRatio = remember(imageItem) {
-                if (imageItem != null && imageItem!!.height > 0)
-                    imageItem!!.width.toFloat() / imageItem!!.height.toFloat()
+                val item = imageItem
+                if (item != null && item.height > 0)
+                    item.width.toFloat() / item.height.toFloat()
                 else 1f
             }
             Box(

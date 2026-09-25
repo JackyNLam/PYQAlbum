@@ -663,7 +663,7 @@ private fun ImageGridView(
         ViewLayout.WATERFALL -> {
             WaterfallGrid(
                 images = images,
-                columns = 2,
+                columns = 3,
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
                 onImageClick = onImageClick,

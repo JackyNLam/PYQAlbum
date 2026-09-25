@@ -27,8 +27,11 @@ import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
 
 /**
- * Screen for managing images selected for AI rating.
- * Only shows the selected images as thumbnails — tap to deselect.
+ * AI Select Photos screen.
+ *
+ * This screen now directly forwards to AiRatingScreen.
+ * It acts as a bridge that loads the current AI-selected URIs
+ * and immediately shows the AiRatingScreen with those selections.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,12 +55,14 @@ fun AiSelectScreen(
     LaunchedEffect(Unit) {
         val saved = loadAiSelectedUris(context)
         aiSelectedUris = saved
+        // Skip the selection screen — go directly to AiRatingScreen
+        showAiRatingScreen = true
     }
 
     if (showAiRatingScreen) {
         AiRatingScreen(
             initialSelectedUris = aiSelectedUris,
-            onBack = { showAiRatingScreen = false },
+            onBack = { onBack() },
             onUrisChanged = { uris ->
                 aiSelectedUris = uris
                 saveAiSelectedUris(context, uris)
@@ -66,8 +71,7 @@ fun AiSelectScreen(
         return
     }
 
-    val selectedImages = allImages.filter { it.uri in aiSelectedUris }
-
+    // Brief loading / fallback screen
     Scaffold(
         topBar = {
             TopAppBar(
@@ -76,141 +80,17 @@ fun AiSelectScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                     }
-                },
-                actions = {
-                    if (aiSelectedUris.isNotEmpty()) {
-                        TextButton(onClick = {
-                            aiSelectedUris = emptySet()
-                            saveAiSelectedUris(context, emptySet())
-                        }) {
-                            Text("Clear All", color = MaterialTheme.colorScheme.error)
-                        }
-                    }
                 }
             )
-        },
-        bottomBar = {
-            if (aiSelectedUris.isNotEmpty()) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    tonalElevation = 8.dp,
-                    shadowElevation = 4.dp
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "${selectedImages.size} selected",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-
-                        Button(
-                            onClick = {
-                                if (aiSelectedUris.isEmpty()) {
-                                    Toast.makeText(context, "Select some images first", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    showAiRatingScreen = true
-                                }
-                            }
-                        ) {
-                            Icon(
-                                Icons.Default.AutoAwesome,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Submit & Rate")
-                        }
-                    }
-                }
-            }
         }
     ) { paddingValues ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
+                .padding(paddingValues),
+            contentAlignment = Alignment.Center
         ) {
-            if (selectedImages.isEmpty()) {
-                // Empty state — show info and all images for selection
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(32.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "No images selected yet.",
-                            style = MaterialTheme.typography.titleMedium,
-                            textAlign = TextAlign.Center
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "Go to Album, long-press an image, and choose\nSelect for AI Ranking to add images here.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            textAlign = TextAlign.Center,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            } else {
-                // Show only selected images in a grid — tap to deselect
-                Text(
-                    text = "Tap any image to remove it from AI selection:",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                )
-
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    contentPadding = PaddingValues(2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black)
-                ) {
-                    gridItems(selectedImages, key = { it.uri }) { image ->
-                        Box(
-                            modifier = Modifier
-                                .aspectRatio(1f)
-                                .clickable {
-                                    aiSelectedUris = aiSelectedUris - image.uri
-                                    saveAiSelectedUris(context, aiSelectedUris)
-                                }
-                        ) {
-                            ImageThumbnail(
-                                imageUri = image.uri,
-                                modifier = Modifier.fillMaxSize(),
-                                backgroundColor = Color.Black
-                            )
-                            // Green border overlay
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .border(3.dp, Color.Green)
-                            )
-                            // X overlay on hover
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color(0x40000000)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("✕", color = Color.White, fontSize = MaterialTheme.typography.headlineLarge.fontSize)
-                            }
-                        }
-                    }
-                }
-            }
+            CircularProgressIndicator()
         }
     }
 }
