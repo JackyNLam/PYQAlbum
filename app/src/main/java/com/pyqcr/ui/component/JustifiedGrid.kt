@@ -16,6 +16,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
@@ -36,6 +37,7 @@ fun JustifiedGrid(
     spacing: Dp = 2.dp,
     isMultiSelectMode: Boolean = false,
     selectedImageUris: Set<String> = emptySet(),
+    aiSelectedUris: Set<String> = emptySet(),
     onImageClick: ((String) -> Unit)? = null,
     onLongPress: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -101,6 +103,25 @@ fun JustifiedGrid(
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop
                         )
+                        // AI selection indicator
+                        if (image.uri in aiSelectedUris) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .background(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                                        shape = MaterialTheme.shapes.small
+                                    )
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "★",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
                         if (isMultiSelectMode && isSelected) {
                             Box(
                                 modifier = Modifier

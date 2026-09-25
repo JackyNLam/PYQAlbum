@@ -26,7 +26,10 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   5. **Submit to AI Rating** button runs the scoring
   6. Selection persists across app launches (SharedPreferences)
 - **Multi-select mode**: long-press enters multi-select; bottom bar has batch Tag / Rate / Remove Tags / AI Select
-- **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid; **swipe up to reveal** rating, tags, and AI selection panel
+- **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** rating, tags, and AI selection panel; **swipe left/right** to navigate to next/previous image in the same folder/tag
+- **AI-selected images** are marked with a ★ badge in all grid layouts (Grid, Waterfall, Justified) and TAG grid view
+- **Tag assignment** shows existing tags as selectable options before allowing custom tag creation
+- **Ratings persist** across app restarts — MediaStore refresh preserves existing ratings and AI scores
 
 ---
 
@@ -90,6 +93,8 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking |
 | **Swipe down on image** (detail view) | Go back to thumbnail grid |
+| **Swipe left** (detail view) | Next image in same folder/tag |
+| **Swipe right** (detail view) | Previous image in same folder/tag |
 | **Swipe up on image** (detail view) | Reveal rating bar, tags, AI selection panel |
 | **Toolbar Layout button** (inside folder) | Dropdown: Grid (▦) / Waterfall (🌊) / Justified (▭) |
 | **Toolbar Sort button** (inside folder) | Dropdown: Default / User Rating ↓ / AI Score ↓ |
@@ -138,8 +143,10 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 ### Image Detail Screen
 - **Full-screen image** — no `.aspectRatio()` constraint; uses `fillMaxSize()` + `ContentScale.Fit` inside a `Box` that fills available screen space
-- **Swipe down** anywhere on the image → navigates back to thumbnail grid
+- **Swipe down** anywhere on the image → navigates back to thumbnail grid (folder/tag context preserved)
 - **Swipe up** → reveals detail panel with rating bar, tags, AI selection, metadata
+- **Swipe left** → next image in same folder/tag
+- **Swipe right** → previous image in same folder/tag
 - Tap on image (when panel is hidden) to toggle top bar
 - Swipe down on the detail panel itself to hide it again
 

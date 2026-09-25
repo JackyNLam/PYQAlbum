@@ -32,6 +32,7 @@ fun WaterfallGrid(
     columns: Int = 3,
     isMultiSelectMode: Boolean = false,
     selectedImageUris: Set<String> = emptySet(),
+    aiSelectedUris: Set<String> = emptySet(),
     onImageClick: ((String) -> Unit)? = null,
     onLongPress: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -55,6 +56,26 @@ fun WaterfallGrid(
                     )
             ) {
                 WaterfallTile(image = image)
+
+                // AI selection indicator
+                if (image.uri in aiSelectedUris) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .background(
+                                androidx.compose.material3.MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                                shape = androidx.compose.material3.MaterialTheme.shapes.small
+                            )
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        androidx.compose.material3.Text(
+                            text = "★",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            style = androidx.compose.material3.MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
 
                 if (isMultiSelectMode && isSelected) {
                     Box(

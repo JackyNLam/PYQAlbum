@@ -11,6 +11,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
@@ -70,7 +71,7 @@ fun AlbumScreen(
     var selectedBrowseMode by rememberSaveable { mutableStateOf(BrowseMode.FOLDER) }
     var selectedViewLayout by rememberSaveable { mutableStateOf(ViewLayout.GRID) }
     var selectedFolder by rememberSaveable { mutableStateOf<String?>(null) }
-    var selectedTag by rememberSaveable { mutableStateOf<TagEntity?>(null) }
+    var selectedTagName by rememberSaveable { mutableStateOf<String?>(null) }
 
     // Multi-select state
     var isMultiSelectMode by remember { mutableStateOf(false) }
@@ -84,7 +85,7 @@ fun AlbumScreen(
     var showActionDialog by remember { mutableStateOf(false) }
 
     // Tag mode local state
-    var tags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+    var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var tagImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
 
     // Folder sort state — sort images inside a folder by rating
@@ -134,12 +135,18 @@ fun AlbumScreen(
     }
 
     // Load tags for Tag mode
+    var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     LaunchedEffect(selectedBrowseMode) {
         if (selectedBrowseMode == BrowseMode.TAG) {
             tagDao.getAllTags().collect { tagList ->
-                tags = tagList
+                allTags = tagList
             }
         }
+    }
+
+    // Derive selectedTag from selectedTagName
+    val selectedTag: TagEntity? = remember(selectedTagName, allTags) {
+        allTags.find { it.name == selectedTagName }
     }
 
     // Load tag images when a tag is selected
@@ -168,6 +175,7 @@ fun AlbumScreen(
         LongPressActionDialog(
             imageUri = imageUri,
             currentAiSelected = imageUri in aiSelectedUris,
+            existingTags = allTags,
             onDismiss = {
                 showActionDialog = false
                 longPressedImageUri = null
@@ -215,7 +223,7 @@ fun AlbumScreen(
                     selected = selectedBrowseMode == BrowseMode.FOLDER,
                     onClick = {
                         selectedBrowseMode = BrowseMode.FOLDER
-                        selectedTag = null
+                        selectedTagName = null
                         scope.launch { drawerState.close() }
                     }
                 )
@@ -226,7 +234,7 @@ fun AlbumScreen(
                     selected = selectedBrowseMode == BrowseMode.TAG,
                     onClick = {
                         selectedBrowseMode = BrowseMode.TAG
-                        selectedTag = null
+                        selectedTagName = null
                         scope.launch { drawerState.close() }
                     }
                 )
@@ -265,7 +273,7 @@ fun AlbumScreen(
                             BrowseMode.FOLDER -> Text(
                                 if (selectedFolder != null) selectedFolder!! else "pyqAlbum"
                             )
-                            BrowseMode.TAG -> Text(selectedTag?.name ?: "Tags")
+                            BrowseMode.TAG -> Text(selectedTagName ?: "Tags")
                         }
                     },
                     actions = {
@@ -483,6 +491,7 @@ fun AlbumScreen(
                                         viewLayout = selectedViewLayout,
                                         isMultiSelectMode = isMultiSelectMode,
                                         selectedImageUris = selectedImageUris,
+                                        aiSelectedUris = aiSelectedUris,
                                         onImageClick = { uri, _ ->
                                             if (isMultiSelectMode) {
                                                 selectedImageUris = if (uri in selectedImageUris)
@@ -511,7 +520,7 @@ fun AlbumScreen(
                     }
 
                     BrowseMode.TAG -> {
-                        if (selectedTag == null) {
+                        if (selectedTagName == null) {
                             // Show tag list as a grid
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(3),
@@ -520,9 +529,9 @@ fun AlbumScreen(
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                items(tags) { tag ->
+                                items(allTags) { tag ->
                                     ElevatedCard(
-                                        onClick = { selectedTag = tag },
+                                        onClick = { selectedTagName = tag.name },
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text(
@@ -537,7 +546,7 @@ fun AlbumScreen(
                             Column(modifier = Modifier.fillMaxSize()) {
                                 // Back button row
                                 TextButton(
-                                    onClick = { selectedTag = null },
+                                    onClick = { selectedTagName = null },
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                 ) {
                                     Icon(
@@ -590,6 +599,25 @@ fun AlbumScreen(
                                                     contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                                                     backgroundColor = Color.Black
                                                 )
+                                                // AI selection indicator
+                                                if (image.uri in aiSelectedUris) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.BottomEnd)
+                                                            .background(
+                                                                MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                                                                shape = MaterialTheme.shapes.small
+                                                            )
+                                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "★",
+                                                            color = Color.White,
+                                                            fontWeight = FontWeight.Bold,
+                                                            style = MaterialTheme.typography.labelSmall
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -637,6 +665,7 @@ private fun DrawerItem(
 private fun LongPressActionDialog(
     imageUri: String,
     currentAiSelected: Boolean,
+    existingTags: List<TagEntity>,
     onDismiss: () -> Unit,
     onAssignRating: (Float) -> Unit,
     onSelectForAi: (Boolean) -> Unit,
@@ -743,13 +772,44 @@ private fun LongPressActionDialog(
                 onDismissRequest = { dialogStep = DialogStep.Main },
                 title = { Text("Add Tag") },
                 text = {
-                    OutlinedTextField(
-                        value = customTagName,
-                        onValueChange = { customTagName = it },
-                        label = { Text("Tag name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    Column {
+                        // Existing tags to choose from
+                        if (existingTags.isNotEmpty()) {
+                            Text(
+                                text = "Choose existing tag:",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                                items(existingTags) { tag ->
+                                    OutlinedButton(
+                                        onClick = {
+                                            onAddTag(tag.name)
+                                            customTagName = ""
+                                        },
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                    ) {
+                                        Text(tag.name)
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            HorizontalDivider()
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Or create new:",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        OutlinedTextField(
+                            value = customTagName,
+                            onValueChange = { customTagName = it },
+                            label = { Text("Tag name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 },
                 confirmButton = {
                     TextButton(onClick = {
@@ -866,6 +926,7 @@ private fun ImageGridView(
     viewLayout: ViewLayout,
     isMultiSelectMode: Boolean,
     selectedImageUris: Set<String>,
+    aiSelectedUris: Set<String>,
     onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit
 ) {
@@ -897,6 +958,25 @@ private fun ImageGridView(
                             contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                             backgroundColor = Color.Black
                         )
+                        // AI selection indicator (star badge)
+                        if (image.uri in aiSelectedUris) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .background(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                                        shape = MaterialTheme.shapes.small
+                                    )
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "★",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
                         if (isMultiSelectMode && isSelected) {
                             Box(
                                 modifier = Modifier
@@ -929,6 +1009,7 @@ private fun ImageGridView(
                 columns = 3,
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
+                aiSelectedUris = aiSelectedUris,
                 onImageClick = gridClick,
                 onLongPress = onLongPress,
                 modifier = Modifier.fillMaxSize()
@@ -941,6 +1022,7 @@ private fun ImageGridView(
                 images = images,
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
+                aiSelectedUris = aiSelectedUris,
                 onImageClick = justifiedClick,
                 onLongPress = onLongPress,
                 modifier = Modifier.fillMaxSize()
