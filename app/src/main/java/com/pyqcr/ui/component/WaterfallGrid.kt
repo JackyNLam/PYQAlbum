@@ -29,7 +29,7 @@ import com.pyqcr.data.model.ImageItem
 @Composable
 fun WaterfallGrid(
     images: List<ImageItem>,
-    columns: Int = 2,
+    columns: Int = 3,
     isMultiSelectMode: Boolean = false,
     selectedImageUris: Set<String> = emptySet(),
     onImageClick: ((String) -> Unit)? = null,

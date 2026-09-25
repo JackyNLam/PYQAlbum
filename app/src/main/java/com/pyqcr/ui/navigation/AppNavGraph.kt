@@ -1,5 +1,6 @@
 package com.pyqcr.ui.navigation
 
+import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -17,7 +18,12 @@ object Routes {
     const val AI_SELECT = "ai_select"
     const val BATCH_EDIT = "batch_edit/{mode}"
 
-    fun imageDetail(imageUri: String) = "image_detail/$imageUri"
+    /**
+     * URL-encode the imageUri so that Navigation Compose doesn't break
+     * on URI path separators (e.g., "content://media/...").
+     */
+    fun imageDetail(imageUri: String) = "image_detail/${Uri.encode(imageUri)}"
+
     fun batchEdit(mode: String) = "batch_edit/$mode"
 }
 

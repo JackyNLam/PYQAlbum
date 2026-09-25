@@ -43,9 +43,12 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ImageDetailScreen(
-    imageUri: String,
+    imageUriRaw: String,
     onBack: () -> Unit
 ) {
+    // URL-decode the URI — Navigation Compose encodes it to avoid path-segment issues
+    val imageUri = Uri.decode(imageUriRaw)
+
     val context = LocalContext.current
     val app = context.applicationContext as PyqCrApp
     val imageDao = app.database.imageDao()
