@@ -78,15 +78,21 @@ class AlbumRepository(
         imageDao.updateAiScore(uri, score)
     }
 
+    suspend fun updateAiReason(uri: String, reason: String) {
+        imageDao.updateAiReason(uri, reason)
+    }
+
     suspend fun refreshImagesFromMediaStore() = withContext(ioDispatcher) {
         // Preserve existing ratings and AI scores so they aren't wiped by re-insert
         val existingRatings = imageDao.getAllUriRatings().associate { it.uri to it.rating }
         val existingAiScores = imageDao.getAllUriAiScores().associate { it.uri to it.aiScore }
+        val existingAiReasons = imageDao.getAllUriAiReasons().associate { it.uri to it.aiReason }
 
         val images = loadImagesFromMediaStore().map { entity ->
             entity.copy(
                 rating = existingRatings[entity.uri] ?: entity.rating,
-                aiScore = existingAiScores[entity.uri] ?: entity.aiScore
+                aiScore = existingAiScores[entity.uri] ?: entity.aiScore,
+                aiReason = existingAiReasons[entity.uri] ?: entity.aiReason
             )
         }
         imageDao.deleteAll()
@@ -162,6 +168,7 @@ class AlbumRepository(
         sizeBytes = sizeBytes,
         dateAdded = dateAdded,
         folderName = folderName,
-        aiScore = aiScore
+        aiScore = aiScore,
+        aiReason = aiReason
     )
 }

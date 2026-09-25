@@ -409,8 +409,9 @@ fun AiRatingScreen(
                                     }?.uri
                                     if (origUri != null) {
                                         repository.updateAiScore(origUri, result.score)
+                                        repository.updateAiReason(origUri, result.reason)
                                         savedCount++
-                                        log("  -> Saved to DB: $origUri")
+                                        log("  -> Saved to DB: $origUri (score=${result.score}, reason=${result.reason})")
                                     } else {
                                         log("  -> WARN: Could not find original image for ${result.imageName}")
                                     }

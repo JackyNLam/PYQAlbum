@@ -92,7 +92,8 @@ fun ImageDetailScreen(
                 sizeBytes = it.sizeBytes,
                 dateAdded = it.dateAdded,
                 folderName = it.folderName,
-                aiScore = it.aiScore
+                aiScore = it.aiScore,
+                aiReason = it.aiReason
             )
         }
         rating = entity?.rating ?: 0f
@@ -282,6 +283,14 @@ fun ImageDetailScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.primary
                         )
+                        imageItem?.aiReason?.let { reason ->
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = reason,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
 
                     Spacer(Modifier.height(16.dp))

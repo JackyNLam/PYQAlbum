@@ -13,7 +13,8 @@ data class ImageEntity(
     val sizeBytes: Long,
     val dateAdded: Long,
     val folderName: String,
-    val aiScore: Float? = null              // AI score (1-100), optional
+    val aiScore: Float? = null,             // AI score (1-100), optional
+    val aiReason: String? = null            // AI description/reason, optional
 )
 
 data class UriRating(
@@ -24,4 +25,9 @@ data class UriRating(
 data class UriAiScore(
     val uri: String,
     val aiScore: Float?
+)
+
+data class UriAiReason(
+    val uri: String,
+    val aiReason: String?
 )

@@ -9,5 +9,6 @@ data class ImageItem(
     val sizeBytes: Long = 0L,
     val dateAdded: Long = 0L,
     val folderName: String = "",
-    val aiScore: Float? = null
+    val aiScore: Float? = null,
+    val aiReason: String? = null
 )
