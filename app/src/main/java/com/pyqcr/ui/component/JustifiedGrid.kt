@@ -25,6 +25,7 @@ import coil3.size.Scale
 import com.pyqcr.data.model.ImageItem
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material3.Icon
 
 /**
  * Simple justified grid: 3 images per row, fixed height, dynamic width

@@ -22,6 +22,7 @@ import coil3.request.crossfade
 import com.pyqcr.data.model.ImageItem
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material3.Icon
 
 /**
  * Pinterest-style waterfall/staggered grid.
