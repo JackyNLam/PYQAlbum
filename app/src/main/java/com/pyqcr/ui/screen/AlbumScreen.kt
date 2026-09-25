@@ -578,10 +578,6 @@ fun AlbumScreen(
                                                     .aspectRatio(1f)
                                                     .combinedClickable(
                                                         onClick = { onImageClick(image.uri, tagImageUris) },
-                                                modifier = Modifier
-                                                    .aspectRatio(1f)
-                                                    .combinedClickable(
-                                                        onClick = { onImageClick(image.uri, tagImageUris) },
                                                         onLongClick = {
                                                             longPressedImageUri = image.uri
                                                             showActionDialog = true
