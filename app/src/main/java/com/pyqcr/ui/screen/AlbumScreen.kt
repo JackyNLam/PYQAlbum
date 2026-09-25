@@ -483,7 +483,7 @@ fun AlbumScreen(
                                         viewLayout = selectedViewLayout,
                                         isMultiSelectMode = isMultiSelectMode,
                                         selectedImageUris = selectedImageUris,
-                                        onImageClick = { uri ->
+                                        onImageClick = { uri, _ ->
                                             if (isMultiSelectMode) {
                                                 selectedImageUris = if (uri in selectedImageUris)
                                                     selectedImageUris - uri
@@ -549,6 +549,8 @@ fun AlbumScreen(
                                     Text("All Tags")
                                 }
 
+                                val tagImageUris = remember(tagImages) { tagImages.map { it.uri } }
+
                                 if (tagImages.isEmpty()) {
                                     Box(
                                         modifier = Modifier.fillMaxSize(),
@@ -570,9 +572,12 @@ fun AlbumScreen(
                                             .fillMaxSize()
                                             .background(Color.Black)
                                     ) {
-                                        val tagImageUris = remember(tagImages) { tagImages.map { it.uri } }
                                         items(tagImages, key = { it.uri }) { image ->
                                             Box(
+                                                modifier = Modifier
+                                                    .aspectRatio(1f)
+                                                    .combinedClickable(
+                                                        onClick = { onImageClick(image.uri, tagImageUris) },
                                                 modifier = Modifier
                                                     .aspectRatio(1f)
                                                     .combinedClickable(
@@ -859,7 +864,6 @@ private fun PermissionRequestScreen(
 }
 
 @OptIn(ExperimentalFoundationApi::class)
-@Composable
 @Composable
 private fun ImageGridView(
     images: List<ImageItem>,
