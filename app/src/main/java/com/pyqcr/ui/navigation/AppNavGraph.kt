@@ -68,9 +68,9 @@ fun AppNavGraph() {
                 navArgument("imageUri") { type = NavType.StringType }
             )
         ) { backStackEntry ->
-            val imageUri = backStackEntry.arguments?.getString("imageUri") ?: return@composable
+            val imageUriRaw = backStackEntry.arguments?.getString("imageUri") ?: return@composable
             ImageDetailScreen(
-                imageUri = imageUri,
+                imageUriRaw = imageUriRaw,
                 onBack = { navController.popBackStack() }
             )
         }
