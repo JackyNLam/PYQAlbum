@@ -148,11 +148,21 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val app = getApplication<PyqCrApp>()
             val tagDao = app.database.tagDao()
+            // Try to get existing tag; if unique-index conflict prevents insert,
+            // fall back to re-fetching from the database
             var tag = tagDao.getTagByName(tagName)
             val tagId = if (tag != null) {
                 tag.id
             } else {
-                tagDao.insertTag(com.pyqcr.data.db.TagEntity(name = tagName))
+                val insertedId = tagDao.insertTag(com.pyqcr.data.db.TagEntity(name = tagName))
+                if (insertedId == -1L) {
+                    // Race: another coroutine inserted the same tag name first.
+                    // Re-query to get the existing row's ID.
+                    tag = tagDao.getTagByName(tagName)
+                    tag?.id ?: return@launch
+                } else {
+                    insertedId
+                }
             }
             if (tagDao.hasTag(uri, tagId) == 0) {
                 tagDao.addTagToImage(com.pyqcr.data.db.ImageTagCrossRef(imageUri = uri, tagId = tagId))

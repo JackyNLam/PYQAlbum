@@ -135,14 +135,6 @@ fun AlbumScreen(
                     val label = if (operation == "copy") "Copied" else "Moved"
                     copyMoveMessage = "$label $successCount/${uris.size} images to ${destDir.name}"
                     snackbarHostState.showSnackbar(copyMoveMessage)
-                    // Reset multi-select after operation
-                    if (operation == "move") {
-                        // For moves, keep only URIs that still exist
-                        selectedImageUris = selectedImageUris.filter { uri ->
-                            val path = com.pyqcr.ui.util.FileOperationHelper.resolveFilePath(context, uri)
-                            path != null && File(path).exists()
-                        }.toSet()
-                    }
                     isMultiSelectMode = false
                     selectedImageUris = emptySet()
                 } catch (e: Exception) {

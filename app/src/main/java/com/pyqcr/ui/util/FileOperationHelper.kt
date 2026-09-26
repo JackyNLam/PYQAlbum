@@ -91,53 +91,18 @@ object FileOperationHelper {
         }
     }
 
-    /** Move a file using real file paths. Tries rename, falls back to copy+delete. */
+    /** Move a file by copying to destination. Does NOT delete source (avoids inconsistent
+     * behavior of contentResolver.delete across Android versions). The app refreshes
+     * afterward so the user sees the file in both locations and can manually clean up. */
     suspend fun moveViaFilePath(
         context: Context,
         sourceUri: String,
         destDir: File
     ): String? = withContext(Dispatchers.IO) {
-        try {
-            val contentUri = Uri.parse(sourceUri)
-            val fileName = getFileName(context, sourceUri)
-
-            // First try to get real file path for fast rename
-            val sourcePath = resolveFilePath(context, sourceUri)
-            if (sourcePath != null) {
-                val sourceFile = File(sourcePath)
-                if (sourceFile.exists()) {
-                    if (!destDir.exists()) destDir.mkdirs()
-                    val destFile = resolveConflict(File(destDir, sourceFile.name))
-                    // Try rename (fast, same filesystem)
-                    if (sourceFile.renameTo(destFile)) {
-                        MediaStoreUtils.scanFile(context, destFile.absolutePath)
-                        MediaStoreUtils.deleteFromMediaStore(context, sourceUri)
-                        return@withContext destFile.absolutePath
-                    }
-                    // Fallback: copy + delete
-                    sourceFile.copyTo(destFile, overwrite = false)
-                    sourceFile.delete()
-                    MediaStoreUtils.scanFile(context, destFile.absolutePath)
-                    MediaStoreUtils.deleteFromMediaStore(context, sourceUri)
-                    return@withContext destFile.absolutePath
-                }
-            }
-
-            // Fallback: copy via ContentResolver then delete
-            if (!destDir.exists()) destDir.mkdirs()
-            val destFile = resolveConflict(File(destDir, fileName))
-            context.contentResolver.openInputStream(contentUri)?.use { input ->
-                FileOutputStream(destFile).use { output ->
-                    input.copyTo(output)
-                }
-            } ?: return@withContext null
-            MediaStoreUtils.scanFile(context, destFile.absolutePath)
-            MediaStoreUtils.deleteFromMediaStore(context, sourceUri)
-            destFile.absolutePath
-        } catch (e: Exception) {
-            Log.e(TAG, "moveViaFilePath failed for $sourceUri", e)
-            null
-        }
+        // Move is implemented as a copy: the source file stays in MediaStore
+        // to avoid the 'remove photo' bug where contentResolver.delete() on
+        // modern Android inconsistently deletes or trashes the original.
+        copyViaFilePath(context, sourceUri, destDir)
     }
 
     // ---------- Batch operations ----------
