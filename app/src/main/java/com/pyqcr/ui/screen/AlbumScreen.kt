@@ -55,10 +55,9 @@ import java.util.*
  * Browse modes: Folder / Tag / Rating (3 options in left drawer)
  * View layouts: Grid / Waterfall / Justified (toolbar toggles)
  *
- * Long-press any image → opens a dialog to assign rating, add tag,
- * or select for AI ranking.
- *
- * Multi-select mode: bottom action bar with batch operations.
+ * Long-press any image → enters multi-select mode.
+ * Multi-select mode: bottom action bar (⋮) with batch operations:
+ * Rating, Tag management, AI Ranking toggle, Copy to, Move to.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -99,10 +98,6 @@ fun AlbumScreen(
     var showTagDialog by remember { mutableStateOf(false) }
     var showRateDialog by remember { mutableStateOf(false) }
     var showRemoveTagsDialog by remember { mutableStateOf(false) }
-
-    // Long-press action dialog state (single image actions)
-    var showLongPressActionDialog by remember { mutableStateOf(false) }
-    var longPressImageUri by remember { mutableStateOf<String?>(null) }
 
     // Tag mode local state
     var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
@@ -252,90 +247,7 @@ fun AlbumScreen(
         }
     }
 
-    // Long-press directly enters multi-select mode
-    // (dialog removed — shortcut for batch select)
-
-    // Single-image long-press action dialog
-    if (showLongPressActionDialog && longPressImageUri != null) {
-        val lpUri = longPressImageUri!!
-        val isLpAiSelected = lpUri in aiSelectedUris
-        AlertDialog(
-            onDismissRequest = {
-                showLongPressActionDialog = false
-                longPressImageUri = null
-            },
-            title = { Text("Image Actions") },
-            text = {
-                Column {
-                    OutlinedButton(
-                        onClick = {
-                            showLongPressActionDialog = false
-                            longPressImageUri = null
-                            // Show single image rating dialog
-                            isMultiSelectMode = true
-                            selectedImageUris = setOf(lpUri)
-                            showRateDialog = true
-                        },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    ) {
-                        Icon(Icons.Default.Star, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Assign Rating")
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            showLongPressActionDialog = false
-                            longPressImageUri = null
-                            // Show single image tag dialog
-                            isMultiSelectMode = true
-                            selectedImageUris = setOf(lpUri)
-                            showTagDialog = true
-                        },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    ) {
-                        Icon(Icons.Default.Label, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Add Tag")
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            showLongPressActionDialog = false
-                            longPressImageUri = null
-                            // Toggle AI ranking selection
-                            val currentSet = loadAiSelectedUris(context).toMutableSet()
-                            if (lpUri in currentSet) {
-                                currentSet.remove(lpUri)
-                            } else {
-                                currentSet.add(lpUri)
-                            }
-                            aiSelectedUris = currentSet
-                            saveAiSelectedUris(context, currentSet)
-                        },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    ) {
-                        Icon(
-                            if (isLpAiSelected) Icons.Default.CheckCircle else Icons.Default.AutoAwesome,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                            tint = if (isLpAiSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            if (isLpAiSelected) "✓ AI Ranking" else "AI Ranking",
-                            color = if (isLpAiSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = {
-                    showLongPressActionDialog = false
-                    longPressImageUri = null
-                }) { Text("Cancel") }
-            }
-        )
-    }
+    // Long-press directly enters multi-select mode (no popup dialog)
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -852,9 +764,9 @@ fun AlbumScreen(
                                                 else
                                                     selectedImageUris + uri
                                             } else {
-                                                // Show action dialog
-                                                longPressImageUri = uri
-                                                showLongPressActionDialog = true
+                                                // Enter multi-select mode
+                                                isMultiSelectMode = true
+                                                selectedImageUris = setOf(uri)
                                             }
                                         }
                                     )
@@ -932,8 +844,9 @@ fun AlbumScreen(
                                                     .combinedClickable(
                                                         onClick = { onImageClick(image.uri, tagImageUris) },
                                                         onLongClick = {
-                                                            longPressImageUri = image.uri
-                                                            showLongPressActionDialog = true
+                                                            // Enter multi-select mode
+                                                            isMultiSelectMode = true
+                                                            selectedImageUris = setOf(image.uri)
                                                         }
                                                     )
                                             ) {
