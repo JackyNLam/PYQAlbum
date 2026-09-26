@@ -16,7 +16,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - **Justified Grid**: 3 images per row, fixed height (120dp), dynamic width proportional to aspect ratio
 - **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Rating
 - **Click thumbnail** → full-screen detail view (safe null handling, no crash)
-- **Long-press** → action dialog: assign rating / add tag / select for AI ranking
+- **Long-press** → enters multi-select mode directly (no intermediate dialog); bottom bar shows selected count, action menu (⋮), and Cancel
 - **Sort inside a folder**: Use the Sort (↕) button in the toolbar:
   - **↓Modified date** (default) — newest photos first
   - **↑Name** — alphabetical by filename
@@ -31,7 +31,8 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   5. **Submit to AI Rating** button runs the scoring with real-time progress feedback and a full debug log
   6. Selection persists across app launches (SharedPreferences)
 - **Multi-select mode**: long-press enters multi-select; bottom bar has batch Tag / Rate / Remove Tags / AI Select, plus **Copy to…** and **Move to…** (opens SAF folder picker to choose destination)
-- **Copy / Move**: files are written via real file path I/O to the chosen folder; moves also delete original from MediaStore
+- **Copy**: files are written via ContentResolver stream to the chosen folder (works on all Android versions)
+- **Move**: copies to destination without deleting the source (avoids unreliable `contentResolver.delete` on Android 10+ that could physically delete the original)
 - **Default destination**: `Pictures/PYQAlbum/` (fallback if external folder can't be resolved)
 - **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** rating, tags, and AI selection panel; **swipe left/right** to navigate to next/previous image in the same folder/tag
 - **AI-selected images** are marked with an ✨ AutoAwesome icon badge in all grid layouts (Grid, Waterfall, Justified) and TAG grid view
@@ -215,7 +216,8 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ### Tag/Rating Assignment
 - **Long-press dialog** shows existing tags as selectable buttons before offering a "create new" option
 - Rating updates persist correctly to Room DB via `AlbumViewModel.updateRating()`
-- Tag creation checks for existing tags before inserting (prevents duplicates)
+- Tag names are enforced unique at the database level via Room UNIQUE index on the `name` column
+- Batch tag creation reuses existing tags: if a tag name already exists, the insert is silently ignored and the existing ID is used via race-condition-safe re-query
 - Image-tag cross-reference stored in `image_tag_cross_ref` table
 - Works reliably from both long-press dialog and full-screen detail view
 - **Tag view** is embedded directly in AlbumScreen via left drawer
@@ -272,3 +274,4 @@ Push to `main` branch — workflow builds and uploads APK as artifact.
 6. **TagScreen image loading** — LaunchedEffect ordering issue
 7. **Tests** — no unit tests or UI tests yet
 8. **BottomActionBar.kt** — old component file, no longer used (replaced by inline BatchMultiSelectBar)
+9. **Move operation** — source file is no longer deleted (avoids 'remove photo' bug on Android 10+). True cross-folder move (copy + delete source) pending SAF-based MediaStore API cleanup.
