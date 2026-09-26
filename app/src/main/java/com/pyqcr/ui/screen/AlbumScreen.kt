@@ -311,13 +311,7 @@ fun AlbumScreen(
                             aiSelectedUris = currentSet
                             saveAiSelectedUris(context, currentSet)
                         },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        colors = if (isLpAiSelected)
-                            OutlinedButtonDefaults.colors(
-                                containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                            )
-                        else
-                            OutlinedButtonDefaults.colors()
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
                     ) {
                         Icon(
                             if (isLpAiSelected) Icons.Default.CheckCircle else Icons.Default.AutoAwesome,
