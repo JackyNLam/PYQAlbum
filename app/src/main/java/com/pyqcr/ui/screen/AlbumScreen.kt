@@ -57,7 +57,7 @@ import java.util.*
  *
  * Long-press any image → enters multi-select mode.
  * Multi-select mode: bottom action bar (⋮) with batch operations:
- * Rating, Tag management, AI Ranking toggle, Copy to, Move to.
+ * Rating, Tag management, AI Ranking toggle, Remove AI Info, Copy to, Move to.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -137,6 +137,9 @@ fun AlbumScreen(
                     snackbarHostState.showSnackbar(copyMoveMessage)
                     isMultiSelectMode = false
                     selectedImageUris = emptySet()
+                    if (operation == "move") {
+                        viewModel.refreshImages()
+                    }
                 } catch (e: Exception) {
                     copyMoveMessage = "Operation failed: ${e.message}"
                     snackbarHostState.showSnackbar(copyMoveMessage)
@@ -620,6 +623,12 @@ fun AlbumScreen(
                             }
                             saveAiSelectedUris(context, aiSelectedUris)
                         },
+                        onRemoveAiInfo = {
+                            val uris = selectedImageUris.toList()
+                            viewModel.batchRemoveAiInfo(uris)
+                            isMultiSelectMode = false
+                            selectedImageUris = emptySet()
+                        },
                         onCopyTo = {
                             pendingOperation = "copy"
                             folderPickerLauncher.launch(null)
@@ -1046,6 +1055,7 @@ private fun BatchMultiSelectBar(
     onRate: () -> Unit,
     onRemoveTags: () -> Unit,
     onSelectForAi: () -> Unit,
+    onRemoveAiInfo: () -> Unit,
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit
 ) {
@@ -1095,6 +1105,11 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onSelectForAi() },
                         text = { Text("AI Ranking") },
                         leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onRemoveAiInfo() },
+                        text = { Text("Remove AI Info") },
+                        leadingIcon = { Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     HorizontalDivider()
                     DropdownMenuItem(
