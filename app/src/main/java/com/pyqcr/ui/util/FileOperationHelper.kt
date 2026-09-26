@@ -24,7 +24,7 @@ import java.io.InputStream
  */
 object FileOperationHelper {
 
-    private const val TAG = "FileOpHelper"
+    internal const val TAG = "FileOpHelper"
 
     // ---------- File path resolution ----------
 

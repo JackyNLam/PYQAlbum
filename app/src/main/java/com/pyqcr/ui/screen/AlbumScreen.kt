@@ -43,7 +43,6 @@ import com.pyqcr.ui.viewmodel.AlbumViewModel
 import com.pyqcr.ui.viewmodel.FolderSortMode
 import com.pyqcr.ui.viewmodel.FolderListSortMode
 import com.pyqcr.ui.viewmodel.GroupByMode
-import com.pyqcr.ui.util.FileOperationHelper
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -110,6 +109,46 @@ fun AlbumScreen(
     var pendingOperation by remember { mutableStateOf<String?>(null) } // "copy" or "move"
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // Default target folder (Pictures/PYQAlbum/)
+    var targetFolderForOperation by remember {
+        mutableStateOf<File?>(FileUtils.getDefaultMoveDir(context))
+    }
+
+    /** Launch a copy or move operation on selected URIs. */
+    val launchCopyMove: (String, List<String>, File?) -> Unit = { operation, uris, destDir ->
+        if (destDir == null) {
+            copyMoveMessage = "Destination folder not available"
+            scope.launch { snackbarHostState.showSnackbar(copyMoveMessage) }
+        } else {
+            scope.launch {
+                try {
+                    val successCount = if (operation == "copy") {
+                        com.pyqcr.ui.util.FileOperationHelper.batchCopyViaFiles(context, uris, destDir)
+                            .count { it.second != null }
+                    } else {
+                        com.pyqcr.ui.util.FileOperationHelper.batchMoveViaFiles(context, uris, destDir)
+                            .count { it.second != null }
+                    }
+                    val label = if (operation == "copy") "Copied" else "Moved"
+                    copyMoveMessage = "$label $successCount/${uris.size} images to ${destDir.name}"
+                    snackbarHostState.showSnackbar(copyMoveMessage)
+                    // Reset multi-select after operation
+                    if (operation == "move") {
+                        // For moves, keep only URIs that still exist
+                        selectedImageUris = selectedImageUris.filter { uri ->
+                            val path = com.pyqcr.ui.util.FileOperationHelper.resolveFilePath(context, uri)
+                            path != null && File(path).exists()
+                        }.toSet()
+                    }
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                } catch (e: Exception) {
+                    copyMoveMessage = "Operation failed: ${e.message}"
+                    snackbarHostState.showSnackbar(copyMoveMessage)
+                }
+            }
+        }
+
     // SAF folder picker launcher — lets user choose any directory on the phone
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -123,47 +162,6 @@ fun AlbumScreen(
             pendingOperation?.let { op ->
                 pendingOperation = null
                 launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation)
-            }
-        }
-    }
-
-    // Default target folder (Pictures/PYQAlbum/)
-    var targetFolderForOperation by remember {
-        mutableStateOf<File?>(FileUtils.getDefaultMoveDir(context))
-    }
-
-    /** Launch a copy or move operation on selected URIs. */
-    fun launchCopyMove(operation: String, uris: List<String>, destDir: File?) {
-        if (destDir == null) {
-            copyMoveMessage = "Destination folder not available"
-            scope.launch { snackbarHostState.showSnackbar(copyMoveMessage) }
-            return
-        }
-        scope.launch {
-            try {
-                val successCount = if (operation == "copy") {
-                    FileOperationHelper.batchCopyViaFiles(context, uris, destDir)
-                        .count { it.second != null }
-                } else {
-                    FileOperationHelper.batchMoveViaFiles(context, uris, destDir)
-                        .count { it.second != null }
-                }
-                val label = if (operation == "copy") "Copied" else "Moved"
-                copyMoveMessage = "$label $successCount/${uris.size} images to ${destDir.name}"
-                snackbarHostState.showSnackbar(copyMoveMessage)
-                // Reset multi-select after operation
-                if (operation == "move") {
-                    // For moves, remove moved URIs from selection
-                    selectedImageUris = selectedImageUris.filter { uri ->
-                        FileOperationHelper.resolveFilePath(context, uri) != null &&
-                                File(FileOperationHelper.resolveFilePath(context, uri)!!).exists()
-                    }.toSet()
-                }
-                isMultiSelectMode = false
-                selectedImageUris = emptySet()
-            } catch (e: Exception) {
-                copyMoveMessage = "Operation failed: ${e.message}"
-                snackbarHostState.showSnackbar(copyMoveMessage)
             }
         }
     }
