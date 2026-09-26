@@ -2,7 +2,9 @@ package com.pyqcr.ui.screen
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -36,11 +38,14 @@ import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.*
 import com.pyqcr.data.db.FolderInfo
+import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.ui.viewmodel.AlbumViewModel
 import com.pyqcr.ui.viewmodel.FolderSortMode
 import com.pyqcr.ui.viewmodel.FolderListSortMode
 import com.pyqcr.ui.viewmodel.GroupByMode
+import com.pyqcr.ui.util.FileOperationHelper
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -99,6 +104,69 @@ fun AlbumScreen(
     // Folder sort state — sort images inside a folder
     var folderSortMode by remember { mutableStateOf(FolderSortMode.MODIFIED_DATE_DESC) }
     var groupByMode by remember { mutableStateOf(GroupByMode.NONE) }
+
+    // Copy/move operation state
+    var copyMoveMessage by remember { mutableStateOf("") }
+    var pendingOperation by remember { mutableStateOf<String?>(null) } // "copy" or "move"
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // SAF folder picker launcher — lets user choose any directory on the phone
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let { treeUri ->
+            val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            context.contentResolver.takePersistableUriPermission(treeUri, takeFlags)
+            // Resolve the tree URI to a real directory path
+            targetFolderForOperation = resolveTreeUriToPath(treeUri)
+            pendingOperation?.let { op ->
+                pendingOperation = null
+                launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation)
+            }
+        }
+    }
+
+    // Default target folder (Pictures/PYQAlbum/)
+    var targetFolderForOperation by remember {
+        mutableStateOf<File?>(FileUtils.getDefaultMoveDir(context))
+    }
+
+    /** Launch a copy or move operation on selected URIs. */
+    fun launchCopyMove(operation: String, uris: List<String>, destDir: File?) {
+        if (destDir == null) {
+            copyMoveMessage = "Destination folder not available"
+            scope.launch { snackbarHostState.showSnackbar(copyMoveMessage) }
+            return
+        }
+        scope.launch {
+            try {
+                val successCount = if (operation == "copy") {
+                    FileOperationHelper.batchCopyViaFiles(context, uris, destDir)
+                        .count { it.second != null }
+                } else {
+                    FileOperationHelper.batchMoveViaFiles(context, uris, destDir)
+                        .count { it.second != null }
+                }
+                val label = if (operation == "copy") "Copied" else "Moved"
+                copyMoveMessage = "$label $successCount/${uris.size} images to ${destDir.name}"
+                snackbarHostState.showSnackbar(copyMoveMessage)
+                // Reset multi-select after operation
+                if (operation == "move") {
+                    // For moves, remove moved URIs from selection
+                    selectedImageUris = selectedImageUris.filter { uri ->
+                        FileOperationHelper.resolveFilePath(context, uri) != null &&
+                                File(FileOperationHelper.resolveFilePath(context, uri)!!).exists()
+                    }.toSet()
+                }
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            } catch (e: Exception) {
+                copyMoveMessage = "Operation failed: ${e.message}"
+                snackbarHostState.showSnackbar(copyMoveMessage)
+            }
+        }
+    }
 
     // Load AI selected URIs
     LaunchedEffect(Unit) {
@@ -266,6 +334,7 @@ fun AlbumScreen(
         }
     ) {
         Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
                 TopAppBar(
                     navigationIcon = {
@@ -556,6 +625,7 @@ fun AlbumScreen(
             },
             bottomBar = {
                 if (isMultiSelectMode) {
+                    val urisSnapshot = selectedImageUris.toList()
                     BatchMultiSelectBar(
                         selectedCount = selectedImageUris.size,
                         onCancel = {
@@ -583,6 +653,14 @@ fun AlbumScreen(
                             saveAiSelectedUris(context, current)
                             isMultiSelectMode = false
                             selectedImageUris = emptySet()
+                        },
+                        onCopyTo = {
+                            pendingOperation = "copy"
+                            folderPickerLauncher.launch(null)
+                        },
+                        onMoveTo = {
+                            pendingOperation = "move"
+                            folderPickerLauncher.launch(null)
                         }
                     )
                 }
@@ -1043,7 +1121,9 @@ private fun BatchMultiSelectBar(
     onAddTag: () -> Unit,
     onRate: () -> Unit,
     onRemoveTags: () -> Unit,
-    onSelectForAi: () -> Unit
+    onSelectForAi: () -> Unit,
+    onCopyTo: () -> Unit,
+    onMoveTo: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1089,6 +1169,32 @@ private fun BatchMultiSelectBar(
                     )
                     Spacer(Modifier.width(2.dp))
                     Text("AI", maxLines = 1)
+                }
+            }
+
+            Spacer(Modifier.height(4.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                OutlinedButton(onClick = onCopyTo, modifier = Modifier.weight(1f)) {
+                    Icon(
+                        Icons.Default.SaveAlt,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(2.dp))
+                    Text("Copy to…", maxLines = 1)
+                }
+                OutlinedButton(onClick = onMoveTo, modifier = Modifier.weight(1f)) {
+                    Icon(
+                        Icons.Default.Forward,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(2.dp))
+                    Text("Move to…", maxLines = 1)
                 }
             }
         }
@@ -1324,4 +1430,40 @@ private fun loadAiSelectedUris(context: Context): Set<String> {
 private fun saveAiSelectedUris(context: Context, uris: Set<String>) {
     val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
     prefs.edit().putStringSet("ai_selected_uris", uris).apply()
+}
+
+// ---------- SAF tree URI to path resolution ----------
+
+/**
+ * Attempts to resolve an SAF tree URI to a real File path.
+ * Works for primary storage ("primary:") tree URIs.
+ * Returns null if resolution fails.
+ */
+private fun resolveTreeUriToPath(treeUri: Uri): File? {
+    return try {
+        val docId = android.provider.DocumentsContract.getTreeDocumentId(treeUri)
+        // docId looks like "primary:DCIM/Camera" or "XXXX-XXXX:path"
+        if (docId.startsWith("primary:")) {
+            val relativePath = docId.removePrefix("primary:")
+            File(android.os.Environment.getExternalStorageDirectory(), relativePath)
+        } else {
+            // SD card or other volume — hard to resolve to a real File path on modern Android
+            // Fall back to default Pictures/PYQAlbum/
+            null
+        }
+    } catch (e: Exception) {
+        null
+    }
+}
+
+/** File utility helpers for copy/move operations. */
+internal object FileUtils {
+    fun getDefaultMoveDir(context: Context): File {
+        val picturesDir = android.os.Environment.getExternalStoragePublicDirectory(
+            android.os.Environment.DIRECTORY_PICTURES
+        )
+        val dir = File(picturesDir, "PYQAlbum")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
 }

@@ -30,7 +30,9 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   4. **Save Config** button persists API Key + Model name
   5. **Submit to AI Rating** button runs the scoring with real-time progress feedback and a full debug log
   6. Selection persists across app launches (SharedPreferences)
-- **Multi-select mode**: long-press enters multi-select; bottom bar has batch Tag / Rate / Remove Tags / AI Select
+- **Multi-select mode**: long-press enters multi-select; bottom bar has batch Tag / Rate / Remove Tags / AI Select, plus **Copy to…** and **Move to…** (opens SAF folder picker to choose destination)
+- **Copy / Move**: files are written via real file path I/O to the chosen folder; moves also delete original from MediaStore
+- **Default destination**: `Pictures/PYQAlbum/` (fallback if external folder can't be resolved)
 - **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** rating, tags, and AI selection panel; **swipe left/right** to navigate to next/previous image in the same folder/tag
 - **AI-selected images** are marked with an ✨ AutoAwesome icon badge in all grid layouts (Grid, Waterfall, Justified) and TAG grid view
 - **User ratings** are shown as gold-on-black score badges on thumbnails
@@ -107,7 +109,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Toolbar Sort button** (inside folder) | Dropdown: ↓Modified date (default) / ↑Name / Rating ↓ / AI Score ↓ / Group by submenu |
 | **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Rating |
 | **AI Rating** | Via drawer ✨ |
-| **Multi-select mode** | Batch actions: Tag / Rate / Remove Tags / Select for AI |
+| **Multi-select mode** | Batch actions: Tag / Rate / Remove Tags / Select for AI / Copy to… / Move to… |
 | **Thumbnail rating badge** | Gold number (e.g. `3.5` or `5.0`) at top-left corner of thumbnails with ratings |
 | **AI Selection badge** | ✨ AutoAwesome icon at bottom-right of AI-selected thumbnails |
 
@@ -151,6 +153,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - White background, `ContentScale.Fit` keeps original proportions
 - `combinedClickable` with click → detail and long-press → action dialog
 - Multi-select: long-press enters mode, selected images get overlay with ✓ badge
+- Batch actions: Tag / Rate / Remove Tags / AI Select, plus **Copy to…** / **Move to…** (SAF folder picker)
 - Rating badge: gold number overlay at top-left (only shown for rated images > 0)
 - AI selection badge: ✨ AutoAwesome icon at bottom-right
 
