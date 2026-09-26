@@ -734,137 +734,6 @@ fun AlbumScreen(
                 }
             }
 
-            // --- Batch operation dialogs ---
-
-            // Add Tag dialog
-            if (showTagDialog) {
-                var tagInput by remember { mutableStateOf("") }
-                AlertDialog(
-                    onDismissRequest = { showTagDialog = false },
-                    title = { Text("Add Tag to ${selectedImageUris.size} image(s)") },
-                    text = {
-                        Column {
-                            Text("Choose existing tag or create a new one:")
-                            Spacer(Modifier.height(8.dp))
-                            if (allTags.isNotEmpty()) {
-                                LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
-                                    items(allTags) { tag ->
-                                        OutlinedButton(
-                                            onClick = {
-                                                selectedImageUris.forEach { uri ->
-                                                    viewModel.addTagToImage(uri, tag.name)
-                                                }
-                                                showTagDialog = false
-                                            },
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
-                                        ) { Text(tag.name) }
-                                    }
-                                }
-                                Spacer(Modifier.height(12.dp))
-                                HorizontalDivider()
-                                Spacer(Modifier.height(8.dp))
-                            }
-                            OutlinedTextField(
-                                value = tagInput,
-                                onValueChange = { tagInput = it },
-                                label = { Text("New tag name") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            if (tagInput.isNotBlank()) {
-                                selectedImageUris.forEach { uri ->
-                                    viewModel.addTagToImage(uri, tagInput.trim())
-                                }
-                            }
-                            showTagDialog = false
-                        }) { Text("Add") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showTagDialog = false }) { Text("Cancel") }
-                    }
-                )
-            }
-
-            // Rate dialog
-            if (showRateDialog) {
-                var batchRating by remember { mutableFloatStateOf(0f) }
-                AlertDialog(
-                    onDismissRequest = { showRateDialog = false },
-                    title = { Text("Rate ${selectedImageUris.size} image(s)") },
-                    text = {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Select a rating for all selected images:")
-                            Spacer(Modifier.height(8.dp))
-                            RatingBar(rating = batchRating, onRatingChange = { batchRating = it })
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                text = String.format("%.1f stars", batchRating),
-                                style = MaterialTheme.typography.titleLarge
-                            )
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            selectedImageUris.forEach { uri ->
-                                viewModel.updateRating(uri, batchRating)
-                            }
-                            showRateDialog = false
-                        }) { Text("Assign") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showRateDialog = false }) { Text("Cancel") }
-                    }
-                )
-            }
-
-            // Remove Tags dialog
-            if (showRemoveTagsDialog) {
-                var tagToRemove by remember { mutableStateOf<TagEntity?>(null) }
-                AlertDialog(
-                    onDismissRequest = { showRemoveTagsDialog = false },
-                    title = { Text("Remove Tags from ${selectedImageUris.size} image(s)") },
-                    text = {
-                        Column {
-                            Text("Select a tag to remove from all selected images:")
-                            Spacer(Modifier.height(8.dp))
-                            if (allTags.isNotEmpty()) {
-                                LazyColumn(modifier = Modifier.heightIn(max = 250.dp)) {
-                                    items(allTags) { tag ->
-                                        OutlinedButton(
-                                            onClick = { tagToRemove = tag },
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
-                                        ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                RadioButton(selected = tagToRemove == tag, onClick = null)
-                                                Spacer(Modifier.width(8.dp))
-                                                Text(tag.name)
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                Text("No tags available.")
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            tagToRemove?.let { tag ->
-                                viewModel.batchRemoveTagsFromImages(selectedImageUris.toList(), tag.name)
-                            }
-                            showRemoveTagsDialog = false
-                        }) { Text("Remove") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showRemoveTagsDialog = false }) { Text("Cancel") }
-                    }
-                )
-            }
-
         ) { paddingValues ->
             Column(
                 modifier = Modifier
@@ -1110,6 +979,138 @@ fun AlbumScreen(
 
 
                 }
+            }
+
+            // --- Batch operation dialogs ---
+
+            // Add Tag dialog
+            if (showTagDialog) {
+                var tagInput by remember { mutableStateOf("") }
+                AlertDialog(
+                    onDismissRequest = { showTagDialog = false },
+                    title = { Text("Add Tag to ${selectedImageUris.size} image(s)") },
+                    text = {
+                        Column {
+                            Text("Choose existing tag or create a new one:")
+                            Spacer(Modifier.height(8.dp))
+                            if (allTags.isNotEmpty()) {
+                                LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                                    items(allTags) { tag ->
+                                        OutlinedButton(
+                                            onClick = {
+                                                selectedImageUris.forEach { uri ->
+                                                    viewModel.addTagToImage(uri, tag.name)
+                                                }
+                                                showTagDialog = false
+                                            },
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                        ) { Text(tag.name) }
+                                    }
+                                }
+                                Spacer(Modifier.height(12.dp))
+                                HorizontalDivider()
+                                Spacer(Modifier.height(8.dp))
+                            }
+                            OutlinedTextField(
+                                value = tagInput,
+                                onValueChange = { tagInput = it },
+                                label = { Text("New tag name") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            if (tagInput.isNotBlank()) {
+                                selectedImageUris.forEach { uri ->
+                                    viewModel.addTagToImage(uri, tagInput.trim())
+                                }
+                            }
+                            showTagDialog = false
+                        }) { Text("Add") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showTagDialog = false }) { Text("Cancel") }
+                    }
+                )
+            }
+
+            // Rate dialog
+            if (showRateDialog) {
+                var batchRating by remember { mutableFloatStateOf(0f) }
+                AlertDialog(
+                    onDismissRequest = { showRateDialog = false },
+                    title = { Text("Rate ${selectedImageUris.size} image(s)") },
+                    text = {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Select a rating for all selected images:")
+                            Spacer(Modifier.height(8.dp))
+                            RatingBar(rating = batchRating, onRatingChange = { batchRating = it })
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = String.format("%.1f stars", batchRating),
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            selectedImageUris.forEach { uri ->
+                                viewModel.updateRating(uri, batchRating)
+                            }
+                            showRateDialog = false
+                        }) { Text("Assign") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showRateDialog = false }) { Text("Cancel") }
+                    }
+                )
+            }
+
+            // Remove Tags dialog
+            if (showRemoveTagsDialog) {
+                var tagToRemove by remember { mutableStateOf<TagEntity?>(null) }
+                AlertDialog(
+                    onDismissRequest = { showRemoveTagsDialog = false },
+                    title = { Text("Remove Tags from ${selectedImageUris.size} image(s)") },
+                    text = {
+                        Column {
+                            Text("Select a tag to remove from all selected images:")
+                            Spacer(Modifier.height(8.dp))
+                            if (allTags.isNotEmpty()) {
+                                LazyColumn(modifier = Modifier.heightIn(max = 250.dp)) {
+                                    items(allTags) { tag ->
+                                        OutlinedButton(
+                                            onClick = { tagToRemove = tag },
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                RadioButton(selected = tagToRemove == tag, onClick = null)
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(tag.name)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                Text("No tags available.")
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            tagToRemove?.let { tag ->
+                                viewModel.batchRemoveTagsFromImages(selectedImageUris.toList(), tag.name)
+                            }
+                            showRemoveTagsDialog = false
+                        }) { Text("Remove") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showRemoveTagsDialog = false }) { Text("Cancel") }
+                    }
+                )
+            }
             }
         }
     }
