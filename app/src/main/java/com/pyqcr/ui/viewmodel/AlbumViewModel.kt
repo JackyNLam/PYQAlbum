@@ -104,11 +104,11 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
         }.launchIn(viewModelScope)
     }
 
-    fun setGroupBy(mode: GroupByMode) {
+    fun updateGroupBy(mode: GroupByMode) {
         groupBy = mode
     }
 
-    fun setSortMode(mode: FolderSortMode) {
+    fun updateSortMode(mode: FolderSortMode) {
         currentSortMode = mode
     }
 
