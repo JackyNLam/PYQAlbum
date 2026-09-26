@@ -11,6 +11,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -272,6 +273,11 @@ fun AlbumScreen(
                 viewModel.addTagToImage(imageUri, tagName)
                 showActionDialog = false
                 longPressedImageUri = null
+            },
+            onEnterMultiSelect = { uri ->
+                isMultiSelectMode = true
+                selectedImageUris = setOf(uri)
+                // Already dismissed by the dialog internally
             }
         )
     }
@@ -775,6 +781,12 @@ fun AlbumScreen(
                                                 onImageClick(uri, images.map { it.uri })
                                             }
                                         },
+                                        onMultiSelectImageToggle = { uri ->
+                                            selectedImageUris = if (uri in selectedImageUris)
+                                                selectedImageUris - uri
+                                            else
+                                                selectedImageUris + uri
+                                        },
                                         onLongPress = { uri ->
                                             if (isMultiSelectMode) {
                                                 selectedImageUris = if (uri in selectedImageUris)
@@ -943,7 +955,8 @@ private fun LongPressActionDialog(
     onDismiss: () -> Unit,
     onAssignRating: (Float) -> Unit,
     onSelectForAi: (Boolean) -> Unit,
-    onAddTag: (String) -> Unit
+    onAddTag: (String) -> Unit,
+    onEnterMultiSelect: (String) -> Unit
 ) {
     var dialogStep by remember { mutableStateOf<DialogStep>(DialogStep.Main) }
     var customTagName by remember { mutableStateOf("") }
@@ -963,6 +976,20 @@ private fun LongPressActionDialog(
                         )
 
                         Spacer(Modifier.height(4.dp))
+
+                        OutlinedButton(
+                            onClick = {
+                                onEnterMultiSelect(imageUri)
+                                onDismiss()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.RadioButtonUnchecked, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Select")
+                        }
+
+                        Spacer(Modifier.height(8.dp))
 
                         OutlinedButton(
                             onClick = { dialogStep = DialogStep.Rating },
@@ -1231,7 +1258,8 @@ private fun ImageGridView(
     aiSelectedUris: Set<String>,
     groupByMode: GroupByMode = GroupByMode.NONE,
     onImageClick: (String, List<String>) -> Unit,
-    onLongPress: (String) -> Unit
+    onLongPress: (String) -> Unit,
+    onMultiSelectImageToggle: ((String) -> Unit)? = null
 ) {
     val imageUris = remember(images) { images.map { it.uri } }
     // Group images by date if requested
@@ -1285,7 +1313,8 @@ private fun ImageGridView(
                                 selectedImageUris = selectedImageUris,
                                 aiSelectedUris = aiSelectedUris,
                                 onImageClick = onImageClick,
-                                onLongPress = onLongPress
+                                onLongPress = onLongPress,
+                                onMultiSelectImageToggle = onMultiSelectImageToggle
                             )
                         }
                     }
@@ -1308,7 +1337,8 @@ private fun ImageGridView(
                             selectedImageUris = selectedImageUris,
                             aiSelectedUris = aiSelectedUris,
                             onImageClick = onImageClick,
-                            onLongPress = onLongPress
+                            onLongPress = onLongPress,
+                            onMultiSelectImageToggle = onMultiSelectImageToggle
                         )
                     }
                 }
@@ -1354,16 +1384,27 @@ private fun ImageGridCell(
     selectedImageUris: Set<String>,
     aiSelectedUris: Set<String>,
     onImageClick: (String, List<String>) -> Unit,
-    onLongPress: (String) -> Unit
+    onLongPress: (String) -> Unit,
+    onMultiSelectImageToggle: ((String) -> Unit)? = null
 ) {
     val isSelected = image.uri in selectedImageUris
-    Box(
-        modifier = Modifier
+    val cellModifier = if (isMultiSelectMode && onMultiSelectImageToggle != null) {
+        Modifier
+            .aspectRatio(1f)
+            .combinedClickable(
+                onClick = { onMultiSelectImageToggle(image.uri) },
+                onLongClick = { onLongPress(image.uri) }
+            )
+    } else {
+        Modifier
             .aspectRatio(1f)
             .combinedClickable(
                 onClick = { onImageClick(image.uri, imageUris) },
                 onLongClick = { onLongPress(image.uri) }
             )
+    }
+    Box(
+        modifier = cellModifier
     ) {
         ImageThumbnail(
             imageUri = image.uri,
@@ -1400,14 +1441,27 @@ private fun ImageGridCell(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .background(MaterialTheme.colorScheme.primary)
+                    .background(MaterialTheme.colorScheme.primary, shape = CircleShape)
                     .padding(4.dp)
             ) {
-                Text(
-                    text = "✓",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.bodySmall
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = "Selected",
+                    tint = Color.White,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        } else if (isMultiSelectMode) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.RadioButtonUnchecked,
+                    contentDescription = "Not selected",
+                    tint = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.size(20.dp)
                 )
             }
         }
