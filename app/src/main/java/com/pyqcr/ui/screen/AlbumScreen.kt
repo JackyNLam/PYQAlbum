@@ -93,9 +93,7 @@ fun AlbumScreen(
     // AI rating selection image URIs
     var aiSelectedUris by rememberSaveable { mutableStateOf<Set<String>>(emptySet()) }
 
-    // Long-press dialog state
-    var longPressedImageUri by remember { mutableStateOf<String?>(null) }
-    var showActionDialog by remember { mutableStateOf(false) }
+    // Long-press directly enters multi-select mode
 
     // Tag mode local state
     var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
@@ -244,43 +242,8 @@ fun AlbumScreen(
         }
     }
 
-    // Long-press action dialog
-    if (showActionDialog && longPressedImageUri != null) {
-        val imageUri = longPressedImageUri!!
-        LongPressActionDialog(
-            imageUri = imageUri,
-            currentAiSelected = imageUri in aiSelectedUris,
-            existingTags = allTags,
-            onDismiss = {
-                showActionDialog = false
-                longPressedImageUri = null
-            },
-            onAssignRating = { rating ->
-                viewModel.updateRating(imageUri, rating)
-                showActionDialog = false
-                longPressedImageUri = null
-            },
-            onSelectForAi = { select ->
-                aiSelectedUris = if (select)
-                    aiSelectedUris + imageUri
-                else
-                    aiSelectedUris - imageUri
-                saveAiSelectedUris(context, aiSelectedUris)
-                showActionDialog = false
-                longPressedImageUri = null
-            },
-            onAddTag = { tagName ->
-                viewModel.addTagToImage(imageUri, tagName)
-                showActionDialog = false
-                longPressedImageUri = null
-            },
-            onEnterMultiSelect = { uri ->
-                isMultiSelectMode = true
-                selectedImageUris = setOf(uri)
-                // Already dismissed by the dialog internally
-            }
-        )
-    }
+    // Long-press directly enters multi-select mode
+    // (dialog removed — shortcut for batch select)
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -794,8 +757,8 @@ fun AlbumScreen(
                                                 else
                                                     selectedImageUris + uri
                                             } else {
-                                                longPressedImageUri = uri
-                                                showActionDialog = true
+                                                isMultiSelectMode = true
+                                                selectedImageUris = setOf(uri)
                                             }
                                         }
                                     )
@@ -873,8 +836,8 @@ fun AlbumScreen(
                                                     .combinedClickable(
                                                         onClick = { onImageClick(image.uri, tagImageUris) },
                                                         onLongClick = {
-                                                            longPressedImageUri = image.uri
-                                                            showActionDialog = true
+                                                            isMultiSelectMode = true
+                                                            selectedImageUris = setOf(image.uri)
                                                         }
                                                     )
                                             ) {
@@ -943,203 +906,6 @@ private fun DrawerItem(
     )
 }
 
-/**
- * Long-press action dialog — assign rating, add tag, or select for AI ranking.
- * Uses a state machine: "main" → "rating" | "tag" | done.
- */
-@Composable
-private fun LongPressActionDialog(
-    imageUri: String,
-    currentAiSelected: Boolean,
-    existingTags: List<TagEntity>,
-    onDismiss: () -> Unit,
-    onAssignRating: (Float) -> Unit,
-    onSelectForAi: (Boolean) -> Unit,
-    onAddTag: (String) -> Unit,
-    onEnterMultiSelect: (String) -> Unit
-) {
-    var dialogStep by remember { mutableStateOf<DialogStep>(DialogStep.Main) }
-    var customTagName by remember { mutableStateOf("") }
-    var selectedRating by remember { mutableFloatStateOf(0f) }
-
-    when (dialogStep) {
-        DialogStep.Main -> {
-            AlertDialog(
-                onDismissRequest = onDismiss,
-                title = { Text("Image Actions") },
-                text = {
-                    Column {
-                        Text(
-                            text = "What would you like to do with this image?",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
-
-                        Spacer(Modifier.height(4.dp))
-
-                        OutlinedButton(
-                            onClick = {
-                                onEnterMultiSelect(imageUri)
-                                onDismiss()
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Default.RadioButtonUnchecked, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Select")
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-
-                        OutlinedButton(
-                            onClick = { dialogStep = DialogStep.Rating },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Default.Star, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Assign Rating")
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-
-                        OutlinedButton(
-                            onClick = { dialogStep = DialogStep.Tag },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Default.Label, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Add Tag")
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-
-                        OutlinedButton(
-                            onClick = {
-                                onSelectForAi(!currentAiSelected)
-                                onDismiss()
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text(if (currentAiSelected) "Remove from AI Selection" else "Select for AI Ranking")
-                        }
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = onDismiss) {
-                        Text("Cancel")
-                    }
-                }
-            )
-        }
-
-        DialogStep.Rating -> {
-            AlertDialog(
-                onDismissRequest = { dialogStep = DialogStep.Main },
-                title = { Text("Assign Rating") },
-                text = {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Select a rating for this image:")
-                        Spacer(Modifier.height(8.dp))
-                        RatingBar(
-                            rating = selectedRating,
-                            onRatingChange = { selectedRating = it }
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = String.format("%.1f stars", selectedRating),
-                            style = MaterialTheme.typography.titleLarge
-                        )
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        onAssignRating(selectedRating)
-                    }) {
-                        Text("Assign")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { dialogStep = DialogStep.Main }) {
-                        Text("Back")
-                    }
-                }
-            )
-        }
-
-        DialogStep.Tag -> {
-            AlertDialog(
-                onDismissRequest = { dialogStep = DialogStep.Main },
-                title = { Text("Add Tag") },
-                text = {
-                    Column {
-                        // Existing tags to choose from
-                        if (existingTags.isNotEmpty()) {
-                            Text(
-                                text = "Choose existing tag:",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
-                                items(existingTags) { tag ->
-                                    OutlinedButton(
-                                        onClick = {
-                                            onAddTag(tag.name)
-                                            customTagName = ""
-                                        },
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
-                                    ) {
-                                        Text(tag.name)
-                                    }
-                                }
-                            }
-                            Spacer(Modifier.height(12.dp))
-                            HorizontalDivider()
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                text = "Or create new:",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Spacer(Modifier.height(8.dp))
-                        }
-                        OutlinedTextField(
-                            value = customTagName,
-                            onValueChange = { customTagName = it },
-                            label = { Text("Tag name") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        if (customTagName.isNotBlank()) {
-                            onAddTag(customTagName.trim())
-                        }
-                        customTagName = ""
-                    }) {
-                        Text("Add")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = {
-                        customTagName = ""
-                        dialogStep = DialogStep.Main
-                    }) {
-                        Text("Back")
-                    }
-                }
-            )
-        }
-    }
-}
-
-private enum class DialogStep { Main, Rating, Tag }
-
-/**
- * Batch multi-select bottom bar.
- */
 @Composable
 private fun BatchMultiSelectBar(
     selectedCount: Int,
@@ -1151,77 +917,82 @@ private fun BatchMultiSelectBar(
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit
 ) {
+    var showMenu by remember { mutableStateOf(false) }
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shadowElevation = 8.dp,
         color = MaterialTheme.colorScheme.surface
     ) {
-        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "$selectedCount selected",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.weight(1f)
-                )
-                TextButton(onClick = onCancel) {
-                    Text("Cancel")
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+                .navigationBarsPadding(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Menu button — expands to show all actions
+            Box {
+                OutlinedButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.height(40.dp)
+                ) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "Actions", modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Actions", maxLines = 1)
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onAddTag() },
+                        text = { Text("Add Tag") },
+                        leadingIcon = { Icon(Icons.Default.Label, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onRate() },
+                        text = { Text("Rate") },
+                        leadingIcon = { Icon(Icons.Default.Star, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onRemoveTags() },
+                        text = { Text("Remove Tags") },
+                        leadingIcon = { Icon(Icons.Default.LabelOff, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onSelectForAi() },
+                        text = { Text("Select for AI") },
+                        leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onCopyTo() },
+                        text = { Text("Copy to…") },
+                        leadingIcon = { Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onMoveTo() },
+                        text = { Text("Move to…") },
+                        leadingIcon = { Icon(Icons.Default.Forward, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
                 }
             }
 
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.weight(1f))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                OutlinedButton(onClick = onAddTag, modifier = Modifier.weight(1f)) {
-                    Text("Tag", maxLines = 1)
-                }
-                OutlinedButton(onClick = onRate, modifier = Modifier.weight(1f)) {
-                    Text("Rate", maxLines = 1)
-                }
-                OutlinedButton(onClick = onRemoveTags, modifier = Modifier.weight(1f)) {
-                    Text("Rm Tag", maxLines = 1)
-                }
-                Button(onClick = onSelectForAi, modifier = Modifier.weight(1f)) {
-                    Icon(
-                        Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(Modifier.width(2.dp))
-                    Text("AI", maxLines = 1)
-                }
-            }
+            // Selected count
+            Text(
+                text = "$selectedCount selected",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
 
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.width(12.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                OutlinedButton(onClick = onCopyTo, modifier = Modifier.weight(1f)) {
-                    Icon(
-                        Icons.Default.SaveAlt,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(Modifier.width(2.dp))
-                    Text("Copy to…", maxLines = 1)
-                }
-                OutlinedButton(onClick = onMoveTo, modifier = Modifier.weight(1f)) {
-                    Icon(
-                        Icons.Default.Forward,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(Modifier.width(2.dp))
-                    Text("Move to…", maxLines = 1)
-                }
+            // Cancel button
+            TextButton(onClick = onCancel, modifier = Modifier.height(40.dp)) {
+                Text("Cancel")
             }
         }
     }
