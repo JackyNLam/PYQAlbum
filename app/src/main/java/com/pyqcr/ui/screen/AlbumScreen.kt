@@ -148,6 +148,7 @@ fun AlbumScreen(
                 }
             }
         }
+    }
 
     // SAF folder picker launcher — lets user choose any directory on the phone
     val folderPickerLauncher = rememberLauncherForActivityResult(
