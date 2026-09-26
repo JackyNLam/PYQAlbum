@@ -95,7 +95,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | Action | Result |
 |--------|--------|
 | **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Rating |
-| **Tap folder card** (Folder mode) | Enter folder to see images in selected layout (folder cards show image count, sorted by newest image first) |
+| **Tap folder card** (Folder mode) | Enter folder to see images in selected layout (folder cards show image count, sortable by modified date / count / name) |
 | **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking |
 | **Swipe down on image** (detail view) | Go back to thumbnail grid |
@@ -103,6 +103,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Swipe right** (detail view) | Previous image in same folder/tag |
 | **Swipe up on image** (detail view) | Reveal rating bar, tags, AI selection panel |
 | **Toolbar Layout button** (inside folder) | Dropdown: Grid (▦) / Waterfall (🌊) / Justified (▭) |
+| **Toolbar Sort button** (folder list) | Dropdown: ↓Modified date (default) / ↓Count / ↑Name |
 | **Toolbar Sort button** (inside folder) | Dropdown: ↓Modified date (default) / ↑Name / Rating ↓ / AI Score ↓ / Group by submenu |
 | **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Rating |
 | **AI Rating** | Via drawer ✨ |
@@ -113,7 +114,8 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ### Browse Modes (via Left Drawer)
 
 #### Folder mode (default — no drawer tab selected)
-- **Step 1**: Shows a 2-column folder grid with folder icons, image count per folder, sorted by latest modified date (newest folder first)
+- **Step 1**: Shows a 2-column folder grid with folder icons, image count per folder
+- **Step 1 sort** (↕ button in toolbar): **↓Modified date** (default, newest first) / **↓Count** (most images first) / **↑Name** (alphabetical)
 - **Step 2**: Tap a folder → images displayed in the selected layout (Grid/Waterfall/Justified)
 - Layout toggle and sort button appear in toolbar when inside a folder
 - Default thumbnail sort: **↓Modified date** (newest first)
@@ -131,7 +133,11 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ## Details on Key Features
 
 ### Folder View
-- **Step 1**: 2-column grid of `ElevatedCard`s with folder icons, **image count** shown below folder name, sorted by **latest modified date (newest first)**
+- **Step 1**: 2-column grid of `ElevatedCard`s with folder icons, **image count** shown below folder name
+- **Folder list sort** (↕ button in toolbar when on folder grid):
+  - **↓Modified date** (default) — newest folder first (by latest image date)
+  - **↓Count** — folders with most images first
+  - **↑Name** — alphabetical order
 - **Step 2**: Tap a folder → "← All Folders" back button at top, then image grid
 - Sort images inside a folder via the Sort button (↕):
   - **↓Modified date** (default) — newest first

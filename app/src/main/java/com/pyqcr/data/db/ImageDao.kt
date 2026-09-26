@@ -80,6 +80,9 @@ interface ImageDao {
     @Query("SELECT folderName, COUNT(*) AS imageCount, MAX(dateAdded) AS lastModified FROM images GROUP BY folderName ORDER BY folderName ASC")
     fun getAllFoldersWithInfoByName(): Flow<List<FolderInfo>>
 
+    @Query("SELECT folderName, COUNT(*) AS imageCount, MAX(dateAdded) AS lastModified FROM images GROUP BY folderName ORDER BY COUNT(*) DESC")
+    fun getAllFoldersWithInfoByCount(): Flow<List<FolderInfo>>
+
     @Query("SELECT DISTINCT folderName FROM images ORDER BY folderName")
     fun getAllFolders(): Flow<List<String>>
 }

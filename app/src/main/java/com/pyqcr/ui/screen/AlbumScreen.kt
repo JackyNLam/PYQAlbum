@@ -38,6 +38,7 @@ import com.pyqcr.ui.component.*
 import com.pyqcr.data.db.FolderInfo
 import com.pyqcr.ui.viewmodel.AlbumViewModel
 import com.pyqcr.ui.viewmodel.FolderSortMode
+import com.pyqcr.ui.viewmodel.FolderListSortMode
 import com.pyqcr.ui.viewmodel.GroupByMode
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -283,6 +284,63 @@ fun AlbumScreen(
                         }
                     },
                     actions = {
+                        // Folder list sort button (when showing all folders)
+                        if (selectedBrowseMode == BrowseMode.FOLDER && selectedFolder == null) {
+                            Box {
+                                var showFolderSortMenu by remember { mutableStateOf(false) }
+                                IconButton(onClick = { showFolderSortMenu = true }) {
+                                    Icon(Icons.Default.Sort, contentDescription = "Sort folders")
+                                }
+                                DropdownMenu(
+                                    expanded = showFolderSortMenu,
+                                    onDismissRequest = { showFolderSortMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("↓Modified date", modifier = Modifier.weight(1f))
+                                                if (viewModel.folderSortMode == FolderListSortMode.LAST_MODIFIED_DESC) {
+                                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            viewModel.updateFolderSortMode(FolderListSortMode.LAST_MODIFIED_DESC)
+                                            showFolderSortMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("↓Count", modifier = Modifier.weight(1f))
+                                                if (viewModel.folderSortMode == FolderListSortMode.COUNT_DESC) {
+                                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            viewModel.updateFolderSortMode(FolderListSortMode.COUNT_DESC)
+                                            showFolderSortMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("↑Name", modifier = Modifier.weight(1f))
+                                                if (viewModel.folderSortMode == FolderListSortMode.NAME_ASC) {
+                                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            viewModel.updateFolderSortMode(FolderListSortMode.NAME_ASC)
+                                            showFolderSortMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
                         // View layout selector drop-down + sort button (only for FOLDER mode, inside a folder)
                         if (selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null) {
                             // Layout selector button

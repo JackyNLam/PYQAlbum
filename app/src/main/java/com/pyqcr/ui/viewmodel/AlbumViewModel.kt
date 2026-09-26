@@ -38,6 +38,12 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
     var groupBy by mutableStateOf(GroupByMode.NONE)
         private set
 
+    // Folder-level sort state
+    var folderSortMode by mutableStateOf(FolderListSortMode.LAST_MODIFIED_DESC)
+        private set
+
+    private var foldersJob: Job? = null
+
     // Jobs to cancel previous collectors when switching modes
     private var imagesJob: Job? = null
 
@@ -112,6 +118,19 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
         currentSortMode = mode
     }
 
+    fun updateFolderSortMode(mode: FolderListSortMode) {
+        folderSortMode = mode
+        foldersJob?.cancel()
+        val flow = when (mode) {
+            FolderListSortMode.LAST_MODIFIED_DESC -> repository.getAllFoldersWithInfo()
+            FolderListSortMode.COUNT_DESC -> repository.getAllFoldersWithInfoByCount()
+            FolderListSortMode.NAME_ASC -> repository.getAllFoldersWithInfoByName()
+        }
+        foldersJob = flow.onEach { folderList ->
+            _folderInfos.value = folderList
+        }.launchIn(viewModelScope)
+    }
+
     fun sortByAiScoreDesc() {
         imagesJob?.cancel()
         imagesJob = repository.getImagesSortedByAiScoreDesc().onEach { imageList ->
@@ -147,6 +166,12 @@ enum class FolderSortMode {
     NAME_ASC,
     USER_RATING_DESC,
     AI_SCORE_DESC
+}
+
+enum class FolderListSortMode {
+    LAST_MODIFIED_DESC,
+    COUNT_DESC,
+    NAME_ASC
 }
 
 enum class GroupByMode {

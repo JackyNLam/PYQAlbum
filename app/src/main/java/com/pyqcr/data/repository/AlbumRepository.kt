@@ -67,6 +67,10 @@ class AlbumRepository(
         return imageDao.getAllFoldersWithInfoByName()
     }
 
+    fun getAllFoldersWithInfoByCount(): Flow<List<FolderInfo>> {
+        return imageDao.getAllFoldersWithInfoByCount()
+    }
+
     fun getAllFolders(): Flow<List<String>> {
         return imageDao.getAllFolders()
     }
