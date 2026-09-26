@@ -99,7 +99,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Rating |
 | **Tap folder card** (Folder mode) | Enter folder to see images in selected layout (folder cards show image count, sortable by modified date / count / name) |
 | **Tap thumbnail** | Opens full-screen detail view |
-| **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking |
+| **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking (toggle) |
 | **Swipe down on image** (detail view) | Go back to thumbnail grid |
 | **Swipe left** (detail view) | Next image in same folder/tag |
 | **Swipe right** (detail view) | Previous image in same folder/tag |

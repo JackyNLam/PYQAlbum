@@ -95,6 +95,15 @@ fun AlbumScreen(
 
     // Long-press directly enters multi-select mode
 
+    // Batch operation dialog states
+    var showTagDialog by remember { mutableStateOf(false) }
+    var showRateDialog by remember { mutableStateOf(false) }
+    var showRemoveTagsDialog by remember { mutableStateOf(false) }
+
+    // Long-press action dialog state (single image actions)
+    var showLongPressActionDialog by remember { mutableStateOf(false) }
+    var longPressImageUri by remember { mutableStateOf<String?>(null) }
+
     // Tag mode local state
     var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var tagImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
@@ -159,6 +168,7 @@ fun AlbumScreen(
             context.contentResolver.takePersistableUriPermission(treeUri, takeFlags)
             // Resolve the tree URI to a real directory path
             targetFolderForOperation = resolveTreeUriToPath(treeUri)
+                ?: FileUtils.getDefaultMoveDir(context)
             pendingOperation?.let { op ->
                 pendingOperation = null
                 launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation)
@@ -244,6 +254,94 @@ fun AlbumScreen(
 
     // Long-press directly enters multi-select mode
     // (dialog removed — shortcut for batch select)
+
+    // Single-image long-press action dialog
+    if (showLongPressActionDialog && longPressImageUri != null) {
+        val lpUri = longPressImageUri!!
+        val isLpAiSelected = lpUri in aiSelectedUris
+        AlertDialog(
+            onDismissRequest = {
+                showLongPressActionDialog = false
+                longPressImageUri = null
+            },
+            title = { Text("Image Actions") },
+            text = {
+                Column {
+                    OutlinedButton(
+                        onClick = {
+                            showLongPressActionDialog = false
+                            longPressImageUri = null
+                            // Show single image rating dialog
+                            isMultiSelectMode = true
+                            selectedImageUris = setOf(lpUri)
+                            showRateDialog = true
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    ) {
+                        Icon(Icons.Default.Star, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Assign Rating")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            showLongPressActionDialog = false
+                            longPressImageUri = null
+                            // Show single image tag dialog
+                            isMultiSelectMode = true
+                            selectedImageUris = setOf(lpUri)
+                            showTagDialog = true
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    ) {
+                        Icon(Icons.Default.Label, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Add Tag")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            showLongPressActionDialog = false
+                            longPressImageUri = null
+                            // Toggle AI ranking selection
+                            val currentSet = loadAiSelectedUris(context).toMutableSet()
+                            if (lpUri in currentSet) {
+                                currentSet.remove(lpUri)
+                            } else {
+                                currentSet.add(lpUri)
+                            }
+                            aiSelectedUris = currentSet
+                            saveAiSelectedUris(context, currentSet)
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        colors = if (isLpAiSelected)
+                            OutlinedButtonDefaults.colors(
+                                containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                            )
+                        else
+                            OutlinedButtonDefaults.colors()
+                    ) {
+                        Icon(
+                            if (isLpAiSelected) Icons.Default.CheckCircle else Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = if (isLpAiSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (isLpAiSelected) "✓ AI Ranking" else "AI Ranking",
+                            color = if (isLpAiSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = {
+                    showLongPressActionDialog = false
+                    longPressImageUri = null
+                }) { Text("Cancel") }
+            }
+        )
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -601,26 +699,28 @@ fun AlbumScreen(
                             selectedImageUris = emptySet()
                         },
                         onAddTag = {
-                            // Batch add tag — use ViewModel
-                            isMultiSelectMode = false
-                            selectedImageUris = emptySet()
+                            showTagDialog = true
                         },
                         onRate = {
-                            // Batch rate — use ViewModel
-                            isMultiSelectMode = false
-                            selectedImageUris = emptySet()
+                            showRateDialog = true
                         },
                         onRemoveTags = {
-                            isMultiSelectMode = false
-                            selectedImageUris = emptySet()
+                            if (selectedImageUris.isNotEmpty()) {
+                                showRemoveTagsDialog = true
+                            }
                         },
                         onSelectForAi = {
-                            val current = aiSelectedUris.toMutableSet()
-                            current.addAll(selectedImageUris)
-                            aiSelectedUris = current
-                            saveAiSelectedUris(context, current)
-                            isMultiSelectMode = false
-                            selectedImageUris = emptySet()
+                            // Toggle: remove already-selected URIs, add the rest
+                            val alreadySelected = selectedImageUris.intersect(aiSelectedUris)
+                            val newlySelected = selectedImageUris - aiSelectedUris
+                            if (newlySelected.isEmpty() && alreadySelected.isNotEmpty()) {
+                                // All selected images are already AI-selected → deselect them
+                                aiSelectedUris = aiSelectedUris - alreadySelected
+                            } else {
+                                // Add newly selected, keep existing ones
+                                aiSelectedUris = aiSelectedUris + newlySelected
+                            }
+                            saveAiSelectedUris(context, aiSelectedUris)
                         },
                         onCopyTo = {
                             pendingOperation = "copy"
@@ -633,6 +733,138 @@ fun AlbumScreen(
                     )
                 }
             }
+
+            // --- Batch operation dialogs ---
+
+            // Add Tag dialog
+            if (showTagDialog) {
+                var tagInput by remember { mutableStateOf("") }
+                AlertDialog(
+                    onDismissRequest = { showTagDialog = false },
+                    title = { Text("Add Tag to ${selectedImageUris.size} image(s)") },
+                    text = {
+                        Column {
+                            Text("Choose existing tag or create a new one:")
+                            Spacer(Modifier.height(8.dp))
+                            if (allTags.isNotEmpty()) {
+                                LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                                    items(allTags) { tag ->
+                                        OutlinedButton(
+                                            onClick = {
+                                                selectedImageUris.forEach { uri ->
+                                                    viewModel.addTagToImage(uri, tag.name)
+                                                }
+                                                showTagDialog = false
+                                            },
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                        ) { Text(tag.name) }
+                                    }
+                                }
+                                Spacer(Modifier.height(12.dp))
+                                HorizontalDivider()
+                                Spacer(Modifier.height(8.dp))
+                            }
+                            OutlinedTextField(
+                                value = tagInput,
+                                onValueChange = { tagInput = it },
+                                label = { Text("New tag name") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            if (tagInput.isNotBlank()) {
+                                selectedImageUris.forEach { uri ->
+                                    viewModel.addTagToImage(uri, tagInput.trim())
+                                }
+                            }
+                            showTagDialog = false
+                        }) { Text("Add") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showTagDialog = false }) { Text("Cancel") }
+                    }
+                )
+            }
+
+            // Rate dialog
+            if (showRateDialog) {
+                var batchRating by remember { mutableFloatStateOf(0f) }
+                AlertDialog(
+                    onDismissRequest = { showRateDialog = false },
+                    title = { Text("Rate ${selectedImageUris.size} image(s)") },
+                    text = {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Select a rating for all selected images:")
+                            Spacer(Modifier.height(8.dp))
+                            RatingBar(rating = batchRating, onRatingChange = { batchRating = it })
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = String.format("%.1f stars", batchRating),
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            selectedImageUris.forEach { uri ->
+                                viewModel.updateRating(uri, batchRating)
+                            }
+                            showRateDialog = false
+                        }) { Text("Assign") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showRateDialog = false }) { Text("Cancel") }
+                    }
+                )
+            }
+
+            // Remove Tags dialog
+            if (showRemoveTagsDialog) {
+                var tagToRemove by remember { mutableStateOf<TagEntity?>(null) }
+                AlertDialog(
+                    onDismissRequest = { showRemoveTagsDialog = false },
+                    title = { Text("Remove Tags from ${selectedImageUris.size} image(s)") },
+                    text = {
+                        Column {
+                            Text("Select a tag to remove from all selected images:")
+                            Spacer(Modifier.height(8.dp))
+                            if (allTags.isNotEmpty()) {
+                                LazyColumn(modifier = Modifier.heightIn(max = 250.dp)) {
+                                    items(allTags) { tag ->
+                                        OutlinedButton(
+                                            onClick = { tagToRemove = tag },
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                RadioButton(selected = tagToRemove == tag, onClick = null)
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(tag.name)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                Text("No tags available.")
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            tagToRemove?.let { tag ->
+                                viewModel.batchRemoveTagsFromImages(selectedImageUris.toList(), tag.name)
+                            }
+                            showRemoveTagsDialog = false
+                        }) { Text("Remove") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showRemoveTagsDialog = false }) { Text("Cancel") }
+                    }
+                )
+            }
+
         ) { paddingValues ->
             Column(
                 modifier = Modifier
@@ -757,8 +989,9 @@ fun AlbumScreen(
                                                 else
                                                     selectedImageUris + uri
                                             } else {
-                                                isMultiSelectMode = true
-                                                selectedImageUris = setOf(uri)
+                                                // Show action dialog
+                                                longPressImageUri = uri
+                                                showLongPressActionDialog = true
                                             }
                                         }
                                     )
@@ -836,8 +1069,8 @@ fun AlbumScreen(
                                                     .combinedClickable(
                                                         onClick = { onImageClick(image.uri, tagImageUris) },
                                                         onLongClick = {
-                                                            isMultiSelectMode = true
-                                                            selectedImageUris = setOf(image.uri)
+                                                            longPressImageUri = image.uri
+                                                            showLongPressActionDialog = true
                                                         }
                                                     )
                                             ) {
@@ -927,19 +1160,18 @@ private fun BatchMultiSelectBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp)
-                .navigationBarsPadding(),
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+                .navigationBarsPadding()
+                .height(44.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Menu button — expands to show all actions
+            // Small action button — left side
             Box {
-                OutlinedButton(
+                IconButton(
                     onClick = { showMenu = true },
-                    modifier = Modifier.height(40.dp)
+                    modifier = Modifier.size(34.dp)
                 ) {
                     Icon(Icons.Default.MoreVert, contentDescription = "Actions", modifier = Modifier.size(20.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Actions", maxLines = 1)
                 }
                 DropdownMenu(
                     expanded = showMenu,
@@ -962,7 +1194,7 @@ private fun BatchMultiSelectBar(
                     )
                     DropdownMenuItem(
                         onClick = { showMenu = false; onSelectForAi() },
-                        text = { Text("Select for AI") },
+                        text = { Text("AI Ranking") },
                         leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     HorizontalDivider()
@@ -979,19 +1211,16 @@ private fun BatchMultiSelectBar(
                 }
             }
 
-            Spacer(Modifier.weight(1f))
-
-            // Selected count
+            // Selected count — centered
             Text(
                 text = "$selectedCount selected",
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f).wrapContentWidth(Alignment.CenterHorizontally)
             )
 
-            Spacer(Modifier.width(12.dp))
-
-            // Cancel button
-            TextButton(onClick = onCancel, modifier = Modifier.height(40.dp)) {
+            // Cancel button — right side
+            TextButton(onClick = onCancel, modifier = Modifier.height(34.dp)) {
                 Text("Cancel")
             }
         }

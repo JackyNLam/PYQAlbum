@@ -159,6 +159,15 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    fun batchRemoveTagsFromImages(imageUris: List<String>, tagName: String) {
+        viewModelScope.launch {
+            val app = getApplication<PyqCrApp>()
+            val tagDao = app.database.tagDao()
+            val tag = tagDao.getTagByName(tagName) ?: return@launch
+            tagDao.removeTagFromImages(imageUris, tag.id)
+        }
+    }
 }
 
 enum class FolderSortMode {

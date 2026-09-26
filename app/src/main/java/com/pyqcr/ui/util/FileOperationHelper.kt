@@ -64,19 +64,25 @@ object FileOperationHelper {
 
     // ---------- Copy/Move via real file path (fast path) ----------
 
-    /** Copy a file using real file paths. Returns destination path on success. */
+    /** Copy a file using ContentResolver stream (works on all Android versions, incl. 10+ where DATA column is null). */
     suspend fun copyViaFilePath(
         context: Context,
         sourceUri: String,
         destDir: File
     ): String? = withContext(Dispatchers.IO) {
         try {
-            val sourcePath = resolveFilePath(context, sourceUri) ?: return@withContext null
-            val sourceFile = File(sourcePath)
-            if (!sourceFile.exists()) return@withContext null
+            val contentUri = Uri.parse(sourceUri)
+            val fileName = getFileName(context, sourceUri)
             if (!destDir.exists()) destDir.mkdirs()
-            val destFile = resolveConflict(File(destDir, sourceFile.name))
-            sourceFile.copyTo(destFile, overwrite = false)
+            val destFile = resolveConflict(File(destDir, fileName))
+
+            // Use ContentResolver to read the source stream — works on all Android versions
+            context.contentResolver.openInputStream(contentUri)?.use { input ->
+                FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                }
+            } ?: return@withContext null
+
             MediaStoreUtils.scanFile(context, destFile.absolutePath)
             destFile.absolutePath
         } catch (e: Exception) {
@@ -92,22 +98,39 @@ object FileOperationHelper {
         destDir: File
     ): String? = withContext(Dispatchers.IO) {
         try {
-            val sourcePath = resolveFilePath(context, sourceUri) ?: return@withContext null
-            val sourceFile = File(sourcePath)
-            if (!sourceFile.exists()) return@withContext null
-            if (!destDir.exists()) destDir.mkdirs()
-            val destFile = resolveConflict(File(destDir, sourceFile.name))
+            val contentUri = Uri.parse(sourceUri)
+            val fileName = getFileName(context, sourceUri)
 
-            // Try rename (fast, same filesystem)
-            if (sourceFile.renameTo(destFile)) {
-                MediaStoreUtils.scanFile(context, destFile.absolutePath)
-                MediaStoreUtils.deleteFromMediaStore(context, sourceUri)
-                return@withContext destFile.absolutePath
+            // First try to get real file path for fast rename
+            val sourcePath = resolveFilePath(context, sourceUri)
+            if (sourcePath != null) {
+                val sourceFile = File(sourcePath)
+                if (sourceFile.exists()) {
+                    if (!destDir.exists()) destDir.mkdirs()
+                    val destFile = resolveConflict(File(destDir, sourceFile.name))
+                    // Try rename (fast, same filesystem)
+                    if (sourceFile.renameTo(destFile)) {
+                        MediaStoreUtils.scanFile(context, destFile.absolutePath)
+                        MediaStoreUtils.deleteFromMediaStore(context, sourceUri)
+                        return@withContext destFile.absolutePath
+                    }
+                    // Fallback: copy + delete
+                    sourceFile.copyTo(destFile, overwrite = false)
+                    sourceFile.delete()
+                    MediaStoreUtils.scanFile(context, destFile.absolutePath)
+                    MediaStoreUtils.deleteFromMediaStore(context, sourceUri)
+                    return@withContext destFile.absolutePath
+                }
             }
 
-            // Fallback: copy + delete
-            sourceFile.copyTo(destFile, overwrite = false)
-            sourceFile.delete()
+            // Fallback: copy via ContentResolver then delete
+            if (!destDir.exists()) destDir.mkdirs()
+            val destFile = resolveConflict(File(destDir, fileName))
+            context.contentResolver.openInputStream(contentUri)?.use { input ->
+                FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                }
+            } ?: return@withContext null
             MediaStoreUtils.scanFile(context, destFile.absolutePath)
             MediaStoreUtils.deleteFromMediaStore(context, sourceUri)
             destFile.absolutePath
