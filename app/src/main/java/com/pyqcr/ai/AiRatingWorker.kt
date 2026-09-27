@@ -1,6 +1,5 @@
 package com.pyqcr.ai
 
-import android.app.NotificationManager
 import android.content.Context
 import android.net.Uri
 import androidx.work.CoroutineWorker
@@ -8,10 +7,12 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.pyqcr.PyqCrApp
 import com.pyqcr.data.repository.AlbumRepository
+import kotlinx.coroutines.ensureActive
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.coroutines.coroutineContext
 
 /**
  * WorkManager Worker that performs AI rating in the background.
@@ -67,12 +68,12 @@ class AiRatingWorker(
             } else {
                 log("  -> FAILED: $uriStr")
             }
-            ensureActive()
+            coroutineContext.ensureActive()
         }
 
         if (resizedPaths.isEmpty()) {
             log("No images could be resized")
-            setForeground(createFinishedNotification(0, totalImages))
+            setForeground(createFinishedForegroundInfo(0, totalImages))
             return Result.success()
         }
 
@@ -89,9 +90,9 @@ class AiRatingWorker(
                 progress = current
                 total = totalCount
                 val label = "AI Rating — $current/$totalCount images"
-                setForeground(createForegroundInfo(label, current, totalCount))
+                // Non-suspend callback: use the async variant of setForeground
+                setForegroundAsync(createForegroundInfo(label, current, totalCount))
                 log("Progress: $current/$totalCount")
-                ensureActive()
             },
             onDebug = { msg -> log(msg) }
         )
@@ -111,14 +112,14 @@ class AiRatingWorker(
                 }
                 savedCount++
             }
-            ensureActive()
+            coroutineContext.ensureActive()
         }
 
         resizer.clearCache()
         log("Done: $savedCount scores saved")
 
         // Final notification
-        setForeground(createFinishedNotification(savedCount, totalImages))
+        setForeground(createFinishedForegroundInfo(savedCount, totalImages))
 
         return Result.success()
     }
@@ -133,8 +134,11 @@ class AiRatingWorker(
         )
     }
 
-    private fun createFinishedNotification(succeeded: Int, total: Int) {
-        val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(1001, NotificationHelper.buildFinishedNotification(applicationContext, succeeded, total))
+    private fun createFinishedForegroundInfo(succeeded: Int, total: Int): ForegroundInfo {
+        val notification = NotificationHelper.buildFinishedNotification(applicationContext, succeeded, total)
+        return ForegroundInfo(
+            /* id */ 1001, notification,
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        )
     }
 }
