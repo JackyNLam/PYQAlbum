@@ -2,7 +2,7 @@
 
 An Android album management app with AI-powered photo rating, built with **Kotlin + Jetpack Compose**.
 
-pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder** or **tag**, and uses **DashScope (Alibaba Cloud Bailian) AI** to automatically score photos (1-100) via `qwen-vl-plus` multimodal Vision-Language Model.
+pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder** or **tag**, and uses **DashScope (Alibaba Cloud Bailian) AI** to automatically score photos (1-100) via `qwen3.8-omni-flash` multimodal Vision-Language Model.
 
 ---
 
@@ -184,7 +184,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Single unified view** — no separate selection step
 - **API Configuration** card with:
   - DashScope API Key input (encrypted storage via EncryptedSharedPreferences)
-  - Model Name input (e.g. `qwen-vl-plus`)
+  - Model Name input (e.g. `qwen3.8-omni-flash`)
   - **Save Config** button — persists both API Key and Model name
 - **Selected images** shown in a **3-column square grid** (not a list view):
   - Each thumbnail has a green border + ✕ overlay

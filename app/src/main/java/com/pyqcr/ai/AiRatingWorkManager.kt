@@ -15,7 +15,7 @@ object AiRatingWorkManager {
      * Schedule a background AI rating job.
      *
      * @param apiKey DashScope API key
-     * @param modelName model name (e.g. qwen-vl-plus)
+     * @param modelName model name (e.g. qwen3.8-omni-flash)
      * @param imageUris list of content:// URIs to rate
      */
     fun enqueue(

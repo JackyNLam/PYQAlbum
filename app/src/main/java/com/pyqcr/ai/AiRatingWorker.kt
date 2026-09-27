@@ -10,9 +10,6 @@ import com.pyqcr.PyqCrApp
 import com.pyqcr.data.repository.AlbumRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -20,7 +17,7 @@ import kotlin.coroutines.coroutineContext
  *
  * Input data keys:
  *  - "apiKey" : the DashScope API key
- *  - "modelName" : model name (e.g. qwen-vl-plus)
+ *  - "modelName" : model name (e.g. qwen3.8-omni-flash)
  *  - "imageUris" : comma-separated list of content:// URIs to rate (limit 50)
  *
  * NOTE: Running as a foreground worker requires the app manifest to declare
@@ -71,7 +68,7 @@ class AiRatingWorker(
 
     private suspend fun runRating(): Result {
         val apiKey = inputData.getString("apiKey") ?: return Result.failure()
-        val modelName = inputData.getString("modelName") ?: "qwen-vl-plus"
+        val modelName = inputData.getString("modelName") ?: "qwen3.8-omni-flash"
         val imageUris = (inputData.getString("imageUris") ?: "")
             .split(",")
             .map { it.trim() }
@@ -80,9 +77,12 @@ class AiRatingWorker(
 
         if (imageUris.isEmpty()) return Result.success()
 
+        // Start a fresh on-screen debug log for this session (worker -> UI polling)
+        BackgroundDebugLog.clear()
+
         val log = { msg: String ->
-            val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-            Log.d(TAG, "[$ts] $msg")
+            Log.d(TAG, msg)
+            BackgroundDebugLog.add(msg)
         }
 
         log("=== Background AI Rating Started ===")

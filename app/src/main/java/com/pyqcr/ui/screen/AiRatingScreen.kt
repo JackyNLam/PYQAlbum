@@ -159,7 +159,7 @@ fun AiRatingScreen(
                             value = modelName,
                             onValueChange = { modelName = it },
                             label = { Text("Model Name") },
-                            placeholder = { Text("qwen-vl-plus") },
+                            placeholder = { Text("qwen3.8-omni-flash") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -167,7 +167,7 @@ fun AiRatingScreen(
                         Spacer(Modifier.height(8.dp))
 
                         Text(
-                            text = "e.g. qwen-vl-plus, qwen-vl-max",
+                            text = "e.g. qwen3.8-omni-flash, qwen-vl-plus, qwen-vl-max",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -487,10 +487,13 @@ fun AiRatingScreen(
             // ======== Background AI Rating button ========
             item {
                 var bgRunning by remember { mutableStateOf(false) }
-                // Poll background status
+                // Debug log from the background worker (shown on screen like the foreground flow)
+                var bgDebugLog by remember { mutableStateOf<List<String>>(emptyList()) }
+                // Poll background status + debug log
                 LaunchedEffect(Unit) {
                     while (true) {
                         bgRunning = com.pyqcr.ai.AiRatingWorkManager.isRunning(context)
+                        bgDebugLog = com.pyqcr.ai.BackgroundDebugLog.lines
                         kotlinx.coroutines.delay(2000)
                     }
                 }
@@ -536,6 +539,32 @@ fun AiRatingScreen(
                         )
                         Spacer(Modifier.width(6.dp))
                         Text("Run AI Rating in Background (screen off ok)")
+                    }
+                }
+
+                // On-screen debug log for the background run (same style as foreground)
+                if (bgDebugLog.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = { com.pyqcr.ai.BackgroundDebugLog.clear() }) {
+                        Text("Clear Background Debug Log", color = MaterialTheme.colorScheme.error)
+                    }
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF1E1E2E)
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            bgDebugLog.forEach { line ->
+                                Text(
+                                    text = line,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFCDD6F4),    // light text on dark bg
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    fontSize = MaterialTheme.typography.labelSmall.fontSize
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -648,6 +677,7 @@ fun AiRatingScreen(
 private const val PREFS_NAME = "pyqcr_secure_prefs"
 private const val KEY_API_KEY = "dashscope_api_key"
 private const val KEY_MODEL_NAME = "dashscope_model_name"
+private const val DEFAULT_MODEL = "qwen3.8-omni-flash"
 
 private fun getEncryptedPrefs(context: Context): android.content.SharedPreferences? {
     return try {
@@ -680,7 +710,7 @@ private fun saveApiKeyToPrefs(context: Context, key: String) {
 
 private fun loadModelNameFromPrefs(context: Context): String {
     val prefs = context.getSharedPreferences("pyqcr_ai_config", Context.MODE_PRIVATE)
-    return prefs.getString(KEY_MODEL_NAME, "qwen-vl-plus") ?: "qwen-vl-plus"
+    return prefs.getString(KEY_MODEL_NAME, DEFAULT_MODEL) ?: DEFAULT_MODEL
 }
 
 private fun saveModelNameToPrefs(context: Context, model: String) {

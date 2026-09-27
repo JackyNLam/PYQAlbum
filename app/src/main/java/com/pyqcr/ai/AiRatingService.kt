@@ -32,7 +32,7 @@ class AiRatingService {
     /**
      * Rate images by sending them to DashScope API.
      * @param apiKey The user's DashScope API key
-     * @param modelName The model name (e.g. qwen-vl-plus)
+     * @param modelName The model name (e.g. qwen3.8-omni-flash)
      * @param resizedImagePaths Paths to already-resized images (max 800px)
      * @param onProgress Callback with (current, total) progress
      * @param onDebug Callback for debug log messages (full HTTP response, errors, etc.)
@@ -267,7 +267,7 @@ class AiRatingService {
             code == 401 || b.contains("invalid_api_key") || b.contains("incorrect api key") ->
                 "Invalid API key — re-check the DashScope key in AI Rating settings."
             code == 403 && b.contains("access_denied") ->
-                "Access denied — this model isn't enabled for your account/key. Try another model (e.g. qwen-vl-plus)."
+                "Access denied — this model isn't enabled for your account/key. Try another model (e.g. qwen3.8-omni-flash)."
             b.contains("arrearage") || b.contains("insufficient") || b.contains("overdue") ->
                 "Account arrears/insufficient balance — top up your DashScope account."
             else -> null
