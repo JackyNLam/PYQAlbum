@@ -210,30 +210,14 @@ fun AiRatingScreen(
                 }
             }
 
-            // ======== Select / Deselect controls ========
+            // ======== Selected count ========
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Selected: ${selectedImages.size} images",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    TextButton(onClick = {
-                        val newSet = if (selectedImages.size == allImages.size)
-                            emptySet()
-                        else
-                            allImages.map { it.uri }.toSet()
-                        selectedImages = newSet
-                        onUrisChanged?.invoke(newSet)
-                    }) {
-                        Text(if (selectedImages.size == allImages.size) "Deselect All" else "Select All")
-                    }
-                }
+                Text(
+                    text = "Selected: ${selectedImages.size} images",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
 
             // ======== Selected images square grid view ========
@@ -498,15 +482,15 @@ fun AiRatingScreen(
                     }
                 }
 
-                OutlinedButton(
+                Button(
                     onClick = {
                         if (apiKey.isBlank()) {
                             Toast.makeText(context, "Please enter and save API Key first", Toast.LENGTH_SHORT).show()
-                            return@OutlinedButton
+                            return@Button
                         }
                         if (selectedImages.isEmpty()) {
                             Toast.makeText(context, "Please select images", Toast.LENGTH_SHORT).show()
-                            return@OutlinedButton
+                            return@Button
                         }
 
                         // Save config
@@ -527,7 +511,8 @@ fun AiRatingScreen(
                     if (bgRunning) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
                         )
                         Spacer(Modifier.width(8.dp))
                         Text("Background rating running...")
@@ -538,7 +523,7 @@ fun AiRatingScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text("Run AI Rating in Background (screen off ok)")
+                        Text("Run AI Rating")
                     }
                 }
 

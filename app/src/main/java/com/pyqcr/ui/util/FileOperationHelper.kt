@@ -69,7 +69,8 @@ object FileOperationHelper {
     suspend fun copyViaFilePath(
         context: Context,
         sourceUri: String,
-        destDir: File
+        destDir: File,
+        preserveLastModified: Boolean = false
     ): String? = withContext(Dispatchers.IO) {
         try {
             val contentUri = Uri.parse(sourceUri)
@@ -77,12 +78,21 @@ object FileOperationHelper {
             if (!destDir.exists()) destDir.mkdirs()
             val destFile = resolveConflict(File(destDir, fileName))
 
+            // Remember the source's modified time so we can restore it on the copy
+            val sourceLastModified = if (preserveLastModified)
+                getLastModified(context, contentUri) else null
+
             // Use ContentResolver to read the source stream — works on all Android versions
             context.contentResolver.openInputStream(contentUri)?.use { input ->
                 FileOutputStream(destFile).use { output ->
                     input.copyTo(output)
                 }
             } ?: return@withContext null
+
+            // Preserve the original modified date when copying (used by move fallback)
+            if (sourceLastModified != null && sourceLastModified > 0L) {
+                try { destFile.setLastModified(sourceLastModified) } catch (_: Exception) {}
+            }
 
             MediaStoreUtils.scanFile(context, destFile.absolutePath)
             destFile.absolutePath
@@ -92,12 +102,13 @@ object FileOperationHelper {
         }
     }
 
-    /** Move a file by copying to destination and then reliably deleting the source.
+    /** Move a file to another destination — a real move, not copy+delete, preserving the modified date.
      *
-     * Deletion strategy (in order of preference):
-     *   1. API 30+: [MediaStore.createDeleteRequest] — moves to trash (user-recoverable)
-     *   2. API < 30: Delete the physical file via resolved path, then remove MediaStore entry
-     *   3. Fallback: remove MediaStore entry alone as last resort
+     * Strategy (in order of preference):
+     *   1. Resolve the real file path and use [File.renameTo] — this moves the SAME file
+     *      (instant, no re-encoding, and the modified date is untouched).
+     *   2. Cross-volume / non-resolvable paths fall back to stream copy + restore the source
+     *      modified date + delete the source.
      */
     suspend fun moveViaFilePath(
         context: Context,
@@ -105,12 +116,28 @@ object FileOperationHelper {
         destDir: File
     ): String? = withContext(Dispatchers.IO) {
         try {
-            // Step 1: copy to destination
-            val destPath = copyViaFilePath(context, sourceUri, destDir)
+            val contentUri = Uri.parse(sourceUri)
+            val fileName = getFileName(context, sourceUri)
+            if (!destDir.exists()) destDir.mkdirs()
+            val destFile = resolveConflict(File(destDir, fileName))
+
+            // Strategy 1: true file move via renameTo (same volume) — same inode, modified date intact
+            val realPath = resolveFilePath(context, sourceUri)
+            if (realPath != null) {
+                val sourceFile = File(realPath)
+                if (sourceFile.exists() && sourceFile.renameTo(destFile)) {
+                    MediaStoreUtils.scanFile(context, destFile.absolutePath)
+                    // Remove the stale MediaStore row for the old location
+                    deleteSourceEntry(context, contentUri)
+                    return@withContext destFile.absolutePath
+                }
+            }
+
+            // Strategy 2: copy + delete fallback (cross-volume or content-only URI),
+            // with the source modified date restored on the destination.
+            val destPath = copyViaFilePath(context, sourceUri, destDir, preserveLastModified = true)
             if (destPath == null) return@withContext null
 
-            // Step 2: delete source file
-            val contentUri = Uri.parse(sourceUri)
             val deleted = deleteSourceFile(context, contentUri)
             if (!deleted) {
                 Log.w(TAG, "Source delete may have failed for $sourceUri")
@@ -120,6 +147,31 @@ object FileOperationHelper {
         } catch (e: Exception) {
             Log.e(TAG, "moveViaFilePath failed for $sourceUri", e)
             null
+        }
+    }
+
+    /** Get the modified time (milliseconds) of a media item, if MediaStore exposes it. */
+    private fun getLastModified(context: Context, contentUri: Uri): Long? {
+        return try {
+            val projection = arrayOf(MediaStore.Images.Media.DATE_MODIFIED)
+            context.contentResolver.query(contentUri, projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+                    if (idx >= 0) cursor.getLong(idx) * 1000L else null
+                } else null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "getLastModified failed for $contentUri: ${e.message}")
+            null
+        }
+    }
+
+    /** Remove the stale MediaStore row for a source URI after a true file move. */
+    private fun deleteSourceEntry(context: Context, contentUri: Uri) {
+        try {
+            context.contentResolver.delete(contentUri, null, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "deleteSourceEntry failed for $contentUri: ${e.message}")
         }
     }
 
