@@ -71,6 +71,12 @@ interface ImageDao {
     @Query("SELECT uri, aiReason FROM images")
     suspend fun getAllUriAiReasons(): List<UriAiReason>
 
+    @Query("DELETE FROM images WHERE uri = :uri")
+    suspend fun deleteImageByUri(uri: String)
+
+    @Query("DELETE FROM images WHERE uri IN (:uris)")
+    suspend fun deleteImagesByUri(uris: List<String>)
+
     @Query("DELETE FROM images")
     suspend fun deleteAll()
 

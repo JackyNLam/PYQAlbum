@@ -184,6 +184,17 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Delete images: remove from the DB immediately, then re-sync from MediaStore. */
+    fun deleteImages(imageUris: List<String>) {
+        if (imageUris.isEmpty()) return
+        viewModelScope.launch {
+            _isLoading.value = true
+            repository.removeImagesFromDb(imageUris)
+            repository.refreshImagesFromMediaStore()
+            _isLoading.value = false
+        }
+    }
+
     fun batchRemoveAiInfo(imageUris: List<String>) {
         viewModelScope.launch {
             val app = getApplication<PyqCrApp>()

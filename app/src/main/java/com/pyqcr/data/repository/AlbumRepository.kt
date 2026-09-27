@@ -101,6 +101,13 @@ class AlbumRepository(
         imageDao.updateAiReason(uri, reason)
     }
 
+    /** Remove images from the local DB and drop their tag associations. */
+    suspend fun removeImagesFromDb(uris: List<String>) {
+        if (uris.isEmpty()) return
+        imageDao.deleteImagesByUri(uris)
+        tagDao.removeAllTagsFromImages(uris)
+    }
+
     suspend fun refreshImagesFromMediaStore() = withContext(ioDispatcher) {
         // Preserve existing ratings and AI scores so they aren't wiped by re-insert
         val existingRatings = imageDao.getAllUriRatings().associate { it.uri to it.rating }

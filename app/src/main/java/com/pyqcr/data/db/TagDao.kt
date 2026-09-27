@@ -39,6 +39,9 @@ interface TagDao {
     @Query("DELETE FROM image_tag_cross_ref WHERE imageUri IN (:imageUris) AND tagId = :tagId")
     suspend fun removeTagFromImages(imageUris: List<String>, tagId: Long)
 
+    @Query("DELETE FROM image_tag_cross_ref WHERE imageUri IN (:imageUris)")
+    suspend fun removeAllTagsFromImages(imageUris: List<String>)
+
     @Query("""
         SELECT t.* FROM tags t
         INNER JOIN image_tag_cross_ref c ON t.id = c.tagId

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Android 13+ fine-grained media -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -36,6 +37,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            WorkManager runs foreground workers through this service.
+            Android 14+ (targetSdk 34+) requires an explicit foregroundServiceType;
+            without it, setForeground() throws MissingForegroundServiceTypeException
+            and crashes the process (which WorkManager then retries on next launch).
+        -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
     </application>
 
 </manifest>

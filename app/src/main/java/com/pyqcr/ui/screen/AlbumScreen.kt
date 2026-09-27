@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -104,6 +105,7 @@ fun AlbumScreen(
     var showTagDialog by remember { mutableStateOf(false) }
     var showRateDialog by remember { mutableStateOf(false) }
     var showRemoveTagsDialog by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
 
     // Tag mode local state
     var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
@@ -177,6 +179,45 @@ fun AlbumScreen(
         aiSelectedUris = loadAiSelectedUris(context)
     }
 
+    // System delete confirmation launcher (API 30+) — one dialog for the whole batch
+    val deleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val uris = selectedImageUris.toList()
+            viewModel.deleteImages(uris)
+            scope.launch { snackbarHostState.showSnackbar("Deleted ${uris.size} image(s)") }
+            isMultiSelectMode = false
+            selectedImageUris = emptySet()
+        }
+    }
+
+    /** Kick off the system delete flow for the current selection (API 30+) or delete directly (older). */
+    val performDelete: () -> Unit = {
+        val uris = selectedImageUris.toList()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            val request = FileOperationHelper.createDeleteRequest(context, uris)
+            if (request != null) {
+                deleteLauncher.launch(IntentSenderRequest.Builder(request).build())
+            } else {
+                scope.launch {
+                    val n = FileOperationHelper.deleteMediaDirect(context, uris)
+                    viewModel.deleteImages(uris)
+                    snackbarHostState.showSnackbar("Deleted $n/${uris.size} image(s)")
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                }
+            }
+        } else {
+            scope.launch {
+                val n = FileOperationHelper.deleteMediaDirect(context, uris)
+                viewModel.deleteImages(uris)
+                snackbarHostState.showSnackbar("Deleted $n/${uris.size} image(s)")
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            }
+        }
+    }
     // Permission
     var hasPermission by remember {
         mutableStateOf(
@@ -688,6 +729,13 @@ fun AlbumScreen(
                         onMoveTo = {
                             pendingOperation = "move"
                             folderPickerLauncher.launch(null)
+                        },
+                        onDelete = {
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                                performDelete()
+                            } else {
+                                showDeleteDialog = true
+                            }
                         }
                     )
                 }
@@ -1134,13 +1182,26 @@ fun AlbumScreen(
                     }
                 )
             }
+            // Delete confirmation dialog (Android 9 and below — no system delete dialog)
+            if (showDeleteDialog) {
+                AlertDialog(
+                    onDismissRequest = { showDeleteDialog = false },
+                    title = { Text("Delete ${selectedImageUris.size} image(s)?") },
+                    text = { Text("This permanently deletes the selected images from your device. This cannot be undone.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showDeleteDialog = false
+                            performDelete()
+                        }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") }
+                    }
+                )
+            }
         }
     }
 }
-
-/**
- * A single row item for the navigation drawer.
- */
 @Composable
 private fun DrawerItem(
     icon: ImageVector,
@@ -1172,7 +1233,8 @@ private fun BatchMultiSelectBar(
     onSelectForAi: () -> Unit,
     onRemoveAiInfo: () -> Unit,
     onCopyTo: () -> Unit,
-    onMoveTo: () -> Unit
+    onMoveTo: () -> Unit,
+    onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -1236,6 +1298,19 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onMoveTo() },
                         text = { Text("Move to…") },
                         leadingIcon = { Icon(Icons.Default.Forward, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onDelete() },
+                        text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     )
                 }
             }

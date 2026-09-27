@@ -2,6 +2,7 @@ package com.pyqcr.ui.util
 
 import android.content.ContentResolver
 import android.content.Context
+import android.content.IntentSender
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
@@ -191,6 +192,43 @@ object FileOperationHelper {
         destDir: File
     ): List<Pair<String, String?>> = withContext(Dispatchers.IO) {
         sourceUris.map { uri -> uri to moveViaFilePath(context, uri, destDir) }
+    }
+
+    // ---------- Batch delete ----------
+
+    /**
+     * Build a single system delete request for a batch of images.
+     *
+     * On API 30+ this returns an [IntentSender] that the caller must launch via
+     * an ActivityResultLauncher; the system shows ONE confirmation dialog and moves
+     * all the selected images to the recoverable trash. Returns null on older APIs
+     * (or on failure), in which case the caller should fall back to [deleteMediaDirect].
+     */
+    fun createDeleteRequest(context: Context, uris: List<String>): IntentSender? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            val contentUris = uris.map { Uri.parse(it) }
+            MediaStore.createDeleteRequest(context.contentResolver, contentUris).intentSender
+        } catch (e: Exception) {
+            Log.w(TAG, "createDeleteRequest failed", e)
+            null
+        }
+    }
+
+    /**
+     * Directly delete images on API < 30 (no system confirmation dialog available).
+     * Returns the number successfully deleted.
+     */
+    suspend fun deleteMediaDirect(context: Context, uris: List<String>): Int = withContext(Dispatchers.IO) {
+        var deleted = 0
+        for (u in uris) {
+            try {
+                if (context.contentResolver.delete(Uri.parse(u), null, null) > 0) deleted++
+            } catch (e: Exception) {
+                Log.w(TAG, "deleteMediaDirect failed for $u", e)
+            }
+        }
+        deleted
     }
 
     /** Choose a default fallback destination for copy/move operations. */

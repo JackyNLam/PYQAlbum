@@ -2,13 +2,14 @@ package com.pyqcr.ai
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.pyqcr.PyqCrApp
 import com.pyqcr.data.repository.AlbumRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -21,6 +22,12 @@ import kotlin.coroutines.coroutineContext
  *  - "apiKey" : the DashScope API key
  *  - "modelName" : model name (e.g. qwen-vl-plus)
  *  - "imageUris" : comma-separated list of content:// URIs to rate (limit 50)
+ *
+ * NOTE: Running as a foreground worker requires the app manifest to declare
+ * android:foregroundServiceType="dataSync" on WorkManager's SystemForegroundService,
+ * otherwise Android 14+ (targetSdk >= 34) throws MissingForegroundServiceTypeException
+ * and kills the whole process — which WorkManager then retries on the next launch,
+ * causing the app to crash repeatedly at startup.
  */
 class AiRatingWorker(
     context: Context,
@@ -32,6 +39,37 @@ class AiRatingWorker(
     private val resizer = ImageResizer(applicationContext)
 
     override suspend fun doWork(): Result {
+        return try {
+            runRating()
+        } catch (e: CancellationException) {
+            // Propagate cooperative cancellation instead of swallowing it.
+            throw e
+        } catch (e: Exception) {
+            // Never let the worker crash the whole process; fail gracefully instead.
+            Log.e(TAG, "Background AI rating failed", e)
+            Result.failure()
+        }
+    }
+
+    /** Update the foreground notification, ignoring failures (best effort). */
+    private suspend fun safeSetForeground(info: ForegroundInfo) {
+        try {
+            setForeground(info)
+        } catch (e: Exception) {
+            Log.w(TAG, "setForeground failed (ignored): ${e.message}")
+        }
+    }
+
+    /** Async variant used from non-suspend callbacks (best effort). */
+    private fun safeSetForegroundAsync(info: ForegroundInfo) {
+        try {
+            setForegroundAsync(info)
+        } catch (e: Exception) {
+            Log.w(TAG, "setForegroundAsync failed (ignored): ${e.message}")
+        }
+    }
+
+    private suspend fun runRating(): Result {
         val apiKey = inputData.getString("apiKey") ?: return Result.failure()
         val modelName = inputData.getString("modelName") ?: "qwen-vl-plus"
         val imageUris = (inputData.getString("imageUris") ?: "")
@@ -42,24 +80,22 @@ class AiRatingWorker(
 
         if (imageUris.isEmpty()) return Result.success()
 
-        // Start foreground service with initial notification
-        var progress = 0
-        var total = totalImages
-        setForeground(createForegroundInfo("Preparing images...", 0, totalImages))
-
         val log = { msg: String ->
             val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-            android.util.Log.d("AiRatingWorker", "[$ts] $msg")
+            Log.d(TAG, "[$ts] $msg")
         }
 
         log("=== Background AI Rating Started ===")
         log("Model: $modelName, Images: $totalImages")
 
+        // Start foreground service with initial notification (best effort)
+        safeSetForeground(createForegroundInfo("Preparing images...", 0, totalImages))
+
         // Step 1: Resize
         val resizedPaths = mutableListOf<String>()
         val resizedToOriginalUri = mutableMapOf<String, String>()
         for ((idx, uriStr) in imageUris.withIndex()) {
-            setForeground(createForegroundInfo("Resizing (${idx + 1}/$totalImages)...", idx, totalImages))
+            safeSetForeground(createForegroundInfo("Resizing (${idx + 1}/$totalImages)...", idx, totalImages))
             log("Resizing [${idx + 1}/$totalImages]: ${uriStr.substringAfterLast('/')}")
             val resized = resizer.resizeForAi(Uri.parse(uriStr))
             if (resized != null) {
@@ -73,12 +109,11 @@ class AiRatingWorker(
 
         if (resizedPaths.isEmpty()) {
             log("No images could be resized")
-            setForeground(createFinishedForegroundInfo(0, totalImages))
+            safeSetForeground(createFinishedForegroundInfo(0, totalImages))
             return Result.success()
         }
 
         // Step 2: Rate
-        progress = 0
         val service = AiRatingService()
         log("Sending ${resizedPaths.size} images to DashScope API...")
 
@@ -87,11 +122,9 @@ class AiRatingWorker(
             modelName = modelName,
             resizedImagePaths = resizedPaths,
             onProgress = { current, totalCount ->
-                progress = current
-                total = totalCount
                 val label = "AI Rating — $current/$totalCount images"
                 // Non-suspend callback: use the async variant of setForeground
-                setForegroundAsync(createForegroundInfo(label, current, totalCount))
+                safeSetForegroundAsync(createForegroundInfo(label, current, totalCount))
                 log("Progress: $current/$totalCount")
             },
             onDebug = { msg -> log(msg) }
@@ -101,7 +134,7 @@ class AiRatingWorker(
 
         // Step 3: Save results
         var savedCount = 0
-        for ((idx, result) in ratingResults.withIndex()) {
+        for ((_idx, result) in ratingResults.withIndex()) {
             val origUri = resizedToOriginalUri[result.imageUri]
                 ?: resizedToOriginalUri.entries.firstOrNull { it.key.endsWith(result.imageName) }?.value
 
@@ -119,7 +152,7 @@ class AiRatingWorker(
         log("Done: $savedCount scores saved")
 
         // Final notification
-        setForeground(createFinishedForegroundInfo(savedCount, totalImages))
+        safeSetForeground(createFinishedForegroundInfo(savedCount, totalImages))
 
         return Result.success()
     }
@@ -140,5 +173,9 @@ class AiRatingWorker(
             /* id */ 1001, notification,
             android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         )
+    }
+
+    companion object {
+        private const val TAG = "AiRatingWorker"
     }
 }
