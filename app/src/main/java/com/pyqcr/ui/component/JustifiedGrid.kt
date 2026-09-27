@@ -6,6 +6,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,7 +48,8 @@ fun JustifiedGrid(
     aiSelectedUris: Set<String> = emptySet(),
     onImageClick: ((String) -> Unit)? = null,
     onLongPress: ((String) -> Unit)? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    state: LazyListState = rememberLazyListState()
 ) {
     val context = LocalContext.current
     val config = LocalConfiguration.current
@@ -61,6 +64,7 @@ fun JustifiedGrid(
     val availableWidth = screenWidthDp.toFloat() - totalSpacingPerRow
 
     LazyColumn(
+        state = state,
         modifier = modifier.background(Color.White),
         verticalArrangement = Arrangement.spacedBy(spacing)
     ) {

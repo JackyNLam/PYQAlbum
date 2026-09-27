@@ -20,6 +20,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridState
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -259,15 +263,34 @@ fun AlbumScreen(
     // Track scroll position for restore after image detail exit
     // rememberSaveable survives navigation away and back
     val gridState = rememberLazyGridState()
-    var savedScrollIndex by rememberSaveable { mutableIntStateOf(-1) }
-    var savedScrollOffset by rememberSaveable { mutableIntStateOf(0) }
+    val waterfallState = rememberLazyStaggeredGridState()
+    val justifiedState = rememberLazyListState()
+
+    // Saved positions per view layout type
+    var savedGridIndex by rememberSaveable { mutableIntStateOf(-1) }
+    var savedGridOffset by rememberSaveable { mutableIntStateOf(0) }
+    var savedWaterfallIndex by rememberSaveable { mutableIntStateOf(-1) }
+    var savedWaterfallOffset by rememberSaveable { mutableIntStateOf(0) }
+    var savedJustifiedIndex by rememberSaveable { mutableIntStateOf(-1) }
+    var savedJustifiedOffset by rememberSaveable { mutableIntStateOf(0) }
 
     // Restore saved scroll position when returning from detail view
-    LaunchedEffect(savedScrollIndex) {
-        if (savedScrollIndex >= 0) {
-            gridState.scrollToItem(savedScrollIndex, savedScrollOffset)
-            // Reset to avoid re-scrolling on subsequent saves
-            savedScrollIndex = -1
+    LaunchedEffect(savedGridIndex) {
+        if (savedGridIndex >= 0) {
+            gridState.scrollToItem(savedGridIndex, savedGridOffset)
+            savedGridIndex = -1
+        }
+    }
+    LaunchedEffect(savedWaterfallIndex) {
+        if (savedWaterfallIndex >= 0) {
+            waterfallState.scrollToItem(savedWaterfallIndex, savedWaterfallOffset)
+            savedWaterfallIndex = -1
+        }
+    }
+    LaunchedEffect(savedJustifiedIndex) {
+        if (savedJustifiedIndex >= 0) {
+            justifiedState.scrollToItem(savedJustifiedIndex, savedJustifiedOffset)
+            savedJustifiedIndex = -1
         }
     }
 
@@ -772,6 +795,8 @@ fun AlbumScreen(
                                         aiSelectedUris = aiSelectedUris,
                                         groupByMode = groupByMode,
                                         gridState = gridState,
+                                        waterfallState = waterfallState,
+                                        justifiedState = justifiedState,
                                         onImageClick = { uri, _ ->
                                             if (isMultiSelectMode) {
                                                 selectedImageUris = if (uri in selectedImageUris)
@@ -779,8 +804,21 @@ fun AlbumScreen(
                                                 else
                                                     selectedImageUris + uri
                                             } else {
-                                                savedScrollIndex = gridState.firstVisibleItemIndex
-                                                savedScrollOffset = gridState.firstVisibleItemScrollOffset
+                                                // Save scroll position per view layout type
+                                                when (selectedViewLayout) {
+                                                    ViewLayout.GRID -> {
+                                                        savedGridIndex = gridState.firstVisibleItemIndex
+                                                        savedGridOffset = gridState.firstVisibleItemScrollOffset
+                                                    }
+                                                    ViewLayout.WATERFALL -> {
+                                                        savedWaterfallIndex = waterfallState.firstVisibleItemIndex
+                                                        savedWaterfallOffset = waterfallState.firstVisibleItemScrollOffset
+                                                    }
+                                                    ViewLayout.JUSTIFIED -> {
+                                                        savedJustifiedIndex = justifiedState.firstVisibleItemIndex
+                                                        savedJustifiedOffset = justifiedState.firstVisibleItemScrollOffset
+                                                    }
+                                                }
                                                 onImageClick(uri, images.map { it.uri })
                                             }
                                         },
@@ -1249,6 +1287,8 @@ private fun ImageGridView(
     aiSelectedUris: Set<String>,
     groupByMode: GroupByMode = GroupByMode.NONE,
     gridState: LazyGridState = rememberLazyGridState(),
+    waterfallState: LazyStaggeredGridState = rememberLazyStaggeredGridState(),
+    justifiedState: LazyListState = rememberLazyListState(),
     onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit,
     onMultiSelectImageToggle: ((String) -> Unit)? = null
@@ -1344,6 +1384,7 @@ private fun ImageGridView(
             WaterfallGrid(
                 images = images,
                 columns = 3,
+                state = waterfallState,
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
                 aiSelectedUris = aiSelectedUris,
@@ -1357,6 +1398,7 @@ private fun ImageGridView(
             val justifiedClick: (String) -> Unit = { uri -> onImageClick(uri, imageUris) }
             JustifiedGrid(
                 images = images,
+                state = justifiedState,
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
                 aiSelectedUris = aiSelectedUris,
