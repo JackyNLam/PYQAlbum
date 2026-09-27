@@ -11,6 +11,11 @@
         android:maxSdkVersion="29" />
     <!-- Network for AI API -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Foreground service for background AI rating -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13+ notification permission -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".PyqCrApp"
@@ -19,7 +24,8 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.PyqCR"
-        android:requestLegacyExternalStorage="true">
+        android:requestLegacyExternalStorage="true"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"

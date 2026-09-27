@@ -80,6 +80,9 @@ dependencies {
     // Security - EncryptedSharedPreferences
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
+    // WorkManager for background AI rating
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
     // Lifecycle ViewModel Compose
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")

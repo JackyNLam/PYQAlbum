@@ -18,6 +18,8 @@ class PyqCrApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Initialize notification channel for background AI rating
+        com.pyqcr.ai.NotificationHelper.createChannel(this)
     }
 
     fun newImageLoader(context: android.content.Context): ImageLoader {

@@ -470,6 +470,62 @@ fun AiRatingScreen(
                 }
             }
 
+            // ======== Background AI Rating button ========
+            item {
+                var bgRunning by remember { mutableStateOf(false) }
+                // Poll background status
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        bgRunning = com.pyqcr.ai.AiRatingWorkManager.isRunning(context)
+                        kotlinx.coroutines.delay(2000)
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        if (apiKey.isBlank()) {
+                            Toast.makeText(context, "Please enter and save API Key first", Toast.LENGTH_SHORT).show()
+                            return@OutlinedButton
+                        }
+                        if (selectedImages.isEmpty()) {
+                            Toast.makeText(context, "Please select images", Toast.LENGTH_SHORT).show()
+                            return@OutlinedButton
+                        }
+
+                        // Save config
+                        saveApiKeyToPrefs(context, apiKey)
+                        saveModelNameToPrefs(context, modelName)
+
+                        com.pyqcr.ai.AiRatingWorkManager.enqueue(
+                            context = context,
+                            apiKey = apiKey,
+                            modelName = modelName,
+                            imageUris = selectedImages.toList()
+                        )
+                        Toast.makeText(context, "✅ AI rating started in background", Toast.LENGTH_SHORT).show()
+                    },
+                    enabled = !bgRunning && apiKey.isNotBlank() && selectedImages.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (bgRunning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Background rating running...")
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Run AI Rating in Background (screen off ok)")
+                    }
+                }
+            }
+
             // ======== Progress indicator ========
             if (isRunning) {
                 item {
