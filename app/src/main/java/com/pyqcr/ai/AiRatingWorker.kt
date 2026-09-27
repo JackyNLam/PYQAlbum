@@ -117,6 +117,8 @@ class AiRatingWorker(
         val service = AiRatingService()
         log("Sending ${resizedPaths.size} images to DashScope API...")
 
+        var fatalError: String? = null
+
         val ratingResults = service.rateImages(
             apiKey = apiKey,
             modelName = modelName,
@@ -127,7 +129,11 @@ class AiRatingWorker(
                 safeSetForegroundAsync(createForegroundInfo(label, current, totalCount))
                 log("Progress: $current/$totalCount")
             },
-            onDebug = { msg -> log(msg) }
+            onDebug = { msg -> log(msg) },
+            onFatalError = { msg ->
+                fatalError = msg
+                log("🛑 FATAL: $msg")
+            }
         )
 
         log("AI returned ${ratingResults.size} results")
@@ -151,8 +157,18 @@ class AiRatingWorker(
         resizer.clearCache()
         log("Done: $savedCount scores saved")
 
-        // Final notification
-        safeSetForeground(createFinishedForegroundInfo(savedCount, totalImages))
+        // Final notification: error if nothing was saved and we have a reason
+        if (savedCount == 0) {
+            val msg = fatalError ?: "No scores were saved (0/${ratingResults.size} results)."
+            log("❌ Nothing saved: $msg")
+            safeSetForeground(ForegroundInfo(
+                /* id */ 1001,
+                NotificationHelper.buildErrorNotification(applicationContext, msg),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            ))
+        } else {
+            safeSetForeground(createFinishedForegroundInfo(savedCount, totalImages))
+        }
 
         return Result.success()
     }

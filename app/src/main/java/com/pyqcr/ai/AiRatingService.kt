@@ -42,7 +42,8 @@ class AiRatingService {
         modelName: String,
         resizedImagePaths: List<String>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-        onDebug: (String) -> Unit = {}
+        onDebug: (String) -> Unit = {},
+        onFatalError: (String) -> Unit = {}
     ): List<AiRatingResult> = withContext(Dispatchers.IO) {
         val batchSize = 10
         val allResults = mutableListOf<AiRatingResult>()
@@ -133,6 +134,14 @@ class AiRatingService {
                     }
 
                     if (!response.isSuccessful) {
+                        // Some errors are NOT worth retrying (quota, bad key, access denied).
+                        // Abort the whole run with a clear message instead of hammering the API.
+                        val fatal = classifyApiError(responseCode, rawBody)
+                        if (fatal != null) {
+                            onDebug("🛑 FATAL API error (HTTP $responseCode): $fatal")
+                            onFatalError(fatal)
+                            return@withContext allResults
+                        }
                         onDebug("❌ HTTP $responseCode is not success — retrying (attempt $retryCount/$maxRetries)")
                         if (retryCount >= maxRetries) {
                             onDebug("❌ Gave up on batch $batchNum after $maxRetries retries")
@@ -244,6 +253,25 @@ class AiRatingService {
 
         onProgress(resizedImagePaths.size, resizedImagePaths.size)
         allResults
+    }
+
+    /**
+     * Return a human-readable message for API errors that will never succeed on retry.
+     * Returns null when the error is transient and worth retrying.
+     */
+    private fun classifyApiError(code: Int, body: String): String? {
+        val b = body.lowercase()
+        return when {
+            b.contains("allocationquota") || b.contains("free quota") || b.contains("free tier") ->
+                "API quota exhausted — your DashScope free tier is used up. Enable billing / disable \"use free tier only\" in the console, or choose a model that still has quota."
+            code == 401 || b.contains("invalid_api_key") || b.contains("incorrect api key") ->
+                "Invalid API key — re-check the DashScope key in AI Rating settings."
+            code == 403 && b.contains("access_denied") ->
+                "Access denied — this model isn't enabled for your account/key. Try another model (e.g. qwen-vl-plus)."
+            b.contains("arrearage") || b.contains("insufficient") || b.contains("overdue") ->
+                "Account arrears/insufficient balance — top up your DashScope account."
+            else -> null
+        }
     }
 
     private fun encodeImageToBase64(imagePath: String): String? {

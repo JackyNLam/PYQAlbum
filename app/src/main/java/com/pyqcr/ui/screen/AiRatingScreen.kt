@@ -80,6 +80,7 @@ fun AiRatingScreen(
     var results by remember { mutableStateOf<List<AiRatingResult>>(emptyList()) }
     var currentStatus by remember { mutableStateOf("") }
     var debugLog by remember { mutableStateOf<List<String>>(emptyList()) }
+    var fatalMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         repository.getAllImages().collect { images ->
@@ -326,6 +327,7 @@ fun AiRatingScreen(
                             isRunning = true
                             results = emptyList()
                             debugLog = emptyList()
+                            fatalMessage = null
                             currentStatus = "Resizing images..."
                             progress = 0
                             totalCount = selectedImages.size
@@ -393,7 +395,11 @@ fun AiRatingScreen(
                                     currentStatus = "AI Rating — $current/$total images rated ($passNum/$totalPasses passes)"
                                     log("Progress: $current/$total successes ($passNum/$totalPasses passes)")
                                 },
-                                onDebug = { msg -> log(msg) }
+                                onDebug = { msg -> log(msg) },
+                                onFatalError = { msg ->
+                                    fatalMessage = msg
+                                    log("🛑 $msg")
+                                }
                             )
 
                             log("AI returned ${ratingResults.size} results")
@@ -433,13 +439,21 @@ fun AiRatingScreen(
                                 currentStatus = "✅ Completed! ${ratingResults.size} images rated, $savedCount scores saved."
                                 log("✅ DONE: $savedCount scores saved")
                             } else {
-                                currentStatus = "❌ AI returned no results. Check your API key and try again."
-                                log("❌ AI returned 0 results — API key or network issue?")
+                                val fatal = fatalMessage
+                                currentStatus = if (fatal != null)
+                                    "❌ $fatal"
+                                else
+                                    "❌ AI returned no results. Check your API key and try again."
+                                log("❌ AI returned 0 results" + (fatal?.let { " — $it" } ?: " — API key or network issue?"))
                             }
                             isRunning = false
 
-                            if (ratingResults.isEmpty()) {
-                                Toast.makeText(context, "❌ No results from AI. Check API key and network.", Toast.LENGTH_LONG).show()
+                            if (fatalMessage != null || ratingResults.isEmpty()) {
+                                Toast.makeText(
+                                    context,
+                                    "❌ " + (fatalMessage ?: "No results from AI. Check API key and network."),
+                                    Toast.LENGTH_LONG
+                                ).show()
                             } else {
                                 Toast.makeText(
                                     context,
