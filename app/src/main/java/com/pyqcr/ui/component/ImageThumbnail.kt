@@ -82,7 +82,7 @@ fun ImageThumbnail(
                     .padding(horizontal = 4.dp, vertical = 1.dp)
             ) {
                 Text(
-                    text = String.format("AI %.0f", aiScore),
+                    text = String.format("%.0f", aiScore),
                     color = Color(0xFF00BCD4),
                     fontSize = MaterialTheme.typography.labelSmall.fontSize,
                     fontWeight = FontWeight.Bold,

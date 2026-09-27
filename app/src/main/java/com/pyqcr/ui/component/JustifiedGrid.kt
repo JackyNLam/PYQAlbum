@@ -128,6 +128,25 @@ fun JustifiedGrid(
                                 )
                             }
                         }
+                        // AI score badge
+                        if (image.aiScore != null && image.aiScore > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .background(
+                                        Color(0xCC000000),
+                                        shape = MaterialTheme.shapes.small
+                                    )
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    text = String.format("%.0f", image.aiScore),
+                                    color = Color(0xFF00BCD4),
+                                    fontSize = MaterialTheme.typography.labelSmall.fontSize,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                         // AI selection indicator
                         if (image.uri in aiSelectedUris) {
                             Box(

@@ -257,16 +257,18 @@ fun AlbumScreen(
     }
 
     // Track scroll position for restore after image detail exit
+    // rememberSaveable survives navigation away and back
     val gridState = rememberLazyGridState()
+    var savedScrollIndex by rememberSaveable { mutableIntStateOf(-1) }
+    var savedScrollOffset by rememberSaveable { mutableIntStateOf(0) }
 
-    // When navigating back to album screen from image detail, grid scroll position is preserved
-    // because LazyGridState is remembered across recompositions as long as the composable stays alive.
-    // Saving explicitly before navigation and restoring on LaunchedEffect ensures robust behavior.
-    var savedScrollIndex by remember { mutableIntStateOf(0) }
-    var savedScrollOffset by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(savedScrollIndex, savedScrollOffset) {
-        gridState.scrollToItem(savedScrollIndex, savedScrollOffset)
+    // Restore saved scroll position when returning from detail view
+    LaunchedEffect(savedScrollIndex) {
+        if (savedScrollIndex >= 0) {
+            gridState.scrollToItem(savedScrollIndex, savedScrollOffset)
+            // Reset to avoid re-scrolling on subsequent saves
+            savedScrollIndex = -1
+        }
     }
 
     // Long-press directly enters multi-select mode (no popup dialog)
