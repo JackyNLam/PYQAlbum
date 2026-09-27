@@ -319,6 +319,11 @@ fun ImageDetailScreen(
                                     onRemove = {
                                         coroutineScope.launch {
                                             tagDao.removeTagFromImage(imageUri, tag.id)
+                                            // Auto-delete tag if it has no images left
+                                            val remaining = tagDao.getImageUrisForTag(tag.id)
+                                            if (remaining.isEmpty()) {
+                                                tagDao.deleteTagById(tag.id)
+                                            }
                                         }
                                     }
                                 )

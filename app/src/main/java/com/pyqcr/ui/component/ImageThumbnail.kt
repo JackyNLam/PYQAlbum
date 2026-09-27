@@ -29,7 +29,8 @@ fun ImageThumbnail(
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Fit,
     backgroundColor: Color = Color.White,
-    rating: Float = 0f
+    rating: Float = 0f,
+    aiScore: Float? = null
 ) {
     val context = LocalContext.current
     Box(
@@ -62,6 +63,27 @@ fun ImageThumbnail(
                 Text(
                     text = String.format("%.1f", rating),
                     color = Color(0xFFFFD700),
+                    fontSize = MaterialTheme.typography.labelSmall.fontSize,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+
+        // AI Score badge
+        if (aiScore != null && aiScore > 0f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .background(
+                        Color(0xCC000000),
+                        shape = MaterialTheme.shapes.small
+                    )
+                    .padding(horizontal = 4.dp, vertical = 1.dp)
+            ) {
+                Text(
+                    text = String.format("AI %.0f", aiScore),
+                    color = Color(0xFF00BCD4),
                     fontSize = MaterialTheme.typography.labelSmall.fontSize,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center

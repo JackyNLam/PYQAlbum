@@ -176,6 +176,11 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
             val tagDao = app.database.tagDao()
             val tag = tagDao.getTagByName(tagName) ?: return@launch
             tagDao.removeTagFromImages(imageUris, tag.id)
+            // Auto-delete tag if it has no images left
+            val remaining = tagDao.getImageUrisForTag(tag.id)
+            if (remaining.isEmpty()) {
+                tagDao.deleteTagById(tag.id)
+            }
         }
     }
 
@@ -187,6 +192,51 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
                 imageDao.updateAiScore(uri, 0f)
                 imageDao.updateAiReason(uri, "")
             }
+        }
+    }
+
+    /** Remove tags that have no images associated with them anymore. */
+    fun deleteOrphanedTags() {
+        viewModelScope.launch {
+            val app = getApplication<PyqCrApp>()
+            val tagDao = app.database.tagDao()
+            val allTags = tagDao.getAllTagsOnce()
+            for (tag in allTags) {
+                val imageUris = tagDao.getImageUrisForTag(tag.id)
+                if (imageUris.isEmpty()) {
+                    tagDao.deleteTag(tag)
+                }
+            }
+        }
+    }
+
+    // --- Persisted sort mode ---
+
+    fun persistFolderSortMode(mode: FolderSortMode) {
+        val prefs = getApplication<PyqCrApp>().getSharedPreferences("pyqcr_sort", 0)
+        prefs.edit().putString("folder_sort_mode", mode.name).apply()
+    }
+
+    fun getPersistedFolderSortMode(): FolderSortMode {
+        val prefs = getApplication<PyqCrApp>().getSharedPreferences("pyqcr_sort", 0)
+        return try {
+            FolderSortMode.valueOf(prefs.getString("folder_sort_mode", FolderSortMode.MODIFIED_DATE_DESC.name)!!)
+        } catch (e: Exception) {
+            FolderSortMode.MODIFIED_DATE_DESC
+        }
+    }
+
+    fun persistGroupByMode(mode: GroupByMode) {
+        val prefs = getApplication<PyqCrApp>().getSharedPreferences("pyqcr_sort", 0)
+        prefs.edit().putString("group_by_mode", mode.name).apply()
+    }
+
+    fun getPersistedGroupByMode(): GroupByMode {
+        val prefs = getApplication<PyqCrApp>().getSharedPreferences("pyqcr_sort", 0)
+        return try {
+            GroupByMode.valueOf(prefs.getString("group_by_mode", GroupByMode.NONE.name)!!)
+        } catch (e: Exception) {
+            GroupByMode.NONE
         }
     }
 }

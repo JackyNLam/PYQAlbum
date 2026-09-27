@@ -18,6 +18,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -230,6 +232,12 @@ fun AlbumScreen(
         }
     }
 
+    // Restore persisted sort mode on first load
+    LaunchedEffect(Unit) {
+        folderSortMode = viewModel.getPersistedFolderSortMode()
+        groupByMode = viewModel.getPersistedGroupByMode()
+    }
+
     // Re-sort folder images when folderSortMode changes
     LaunchedEffect(folderSortMode, selectedFolder) {
         if (selectedFolder != null) {
@@ -240,6 +248,25 @@ fun AlbumScreen(
                 sortByName = folderSortMode == FolderSortMode.NAME_ASC
             )
         }
+        viewModel.persistFolderSortMode(folderSortMode)
+    }
+
+    // Persist groupByMode changes
+    LaunchedEffect(groupByMode) {
+        viewModel.persistGroupByMode(groupByMode)
+    }
+
+    // Track scroll position for restore after image detail exit
+    val gridState = rememberLazyGridState()
+
+    // When navigating back to album screen from image detail, grid scroll position is preserved
+    // because LazyGridState is remembered across recompositions as long as the composable stays alive.
+    // Saving explicitly before navigation and restoring on LaunchedEffect ensures robust behavior.
+    var savedScrollIndex by remember { mutableIntStateOf(0) }
+    var savedScrollOffset by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(savedScrollIndex, savedScrollOffset) {
+        gridState.scrollToItem(savedScrollIndex, savedScrollOffset)
     }
 
     // Long-press directly enters multi-select mode (no popup dialog)
@@ -742,6 +769,7 @@ fun AlbumScreen(
                                         selectedImageUris = selectedImageUris,
                                         aiSelectedUris = aiSelectedUris,
                                         groupByMode = groupByMode,
+                                        gridState = gridState,
                                         onImageClick = { uri, _ ->
                                             if (isMultiSelectMode) {
                                                 selectedImageUris = if (uri in selectedImageUris)
@@ -749,6 +777,8 @@ fun AlbumScreen(
                                                 else
                                                     selectedImageUris + uri
                                             } else {
+                                                savedScrollIndex = gridState.firstVisibleItemIndex
+                                                savedScrollOffset = gridState.firstVisibleItemScrollOffset
                                                 onImageClick(uri, images.map { it.uri })
                                             }
                                         },
@@ -839,11 +869,21 @@ fun AlbumScreen(
                                             .background(Color.White)
                                     ) {
                                         items(tagImages, key = { it.uri }) { image ->
+                                            val isSelected = image.uri in selectedImageUris
                                             Box(
                                                 modifier = Modifier
                                                     .aspectRatio(1f)
                                                     .combinedClickable(
-                                                        onClick = { onImageClick(image.uri, tagImageUris) },
+                                                        onClick = {
+                                                            if (isMultiSelectMode) {
+                                                                selectedImageUris = if (isSelected)
+                                                                    selectedImageUris - image.uri
+                                                                else
+                                                                    selectedImageUris + image.uri
+                                                            } else {
+                                                                onImageClick(image.uri, tagImageUris)
+                                                            }
+                                                        },
                                                         onLongClick = {
                                                             // Enter multi-select mode
                                                             isMultiSelectMode = true
@@ -856,7 +896,8 @@ fun AlbumScreen(
                                                     modifier = Modifier.fillMaxSize(),
                                                     contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                                                     backgroundColor = Color.White,
-                                                    rating = image.rating
+                                                    rating = image.rating,
+                                                    aiScore = image.aiScore
                                                 )
                                                 // AI selection indicator
                                                 if (image.uri in aiSelectedUris) {
@@ -874,6 +915,40 @@ fun AlbumScreen(
                                                             contentDescription = "AI Selected",
                                                             tint = Color.White,
                                                             modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                }
+                                                // Multi-select blue tick indicator (same as ImageGridCell)
+                                                if (isMultiSelectMode && isSelected) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .background(Color(0x80000000))
+                                                    )
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.TopEnd)
+                                                            .background(MaterialTheme.colorScheme.primary, shape = CircleShape)
+                                                            .padding(4.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Check,
+                                                            contentDescription = "Selected",
+                                                            tint = Color.White,
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                } else if (isMultiSelectMode) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.TopEnd)
+                                                            .padding(4.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.RadioButtonUnchecked,
+                                                            contentDescription = "Not selected",
+                                                            tint = Color.White.copy(alpha = 0.7f),
+                                                            modifier = Modifier.size(20.dp)
                                                         )
                                                     }
                                                 }
@@ -1171,6 +1246,7 @@ private fun ImageGridView(
     selectedImageUris: Set<String>,
     aiSelectedUris: Set<String>,
     groupByMode: GroupByMode = GroupByMode.NONE,
+    gridState: LazyGridState = rememberLazyGridState(),
     onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit,
     onMultiSelectImageToggle: ((String) -> Unit)? = null
@@ -1197,6 +1273,7 @@ private fun ImageGridView(
         ViewLayout.GRID -> {
             if (groupByMode != GroupByMode.NONE && groups.isNotEmpty()) {
                 LazyVerticalGrid(
+                    state = gridState,
                     columns = GridCells.Fixed(3),
                     contentPadding = PaddingValues(2.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -1235,6 +1312,7 @@ private fun ImageGridView(
                 }
             } else {
                 LazyVerticalGrid(
+                    state = gridState,
                     columns = GridCells.Fixed(3),
                     contentPadding = PaddingValues(2.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -1325,7 +1403,8 @@ private fun ImageGridCell(
             modifier = Modifier.fillMaxSize(),
             contentScale = androidx.compose.ui.layout.ContentScale.Fit,
             backgroundColor = Color.White,
-            rating = image.rating
+            rating = image.rating,
+            aiScore = image.aiScore
         )
         // AI selection indicator (AutoAwesome icon)
         if (image.uri in aiSelectedUris) {

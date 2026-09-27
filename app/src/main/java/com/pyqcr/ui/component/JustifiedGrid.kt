@@ -23,8 +23,11 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import coil3.size.Scale
 import com.pyqcr.data.model.ImageItem
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.Icon
 
 /**
@@ -153,14 +156,27 @@ fun JustifiedGrid(
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.TopEnd)
-                                    .background(Color.Green)
-                                    .padding(3.dp)
+                                    .background(androidx.compose.material3.MaterialTheme.colorScheme.primary, shape = CircleShape)
+                                    .padding(4.dp)
                             ) {
-                                Text(
-                                    text = "✓",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Selected",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        } else if (isMultiSelectMode) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.RadioButtonUnchecked,
+                                    contentDescription = "Not selected",
+                                    tint = Color.White.copy(alpha = 0.7f),
+                                    modifier = Modifier.size(20.dp)
                                 )
                             }
                         }
