@@ -28,11 +28,13 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   2. Or tap drawer ✨ AI Rating to go directly to AI Rating view
   3. The AI Rating screen shows all selected images in a **square grid** (no separate list view)
   4. **Save Config** button persists API Key + Model name
-  5. **Submit to AI Rating** button runs the scoring with real-time progress feedback and a full debug log
-  6. Selection persists across app launches (SharedPreferences)
-- **Multi-select mode**: long-press enters multi-select; bottom bar has batch Tag / Rate / Remove Tags / AI Select, plus **Copy to…** and **Move to…** (opens SAF folder picker to choose destination)
+  5. **Run AI Rating** button (above the image grid) starts scoring in the **background** (WorkManager) — rating continues even if you leave the screen; a progress bar + status line appear right below the button while it runs
+  6. **Submit to AI Rating** button (below the grid) runs the same scoring in the foreground with real-time progress feedback and a full debug log
+  7. Selection persists across app launches (SharedPreferences)
+- **Multi-select mode**: long-press enters multi-select; the bottom bar's ⋮ menu has **Select All / Deselect All** (applies to the current folder or tag view), **Collage**, batch Tag / Rate / Remove Tags / AI Ranking / Remove AI Info, **Copy to…** and **Move to…** (SAF folder picker to choose destination), and **Delete**
+- **Collage**: select ≥2 images → ⋮ → **Collage** — images are packed edge-to-edge at their original size (no padding or background fill) and saved to `Pictures/PYQAlbum/collage_<timestamp>.jpg`; all inputs plus the output are auto-tagged with a unique **`Collage <timestamp>`** tag so the set is easy to find and re-edit under the Tag view
 - **Copy**: files are written via ContentResolver stream to the chosen folder (works on all Android versions)
-- **Move**: copies to destination without deleting the source (avoids unreliable `contentResolver.delete` on Android 10+ that could physically delete the original)
+- **Move**: real file move — same-volume moves use `File.renameTo` (instant, preserves the modified date); cross-volume / content-only URIs fall back to copy + restore the modified date + delete the source (API 30+ uses a recoverable delete request)
 - **Default destination**: `Pictures/PYQAlbum/` (fallback if external folder can't be resolved)
 - **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** rating, tags, and AI selection panel; **swipe left/right** to navigate to next/previous image in the same folder/tag
 - **AI-selected images** are marked with an ✨ AutoAwesome icon badge in all grid layouts (Grid, Waterfall, Justified) and TAG grid view
@@ -110,7 +112,9 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Toolbar Sort button** (inside folder) | Dropdown: ↓Modified date (default) / ↑Name / Rating ↓ / AI Score ↓ / Group by submenu |
 | **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Rating |
 | **AI Rating** | Via drawer ✨ |
-| **Multi-select mode** | Batch actions: Tag / Rate / Remove Tags / Select for AI / Copy to… / Move to… |
+| **Multi-select mode** | Batch actions (⋮ menu): Select All / Deselect All / Collage / Tag / Rate / Remove Tags / AI Ranking / Remove AI Info / Copy to… / Move to… / Delete |
+| **Select All / Deselect All** (⋮ in multi-select) | Toggles selection of every image in the current folder or tag view |
+| **Collage** (⋮ in multi-select) | Builds a collage from ≥2 selected images; tags inputs + output with a unique `Collage <timestamp>` tag |
 | **Thumbnail rating badge** | Gold number (e.g. `3.5` or `5.0`) at top-left corner of thumbnails with ratings |
 | **AI Selection badge** | ✨ AutoAwesome icon at bottom-right of AI-selected thumbnails |
 
@@ -154,7 +158,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - White background, `ContentScale.Fit` keeps original proportions
 - `combinedClickable` with click → detail and long-press → action dialog
 - Multi-select: long-press enters mode, selected images get overlay with ✓ badge
-- Batch actions: Tag / Rate / Remove Tags / AI Select, plus **Copy to…** / **Move to…** (SAF folder picker)
+- Batch actions (⋮ menu): **Select All / Deselect All**, **Collage**, Tag / Rate / Remove Tags / AI Ranking / Remove AI Info, **Copy to…** / **Move to…** (SAF folder picker), Delete
 - Rating badge: gold number overlay at top-left (only shown for rated images > 0)
 - AI selection badge: ✨ AutoAwesome icon at bottom-right
 
@@ -186,6 +190,10 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - DashScope API Key input (encrypted storage via EncryptedSharedPreferences)
   - Model Name input (e.g. `qwen3.8-omni-flash`)
   - **Save Config** button — persists both API Key and Model name
+- **Run AI Rating** button — sits **above the image grid** and runs the rating in the **background** via WorkManager (keeps running even if you leave the screen)
+  - While any rating is in progress, a progress bar appears **below the button**: determinate (images processed / total) during the foreground flow, indeterminate for background runs, with a status line
+  - Polls the background worker every 2 seconds (`AiRatingWorkManager.isRunning`) and shows the background worker's debug log on-screen in the same terminal-style panel ("Clear Background Debug Log")
+  - Disabled while a foreground or background run is active, or when there is no API key or selection
 - **Selected images** shown in a **3-column square grid** (not a list view):
   - Each thumbnail has a green border + ✕ overlay
   - Tap any thumbnail to deselect it
@@ -268,10 +276,8 @@ Push to `main` branch — workflow builds and uploads APK as artifact.
 
 1. **pHash duplicate detection** — not yet integrated into AiRatingService
 2. **App icon** — mipmap resources for `ic_launcher` missing
-3. **ProGuard rules** — `proguard-rules.pro` file missing
-4. **Write external storage** — batch resize needs proper SAF permissions
-5. **Gradle wrapper JAR** — missing locally (GitHub Actions auto-generates)
-6. **TagScreen image loading** — LaunchedEffect ordering issue
-7. **Tests** — no unit tests or UI tests yet
-8. **BottomActionBar.kt** — old component file, no longer used (replaced by inline BatchMultiSelectBar)
-9. **Move operation** — source file is no longer deleted (avoids 'remove photo' bug on Android 10+). True cross-folder move (copy + delete source) pending SAF-based MediaStore API cleanup.
+3. **Write external storage** — batch resize needs proper SAF permissions
+4. **Gradle wrapper JAR** — missing locally (GitHub Actions auto-generates)
+5. **TagScreen image loading** — LaunchedEffect ordering issue
+6. **Tests** — no unit tests or UI tests yet
+7. **BottomActionBar.kt** — old component file, no longer used (replaced by inline BatchMultiSelectBar)
