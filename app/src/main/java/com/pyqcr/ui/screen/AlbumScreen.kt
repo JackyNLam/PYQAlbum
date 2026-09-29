@@ -41,6 +41,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pyqcr.PyqCrApp
+import com.pyqcr.data.db.ImageEntity
+import com.pyqcr.data.db.ImageTagCrossRef
 import com.pyqcr.data.db.TagEntity
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
@@ -51,7 +53,10 @@ import com.pyqcr.ui.viewmodel.AlbumViewModel
 import com.pyqcr.ui.viewmodel.FolderSortMode
 import com.pyqcr.ui.viewmodel.FolderListSortMode
 import com.pyqcr.ui.viewmodel.GroupByMode
+import com.pyqcr.util.ImageUtil
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -218,6 +223,78 @@ fun AlbumScreen(
             }
         }
     }
+
+    // Collage creation state
+    var isCreatingCollage by remember { mutableStateOf(false) }
+
+    /** Build a collage from the current selection; tag the input images + the collage
+     *  output with a unique tag so the whole set can be found and edited together. */
+    val createCollageFromSelection: () -> Unit = {
+        val uris = selectedImageUris.toList()
+        if (uris.size < 2) {
+            scope.launch { snackbarHostState.showSnackbar("Select at least 2 images to make a collage") }
+        } else if (!isCreatingCollage) {
+            isCreatingCollage = true
+            scope.launch {
+                try {
+                    val tagName = "Collage " + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+                    val fileName = "collage_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date()) + ".jpg"
+
+                    // Create the unique tag if it does not exist yet
+                    var tag = tagDao.getTagByName(tagName)
+                    var tagId = if (tag != null) tag.id else tagDao.insertTag(TagEntity(name = tagName))
+                    if (tagId == -1L) {
+                        tag = tagDao.getTagByName(tagName)
+                        tagId = tag?.id ?: -1L
+                    }
+                    if (tagId == -1L) {
+                        snackbarHostState.showSnackbar("Failed to create the collage tag")
+                        return@launch
+                    }
+
+                    // Build the collage grid and save it to Pictures/PYQAlbum/
+                    val bitmap = withContext(Dispatchers.IO) { ImageUtil.createCollage(context, uris) }
+                    if (bitmap == null) {
+                        snackbarHostState.showSnackbar("Failed to create collage — could not decode the selected images")
+                        return@launch
+                    }
+                    val collageUri = withContext(Dispatchers.IO) { ImageUtil.saveCollageBitmap(context, bitmap, fileName) }
+                    if (collageUri == null) {
+                        snackbarHostState.showSnackbar("Failed to save the collage image")
+                        return@launch
+                    }
+
+                    // Register the collage in the library (folder PYQAlbum) so it shows up immediately
+                    val imageDao = app.database.imageDao()
+                    imageDao.insertImage(
+                        ImageEntity(
+                            uri = collageUri,
+                            displayName = fileName,
+                            width = bitmap.width,
+                            height = bitmap.height,
+                            sizeBytes = bitmap.byteCount.toLong(),
+                            dateAdded = System.currentTimeMillis() / 1000,
+                            folderName = "PYQAlbum"
+                        )
+                    )
+
+                    // Tag every original input + the collage output with the unique tag
+                    tagDao.addTagToImages((uris + collageUri).map { uri ->
+                        ImageTagCrossRef(imageUri = uri, tagId = tagId)
+                    })
+
+                    snackbarHostState.showSnackbar("Collage saved & tagged \"$tagName\"")
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                } catch (e: Exception) {
+                    snackbarHostState.showSnackbar("Collage failed: ${e.message}")
+                } finally {
+                    isCreatingCollage = false
+                }
+            }
+        }
+    }
+
     // Permission
     var hasPermission by remember {
         mutableStateOf(
@@ -685,13 +762,25 @@ fun AlbumScreen(
             },
             bottomBar = {
                 if (isMultiSelectMode) {
-                    val urisSnapshot = selectedImageUris.toList()
+                    // Images selectable in the current browse context (for Select All)
+                    val contextImages: List<ImageItem> = when {
+                        selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null -> images
+                        selectedBrowseMode == BrowseMode.TAG && selectedTagName != null -> tagImages
+                        else -> emptyList()
+                    }
+                    val contextUris = contextImages.map { it.uri }
+                    val allContextSelected = contextUris.isNotEmpty() && contextUris.all { it in selectedImageUris }
                     BatchMultiSelectBar(
                         selectedCount = selectedImageUris.size,
+                        allContextSelected = allContextSelected,
                         onCancel = {
                             isMultiSelectMode = false
                             selectedImageUris = emptySet()
                         },
+                        onSelectAll = {
+                            selectedImageUris = if (allContextSelected) emptySet() else selectedImageUris + contextUris.toSet()
+                        },
+                        onCollage = { createCollageFromSelection() },
                         onAddTag = {
                             showTagDialog = true
                         },
@@ -1226,7 +1315,10 @@ private fun DrawerItem(
 @Composable
 private fun BatchMultiSelectBar(
     selectedCount: Int,
+    allContextSelected: Boolean,
     onCancel: () -> Unit,
+    onSelectAll: () -> Unit,
+    onCollage: () -> Unit,
     onAddTag: () -> Unit,
     onRate: () -> Unit,
     onRemoveTags: () -> Unit,
@@ -1263,6 +1355,17 @@ private fun BatchMultiSelectBar(
                     expanded = showMenu,
                     onDismissRequest = { showMenu = false }
                 ) {
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onSelectAll() },
+                        text = { Text(if (allContextSelected) "Deselect All" else "Select All") },
+                        leadingIcon = { Icon(Icons.Default.SelectAll, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onCollage() },
+                        text = { Text("Collage") },
+                        leadingIcon = { Icon(Icons.Default.GridOn, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    HorizontalDivider()
                     DropdownMenuItem(
                         onClick = { showMenu = false; onAddTag() },
                         text = { Text("Add Tag") },

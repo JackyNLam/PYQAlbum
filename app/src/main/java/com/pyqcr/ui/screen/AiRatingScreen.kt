@@ -220,6 +220,121 @@ fun AiRatingScreen(
                 )
             }
 
+            // ======== Run AI Rating button (above the image grid) ========
+            item {
+                var bgRunning by remember { mutableStateOf(false) }
+                // Debug log from the background worker (shown on screen like the foreground flow)
+                var bgDebugLog by remember { mutableStateOf<List<String>>(emptyList()) }
+                // Poll background status + debug log
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        bgRunning = com.pyqcr.ai.AiRatingWorkManager.isRunning(context)
+                        bgDebugLog = com.pyqcr.ai.BackgroundDebugLog.lines
+                        kotlinx.coroutines.delay(2000)
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        if (apiKey.isBlank()) {
+                            Toast.makeText(context, "Please enter and save API Key first", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        if (selectedImages.isEmpty()) {
+                            Toast.makeText(context, "Please select images", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+
+                        // Save config
+                        saveApiKeyToPrefs(context, apiKey)
+                        saveModelNameToPrefs(context, modelName)
+
+                        com.pyqcr.ai.AiRatingWorkManager.enqueue(
+                            context = context,
+                            apiKey = apiKey,
+                            modelName = modelName,
+                            imageUris = selectedImages.toList()
+                        )
+                        Toast.makeText(context, "✅ AI rating started in background", Toast.LENGTH_SHORT).show()
+                    },
+                    enabled = !isRunning && !bgRunning && apiKey.isNotBlank() && selectedImages.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isRunning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Rating in progress...")
+                    } else if (bgRunning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Background rating running...")
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Run AI Rating")
+                    }
+                }
+
+                // Progress bar below the button while rating is in progress
+                if (isRunning || bgRunning) {
+                    Spacer(Modifier.height(8.dp))
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        if (isRunning && totalCount > 0) {
+                            LinearProgressIndicator(
+                                progress = { progress.toFloat() / totalCount.coerceAtLeast(1) },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = if (isRunning) currentStatus else "Background rating running...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                // On-screen debug log for the background run (same style as foreground)
+                if (bgDebugLog.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = { com.pyqcr.ai.BackgroundDebugLog.clear() }) {
+                        Text("Clear Background Debug Log", color = MaterialTheme.colorScheme.error)
+                    }
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF1E1E2E)
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            bgDebugLog.forEach { line ->
+                                Text(
+                                    text = line,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFCDD6F4),    // light text on dark bg
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    fontSize = MaterialTheme.typography.labelSmall.fontSize
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // ======== Selected images square grid view ========
             if (selectedImages.isNotEmpty()) {
                 item {
@@ -465,115 +580,6 @@ fun AiRatingScreen(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(if (isRunning) currentStatus.take(50) + if (currentStatus.length > 50) "…" else "" else "Submit to AI Rating")
-                }
-            }
-
-            // ======== Background AI Rating button ========
-            item {
-                var bgRunning by remember { mutableStateOf(false) }
-                // Debug log from the background worker (shown on screen like the foreground flow)
-                var bgDebugLog by remember { mutableStateOf<List<String>>(emptyList()) }
-                // Poll background status + debug log
-                LaunchedEffect(Unit) {
-                    while (true) {
-                        bgRunning = com.pyqcr.ai.AiRatingWorkManager.isRunning(context)
-                        bgDebugLog = com.pyqcr.ai.BackgroundDebugLog.lines
-                        kotlinx.coroutines.delay(2000)
-                    }
-                }
-
-                Button(
-                    onClick = {
-                        if (apiKey.isBlank()) {
-                            Toast.makeText(context, "Please enter and save API Key first", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-                        if (selectedImages.isEmpty()) {
-                            Toast.makeText(context, "Please select images", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-
-                        // Save config
-                        saveApiKeyToPrefs(context, apiKey)
-                        saveModelNameToPrefs(context, modelName)
-
-                        com.pyqcr.ai.AiRatingWorkManager.enqueue(
-                            context = context,
-                            apiKey = apiKey,
-                            modelName = modelName,
-                            imageUris = selectedImages.toList()
-                        )
-                        Toast.makeText(context, "✅ AI rating started in background", Toast.LENGTH_SHORT).show()
-                    },
-                    enabled = !bgRunning && apiKey.isNotBlank() && selectedImages.isNotEmpty(),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    if (bgRunning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("Background rating running...")
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.AutoAwesome,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text("Run AI Rating")
-                    }
-                }
-
-                // On-screen debug log for the background run (same style as foreground)
-                if (bgDebugLog.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = { com.pyqcr.ai.BackgroundDebugLog.clear() }) {
-                        Text("Clear Background Debug Log", color = MaterialTheme.colorScheme.error)
-                    }
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = Color(0xFF1E1E2E)
-                        )
-                    ) {
-                        Column(modifier = Modifier.padding(8.dp)) {
-                            bgDebugLog.forEach { line ->
-                                Text(
-                                    text = line,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFFCDD6F4),    // light text on dark bg
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    fontSize = MaterialTheme.typography.labelSmall.fontSize
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ======== Progress indicator ========
-            if (isRunning) {
-                item {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        if (totalCount > 0) {
-                            LinearProgressIndicator(
-                                progress = { progress.toFloat() / totalCount.coerceAtLeast(1) },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = currentStatus,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
                 }
             }
 
