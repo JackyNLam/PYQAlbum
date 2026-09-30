@@ -1,10 +1,12 @@
 package com.pyqcr.ui.screen
 
-import android.content.Context
 import android.net.Uri
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
@@ -14,14 +16,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -43,7 +47,9 @@ import kotlinx.coroutines.launch
  * Full-screen image detail view.
  *
  * - Swipe down anywhere on the image → go back to the thumbnail grid.
- * - Swipe up → reveal rating / tags / AI selection panel.
+ * - Swipe up → reveal rating / tags / file path panel.
+ * - Pinch (or double-tap) to zoom in/out; while zoomed, drag to pan.
+ * - Left/right swipe → previous/next image (only when not zoomed).
  * - Image fills available screen space on either width or height (ContentScale.Fit,
  *   constrained by parent Box) — no cropping, no overflow.
  */
@@ -79,7 +85,18 @@ fun ImageDetailScreen(
     // Used to detect gesture directions with thresholds
     val swipeThreshold = with(LocalDensity.current) { 60.dp.toPx() }
     var dragVerticalAccum by remember { mutableFloatStateOf(0f) }
-    var dragHorizontalAccum by remember { mutableFloatStateOf(0f) }
+
+    // Pinch-zoom state for the enlarged image (scale 1 = fitted, >1 = zoomed in).
+    // Swipe navigation is only active while scale == 1; while zoomed, single-finger
+    // drags pan the image instead.
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+
+    // Full file path of the current image, resolved lazily for the detail panel
+    var fullPath by remember(imageUri) { mutableStateOf<String?>(null) }
+    LaunchedEffect(imageUri) {
+        fullPath = com.pyqcr.ui.util.FileOperationHelper.resolveFilePath(context, imageUri)
+    }
 
     LaunchedEffect(imageUri) {
         val entity = imageDao.getImageByUri(imageUri)
@@ -153,38 +170,74 @@ fun ImageDetailScreen(
                 modifier = imageModifier
                     .background(Color.Black)
                     .clipToBounds()
-                    .pointerInput(Unit) {
-                        // Detect vertical swipes (down → go back, up → show panel)
-                        detectVerticalDragGestures(
-                            onDragEnd = {
-                                if (dragVerticalAccum > swipeThreshold) {
-                                    onBack()
-                                } else if (dragVerticalAccum < -swipeThreshold) {
-                                    showDetailPanel = true
-                                    showControls = false
-                                }
-                                dragVerticalAccum = 0f
-                            },
-                            onVerticalDrag = { change, dragAmount ->
-                                change.consume()
-                                dragVerticalAccum += dragAmount
-                            }
-                        )
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offset.x
+                        translationY = offset.y
                     }
                     .pointerInput(Unit) {
-                        // Detect horizontal swipes (left → next, right → previous)
-                        detectHorizontalDragGestures(
-                            onDragEnd = {
-                                if (dragHorizontalAccum < -swipeThreshold) {
+                        // Unified gesture handling:
+                        //  - scale == 1: single-finger swipe navigates (down → back,
+                        //    up → detail panel, left → next, right → previous)
+                        //  - scale  > 1: single-finger drag pans, two-finger pinch zooms
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var transformMode = scale > 1f
+                            var verticalAccum = 0f
+                            var horizontalAccum = 0f
+                            do {
+                                val event = awaitPointerEvent()
+                                val pressedCount = event.changes.count { it.pressed }
+                                // A second finger switches the gesture into pan/zoom mode
+                                if (pressedCount >= 2) transformMode = true
+                                if (transformMode) {
+                                    if (pressedCount >= 2) {
+                                        val zoomChange = event.calculateZoom()
+                                        val panChange = event.calculatePan()
+                                        val newScale = (scale * zoomChange).coerceIn(1f, 5f)
+                                        scale = newScale
+                                        offset = if (newScale > 1f) offset + panChange else Offset.Zero
+                                    } else if (pressedCount == 1) {
+                                        val change = event.changes.first { it.pressed }
+                                        offset += change.positionChange()
+                                    }
+                                    event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                } else {
+                                    val change = event.changes.firstOrNull { it.pressed } ?: continue
+                                    if (change.positionChanged()) {
+                                        verticalAccum += change.positionChange().y
+                                        horizontalAccum += change.positionChange().x
+                                        change.consume()
+                                    }
+                                }
+                            } while (event.changes.any { it.pressed })
+                            // Gesture ended at scale 1 — decide swipe navigation
+                            if (!transformMode) {
+                                if (verticalAccum > swipeThreshold) {
+                                    onBack()
+                                } else if (verticalAccum < -swipeThreshold) {
+                                    showDetailPanel = true
+                                    showControls = false
+                                } else if (horizontalAccum < -swipeThreshold) {
                                     onNextImage()
-                                } else if (dragHorizontalAccum > swipeThreshold) {
+                                } else if (horizontalAccum > swipeThreshold) {
                                     onPreviousImage()
                                 }
-                                dragHorizontalAccum = 0f
-                            },
-                            onHorizontalDrag = { change, dragAmount ->
-                                change.consume()
-                                dragHorizontalAccum += dragAmount
+                            }
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        // Double-tap toggles between fitted and 3x zoom
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (scale > 1f) {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                } else {
+                                    scale = 3f
+                                    offset = Offset.Zero
+                                }
                             }
                         )
                     },
@@ -255,6 +308,11 @@ fun ImageDetailScreen(
                     )
                     Text(
                         text = "Folder: ${imageItem?.folderName ?: "Unknown"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Path: ${fullPath ?: imageUri}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -434,49 +492,8 @@ fun ImageDetailScreen(
                             }
                         }
                     }
-
-                    Spacer(Modifier.height(12.dp))
-
-                    // ====== AI Ranking toggle ======
-                    var isSelectedForAi by remember { mutableStateOf(imageUri in getSelectedAiUris(context)) }
-
-                    Button(
-                        onClick = {
-                            val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
-                            val current = prefs.getStringSet("ai_selected_uris", emptySet())?.toMutableSet() ?: mutableSetOf()
-                            if (imageUri in current) {
-                                current.remove(imageUri)
-                                isSelectedForAi = false
-                            } else {
-                                current.add(imageUri)
-                                isSelectedForAi = true
-                            }
-                            prefs.edit().putStringSet("ai_selected_uris", current).apply()
-                        },
-                        colors = if (isSelectedForAi)
-                            ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        else
-                            ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(
-                            Icons.Default.AutoAwesome,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            if (isSelectedForAi) "✓ AI Ranking" else "AI Ranking",
-                            color = if (isSelectedForAi) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    }
                 }
             }
         }
     }
-}
-
-private fun getSelectedAiUris(context: Context): Set<String> {
-    val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
-    return prefs.getStringSet("ai_selected_uris", emptySet()) ?: emptySet()
 }

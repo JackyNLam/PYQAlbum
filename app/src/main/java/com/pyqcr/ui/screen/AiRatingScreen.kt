@@ -30,24 +30,12 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.pyqcr.PyqCrApp
-import com.pyqcr.ai.AiRatingService
-import com.pyqcr.ai.ImageResizer
 import com.pyqcr.data.model.AiRatingResult
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * AI Rating screen: configure API Key/Model, select images, run AI rating.
@@ -56,7 +44,7 @@ import java.util.Locale
  * It shows:
  *   - API config with Save Config button
  *   - Selected images in a square grid (tap to deselect)
- *   - Submit to AI button to run rating
+ *   - Run AI Rating button (WorkManager background run)
  *   - Results section
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,13 +67,10 @@ fun AiRatingScreen(
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
     var selectedImages by remember { mutableStateOf(initialSelectedUris) }
     var isRunning by remember { mutableStateOf(false) }
-    var ratingJob by remember { mutableStateOf<Job?>(null) }
     var progress by remember { mutableIntStateOf(0) }
     var totalCount by remember { mutableIntStateOf(0) }
     var results by remember { mutableStateOf<List<AiRatingResult>>(emptyList()) }
     var currentStatus by remember { mutableStateOf("") }
-    var debugLog by remember { mutableStateOf<List<String>>(emptyList()) }
-    var fatalMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         repository.getAllImages().collect { images ->
@@ -97,8 +82,6 @@ fun AiRatingScreen(
     LaunchedEffect(initialSelectedUris) {
         selectedImages = initialSelectedUris
     }
-
-    val scope = rememberCoroutineScope()
 
     Scaffold(
         topBar = {
@@ -346,17 +329,13 @@ fun AiRatingScreen(
                     }
                 }
 
-                // Stop button — cancels whichever run is active (foreground job or WorkManager)
-                if (isRunning || bgRunning) {
+                // Stop button — cancels the background WorkManager run
+                if (bgRunning) {
                     Spacer(Modifier.height(8.dp))
                     Button(
                         onClick = {
-                            ratingJob?.cancel()
-                            ratingJob = null
                             com.pyqcr.ai.AiRatingWorkManager.cancel(context)
-                            if (!isRunning) {
-                                Toast.makeText(context, "🛑 Stopping background AI rating...", Toast.LENGTH_SHORT).show()
-                            }
+                            Toast.makeText(context, "🛑 Stopping background AI rating...", Toast.LENGTH_SHORT).show()
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.fillMaxWidth()
@@ -367,7 +346,7 @@ fun AiRatingScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text(if (isRunning) "Stop Rating" else "Stop Background Rating")
+                        Text("Stop Background Rating")
                     }
                 }
 
@@ -467,222 +446,6 @@ fun AiRatingScreen(
                                 textAlign = TextAlign.Center,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        }
-                    }
-                }
-            }
-
-            // ======== Submit to AI button ========
-            item {
-                Button(
-                    onClick = {
-                        if (apiKey.isBlank()) {
-                            Toast.makeText(context, "Please enter and save API Key first", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-                        if (selectedImages.isEmpty()) {
-                            Toast.makeText(context, "Please select images", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-
-                        ratingJob = scope.launch {
-                            var resizer: ImageResizer? = null
-                            fun log(msg: String) {
-                                val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-                                debugLog = debugLog + "[$ts] $msg"
-                            }
-                            try {
-                                isRunning = true
-                                results = emptyList()
-                                debugLog = emptyList()
-                                fatalMessage = null
-                                currentStatus = "Resizing images..."
-                                progress = 0
-                                totalCount = selectedImages.size
-
-                                log("=== AI Rating Session Started ===")
-                                log("Model: $modelName")
-                                log("Selected ${selectedImages.size} images")
-
-                                resizer = ImageResizer(context)
-                                val service = AiRatingService()
-
-                                // Step 1: Save config
-                                saveApiKeyToPrefs(context, apiKey)
-                                saveModelNameToPrefs(context, modelName)
-                                log("API config saved")
-
-                                // Step 2: Resize images and track original URI mapping
-                                // (resize runs on IO; ensureActive lets the Stop button abort between images)
-                                val totalSelected = selectedImages.size
-                                val resizedPaths = mutableListOf<String>()
-                                val resizedToOriginalUri = mutableMapOf<String, String>() // resizedPath -> originalUri
-                                for ((idx, uriString) in selectedImages.withIndex()) {
-                                    ensureActive()
-                                    currentStatus = "Resizing (${idx + 1}/$totalSelected): ${uriString.substringAfterLast('/')}"
-                                    log("Resizing [${idx + 1}/$totalSelected]: ${uriString.substringAfterLast('/')}")
-                                    val resized = withContext(Dispatchers.IO) { resizer?.resizeForAi(Uri.parse(uriString)) }
-                                    if (resized != null) {
-                                        resizedPaths.add(resized)
-                                        resizedToOriginalUri[resized] = uriString
-                                        log("  -> OK: $resized (${File(resized).length()} bytes)")
-                                    } else {
-                                        log("  -> FAILED: $uriString")
-                                    }
-                                    progress = idx + 1
-                                }
-
-                                if (resizedPaths.isEmpty()) {
-                                    currentStatus = "❌ Failed to resize any images"
-                                    log("❌ FAILED: No images could be resized")
-                                    isRunning = false
-                                    Toast.makeText(context, "Failed to resize any images. Check permissions.", Toast.LENGTH_LONG).show()
-                                    return@launch
-                                }
-
-                                log("Resize complete: ${resizedPaths.size}/$totalSelected resized OK")
-
-                                // Step 3: Rate images
-                                progress = 0
-                                currentStatus = "Sending ${resizedPaths.size} images to AI for rating..."
-                                log("Sending ${resizedPaths.size} images to DashScope API...")
-                                log("API endpoint: https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions")
-
-                                val ratingResults = service.rateImages(
-                                    apiKey = apiKey,
-                                    modelName = modelName,
-                                    resizedImagePaths = resizedPaths,
-                                    onProgress = { current, total ->
-                                        progress = current
-                                        totalCount = total
-                                        val passNum = (current / 10) + 1
-                                        val totalPasses = (total + 9) / 10
-                                        currentStatus = "AI Rating — $current/$total images rated ($passNum/$totalPasses passes)"
-                                        log("Progress: $current/$total successes ($passNum/$totalPasses passes)")
-                                    },
-                                    onDebug = { msg -> log(msg) },
-                                    onFatalError = { msg ->
-                                        fatalMessage = msg
-                                        log("🛑 $msg")
-                                    }
-                                )
-
-                                log("AI returned ${ratingResults.size} results")
-
-                                // Step 4: Save results to DB — use the resized-to-original URI map for reliable matching
-                                if (ratingResults.isNotEmpty()) {
-                                    currentStatus = "Saving ${ratingResults.size} scores to database..."
-                                    log("Saving results to database...")
-                                    var savedCount = 0
-                                    for ((idx, result) in ratingResults.withIndex()) {
-                                        ensureActive()
-                                        log("  Result #${idx + 1}: name=${result.imageName}, score=${result.score}, reason=${result.reason}")
-
-                                        // Match by exact resized path -> original URI mapping
-                                        val origUri = resizedToOriginalUri[result.imageUri]
-                                            ?: resizedToOriginalUri.entries.firstOrNull { it.key.endsWith(result.imageName) }?.value
-                                            ?: allImages.find { img ->
-                                                result.imageName == img.displayName ||
-                                                        resizedPaths.indexOfFirst { it.endsWith(result.imageName) } >= 0
-                                            }?.uri
-
-                                        if (origUri != null) {
-                                            if (result.score > 0f) {
-                                                repository.updateAiScore(origUri, result.score)
-                                                log("  -> Saved score $result.score to $origUri")
-                                            }
-                                            if (result.reason.isNotBlank()) {
-                                                repository.updateAiReason(origUri, result.reason)
-                                                log("  -> Saved reason to $origUri")
-                                            }
-                                            savedCount++
-                                        } else {
-                                            log("  -> WARN: Could not find original URI for ${result.imageName}")
-                                        }
-                                    }
-                                    results = ratingResults
-                                    resizer?.clearCache()
-                                    currentStatus = "✅ Completed! ${ratingResults.size} images rated, $savedCount scores saved."
-                                    log("✅ DONE: $savedCount scores saved")
-                                } else {
-                                    val fatal = fatalMessage
-                                    currentStatus = if (fatal != null)
-                                        "❌ $fatal"
-                                    else
-                                        "❌ AI returned no results. Check your API key and try again."
-                                    log("❌ AI returned 0 results" + (fatal?.let { " — $it" } ?: " — API key or network issue?"))
-                                }
-                                isRunning = false
-
-                                if (fatalMessage != null || ratingResults.isEmpty()) {
-                                    Toast.makeText(
-                                        context,
-                                        "❌ " + (fatalMessage ?: "No results from AI. Check API key and network."),
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                } else {
-                                    Toast.makeText(
-                                        context,
-                                        "✅ Rated ${ratingResults.size} images",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            } catch (e: CancellationException) {
-                                // Stopped via the Stop button
-                                log("🛑 Rating stopped by user — ${progress}/$totalCount images done")
-                                currentStatus = "🛑 Stopped — ${progress}/$totalCount images done"
-                                resizer?.clearCache()
-                                isRunning = false
-                                Toast.makeText(context, "🛑 Rating stopped", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    },
-                    enabled = !isRunning && apiKey.isNotBlank() && selectedImages.isNotEmpty(),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    if (isRunning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    Icon(
-                        Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (isRunning) currentStatus.take(50) + if (currentStatus.length > 50) "…" else "" else "Submit to AI Rating")
-                }
-            }
-
-            // ======== Debug Log section (always visible during/after run) ========
-            if (debugLog.isNotEmpty()) {
-                item {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                    TextButton(onClick = { debugLog = emptyList() }) {
-                        Text("Clear Debug Log", color = MaterialTheme.colorScheme.error)
-                    }
-                }
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = Color(0xFF1E1E2E)
-                        )
-                    ) {
-                        Column(modifier = Modifier.padding(8.dp)) {
-                            debugLog.forEach { line ->
-                                Text(
-                                    text = line,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFFCDD6F4),    // light text on dark bg
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    fontSize = MaterialTheme.typography.labelSmall.fontSize
-                                )
-                            }
                         }
                     }
                 }

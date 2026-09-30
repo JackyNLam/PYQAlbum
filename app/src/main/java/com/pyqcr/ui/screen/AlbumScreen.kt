@@ -116,9 +116,8 @@ fun AlbumScreen(
     // Batch operation dialog states
     var showTagDialog by remember { mutableStateOf(false) }
     var showRateDialog by remember { mutableStateOf(false) }
-    var showRemoveTagsDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
-    // Tags that exist on the currently selected images (for the Remove Tags dialog)
+    // Tags that exist on the currently selected images (for the Tag dialog's remove mode)
     var selectedImageTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
 
     // Tag mode local state
@@ -938,16 +937,11 @@ fun AlbumScreen(
                             selectedImageUris = if (allContextSelected) emptySet() else selectedImageUris + contextUris.toSet()
                         },
                         onCollage = { openCollageDialog() },
-                        onAddTag = {
+                        onTag = {
                             showTagDialog = true
                         },
                         onRate = {
                             showRateDialog = true
-                        },
-                        onRemoveTags = {
-                            if (selectedImageUris.isNotEmpty()) {
-                                showRemoveTagsDialog = true
-                            }
                         },
                         onSelectForAi = {
                             // Toggle: remove already-selected URIs, add the rest
@@ -1462,52 +1456,104 @@ fun AlbumScreen(
                 )
             }
 
-            // Add Tag dialog
+            // Tag dialog — single entry: add a tag or remove one from the selection
             if (showTagDialog) {
+                var tagDialogMode by remember { mutableStateOf("add") } // "add" or "remove"
                 var tagInput by remember { mutableStateOf("") }
+                var tagToRemove by remember { mutableStateOf<TagEntity?>(null) }
+                // Reload tags of the current selection whenever the dialog opens
+                LaunchedEffect(showTagDialog, selectedImageUris) {
+                    selectedImageTags = tagDao.getTagsForImages(selectedImageUris.toList())
+                }
                 AlertDialog(
                     onDismissRequest = { showTagDialog = false },
-                    title = { Text("Add Tag to ${selectedImageUris.size} image(s)") },
+                    title = { Text("Tag ${selectedImageUris.size} image(s)") },
                     text = {
                         Column {
-                            Text("Choose existing tag or create a new one:")
-                            Spacer(Modifier.height(8.dp))
-                            if (allTags.isNotEmpty()) {
-                                LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
-                                    items(allTags) { tag ->
-                                        OutlinedButton(
-                                            onClick = {
-                                                selectedImageUris.forEach { uri ->
-                                                    viewModel.addTagToImage(uri, tag.name)
-                                                }
-                                                showTagDialog = false
-                                            },
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
-                                        ) { Text(tag.name) }
-                                    }
-                                }
-                                Spacer(Modifier.height(12.dp))
-                                HorizontalDivider()
-                                Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilterChip(
+                                    selected = tagDialogMode == "add",
+                                    onClick = { tagDialogMode = "add" },
+                                    label = { Text("Add Tag") }
+                                )
+                                FilterChip(
+                                    selected = tagDialogMode == "remove",
+                                    onClick = { tagDialogMode = "remove"; tagToRemove = null },
+                                    label = { Text("Remove Tag") }
+                                )
                             }
-                            OutlinedTextField(
-                                value = tagInput,
-                                onValueChange = { tagInput = it },
-                                label = { Text("New tag name") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            Spacer(Modifier.height(12.dp))
+                            if (tagDialogMode == "add") {
+                                Text("Choose existing tag or create a new one:")
+                                Spacer(Modifier.height(8.dp))
+                                if (allTags.isNotEmpty()) {
+                                    LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                                        items(allTags) { tag ->
+                                            OutlinedButton(
+                                                onClick = {
+                                                    selectedImageUris.forEach { uri ->
+                                                        viewModel.addTagToImage(uri, tag.name)
+                                                    }
+                                                    showTagDialog = false
+                                                },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                            ) { Text(tag.name) }
+                                        }
+                                    }
+                                    Spacer(Modifier.height(12.dp))
+                                    HorizontalDivider()
+                                    Spacer(Modifier.height(8.dp))
+                                }
+                                OutlinedTextField(
+                                    value = tagInput,
+                                    onValueChange = { tagInput = it },
+                                    label = { Text("New tag name") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else {
+                                if (selectedImageTags.isNotEmpty()) {
+                                    LazyColumn(modifier = Modifier.heightIn(max = 250.dp)) {
+                                        items(selectedImageTags, key = { it.id }) { tag ->
+                                            OutlinedButton(
+                                                onClick = { tagToRemove = tag },
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    RadioButton(selected = tagToRemove == tag, onClick = null)
+                                                    Spacer(Modifier.width(8.dp))
+                                                    Text(tag.name)
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Text("No tags on the selected images.")
+                                }
+                            }
                         }
                     },
                     confirmButton = {
-                        TextButton(onClick = {
-                            if (tagInput.isNotBlank()) {
-                                selectedImageUris.forEach { uri ->
-                                    viewModel.addTagToImage(uri, tagInput.trim())
+                        if (tagDialogMode == "add") {
+                            TextButton(onClick = {
+                                if (tagInput.isNotBlank()) {
+                                    selectedImageUris.forEach { uri ->
+                                        viewModel.addTagToImage(uri, tagInput.trim())
+                                    }
                                 }
-                            }
-                            showTagDialog = false
-                        }) { Text("Add") }
+                                showTagDialog = false
+                            }) { Text("Add") }
+                        } else {
+                            TextButton(
+                                onClick = {
+                                    tagToRemove?.let { tag ->
+                                        viewModel.batchRemoveTagsFromImages(selectedImageUris.toList(), tag.name)
+                                    }
+                                    showTagDialog = false
+                                },
+                                enabled = tagToRemove != null
+                            ) { Text("Remove") }
+                        }
                     },
                     dismissButton = {
                         TextButton(onClick = { showTagDialog = false }) { Text("Cancel") }
@@ -1547,56 +1593,6 @@ fun AlbumScreen(
                 )
             }
 
-            // Remove Tags dialog — only tags actually present on the selected images
-            if (showRemoveTagsDialog) {
-                var tagToRemove by remember { mutableStateOf<TagEntity?>(null) }
-                // Reload the tags of the current selection whenever the dialog opens
-                LaunchedEffect(showRemoveTagsDialog, selectedImageUris) {
-                    selectedImageTags = tagDao.getTagsForImages(selectedImageUris.toList())
-                }
-                AlertDialog(
-                    onDismissRequest = { showRemoveTagsDialog = false },
-                    title = { Text("Remove Tags from ${selectedImageUris.size} image(s)") },
-                    text = {
-                        Column {
-                            Text("Select a tag to remove from all selected images:")
-                            Spacer(Modifier.height(8.dp))
-                            if (selectedImageTags.isNotEmpty()) {
-                                LazyColumn(modifier = Modifier.heightIn(max = 250.dp)) {
-                                    items(selectedImageTags, key = { it.id }) { tag ->
-                                        OutlinedButton(
-                                            onClick = { tagToRemove = tag },
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
-                                        ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                RadioButton(selected = tagToRemove == tag, onClick = null)
-                                                Spacer(Modifier.width(8.dp))
-                                                Text(tag.name)
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                Text("No tags on the selected images.")
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                tagToRemove?.let { tag ->
-                                    viewModel.batchRemoveTagsFromImages(selectedImageUris.toList(), tag.name)
-                                }
-                                showRemoveTagsDialog = false
-                            },
-                            enabled = tagToRemove != null
-                        ) { Text("Remove") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showRemoveTagsDialog = false }) { Text("Cancel") }
-                    }
-                )
-            }
             // Collage options dialog — background color / columns / image order
             if (showCollageDialog) {
                 CollageOptionsDialog(
@@ -1660,9 +1656,8 @@ private fun BatchMultiSelectBar(
     onCancel: () -> Unit,
     onSelectAll: () -> Unit,
     onCollage: () -> Unit,
-    onAddTag: () -> Unit,
+    onTag: () -> Unit,
     onRate: () -> Unit,
-    onRemoveTags: () -> Unit,
     onSelectForAi: () -> Unit,
     onRemoveAiInfo: () -> Unit,
     onCopyTo: () -> Unit,
@@ -1708,19 +1703,14 @@ private fun BatchMultiSelectBar(
                     )
                     HorizontalDivider()
                     DropdownMenuItem(
-                        onClick = { showMenu = false; onAddTag() },
-                        text = { Text("Add Tag") },
+                        onClick = { showMenu = false; onTag() },
+                        text = { Text("Tag") },
                         leadingIcon = { Icon(Icons.Default.Label, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     DropdownMenuItem(
                         onClick = { showMenu = false; onRate() },
                         text = { Text("Rate") },
                         leadingIcon = { Icon(Icons.Default.Star, contentDescription = null, modifier = Modifier.size(18.dp)) }
-                    )
-                    DropdownMenuItem(
-                        onClick = { showMenu = false; onRemoveTags() },
-                        text = { Text("Remove Tags") },
-                        leadingIcon = { Icon(Icons.Default.LabelOff, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     DropdownMenuItem(
                         onClick = { showMenu = false; onSelectForAi() },
