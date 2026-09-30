@@ -142,8 +142,9 @@ fun AlbumScreen(
     var targetFolderForOperation by remember { mutableStateOf<File?>(null) }
     var selectedTreeUri by remember { mutableStateOf<Uri?>(null) }
     // In-app folder browser for copy/move — shows all directories under
-    // external storage, with navigation into subdirectories. "Choose folder
-    // (system picker)…" opens the SAF picker for inaccessible locations.
+    // external storage, with navigation into subdirectories. The compact
+    // "System" button (bottom-left of the dialog) opens the SAF picker
+    // for inaccessible locations.
     var showDestinationDialog by remember { mutableStateOf(false) }
     var destinationDialogOp by remember { mutableStateOf("copy") }
     // Current directory for the in-app folder browser; reset to external storage
@@ -1299,8 +1300,9 @@ fun AlbumScreen(
             // In-app folder browser for copy/move — browse all directories under
             // external storage. Preset folders at the top for quick access; tap any
             // directory to descend, use ".." to navigate up, or pick the current
-            // directory with "Select folder". "Choose folder (system picker)…"
-            // opens the SAF tree picker for locations not reachable via File API.
+            // directory with "Select folder" (bottom-right). The compact "System"
+            // button (bottom-left) opens the SAF tree picker for locations not
+            // reachable via the File API.
             if (showDestinationDialog) {
                 val isCopy = destinationDialogOp == "copy"
                 val isRoot = folderBrowserDir == android.os.Environment.getExternalStorageDirectory()
@@ -1362,55 +1364,62 @@ fun AlbumScreen(
                                     }
                                 }
                             }
-
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
+                        }
+                    },
+                    confirmButton = {
+                        // Bottom row: compact "System" SAF-picker button at the far
+                        // left, then Cancel, then "Select folder" on the right.
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             // SAF fallback for non-standard locations
-                            TextButton(
+                            OutlinedButton(
                                 onClick = {
                                     showDestinationDialog = false
                                     pendingOperation = destinationDialogOp
                                     folderPickerLauncher.launch(null)
                                 },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier.height(36.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp)
                             ) {
-                                Text(
-                                    "Choose folder (system picker)…",
-                                    modifier = Modifier.fillMaxWidth()
+                                Icon(
+                                    Icons.Default.FolderOpen,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
                                 )
+                                Spacer(Modifier.width(4.dp))
+                                Text("System", style = MaterialTheme.typography.labelMedium)
                             }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            showDestinationDialog = false
-                            // Non-standard folders (outside Download/Pictures/DCIM/Movies)
-                            // need "All files access" on Android 11+ to write via File I/O.
-                            // Without it, FileOutputStream throws EACCES — same as the SAF
-                            // picker flow, which also shows this dialog for non-standard folders.
-                            val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
-                                    !android.os.Environment.isExternalStorageManager() &&
-                                    !FileOperationHelper.isStandardMediaCollection(folderBrowserDir)
-                            if (needFullAccess) {
-                                pendingOperation = destinationDialogOp
-                                targetFolderForOperation = folderBrowserDir
-                                selectedTreeUri = null
-                                showFullAccessDialog = true
-                            } else {
-                                launchCopyMove(
-                                    destinationDialogOp,
-                                    selectedImageUris.toList(),
-                                    folderBrowserDir,
-                                    null
-                                )
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { showDestinationDialog = false }) {
+                                Text("Cancel")
                             }
-                        }) {
-                            Text("Select folder")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showDestinationDialog = false }) {
-                            Text("Cancel")
+                            TextButton(onClick = {
+                                showDestinationDialog = false
+                                // Non-standard folders (outside Download/Pictures/DCIM/Movies)
+                                // need "All files access" on Android 11+ to write via File I/O.
+                                // Without it, FileOutputStream throws EACCES — same as the SAF
+                                // picker flow, which also shows this dialog for non-standard folders.
+                                val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+                                        !android.os.Environment.isExternalStorageManager() &&
+                                        !FileOperationHelper.isStandardMediaCollection(folderBrowserDir)
+                                if (needFullAccess) {
+                                    pendingOperation = destinationDialogOp
+                                    targetFolderForOperation = folderBrowserDir
+                                    selectedTreeUri = null
+                                    showFullAccessDialog = true
+                                } else {
+                                    launchCopyMove(
+                                        destinationDialogOp,
+                                        selectedImageUris.toList(),
+                                        folderBrowserDir,
+                                        null
+                                    )
+                                }
+                            }) {
+                                Text("Select folder")
+                            }
                         }
                     }
                 )
