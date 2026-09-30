@@ -93,8 +93,9 @@ object FileOperationHelper {
      *
      * Only available on API 29+ — `RELATIVE_PATH` was introduced in Q.
      */
-    fun resolveMediaStorePath(destDir: File): String? {
+    fun resolveMediaStorePath(destDir: File?): String? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        if (destDir == null) return null
         val extDir = Environment.getExternalStorageDirectory().absolutePath
         val absPath = destDir.absolutePath
         if (!absPath.startsWith(extDir)) return null
