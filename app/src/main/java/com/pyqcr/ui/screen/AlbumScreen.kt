@@ -146,6 +146,32 @@ fun AlbumScreen(
     // that lets copy/move write into ANY folder via direct paths.
     var showFullAccessDialog by remember { mutableStateOf(false) }
 
+    // Move: stores (snackbar message, source URIs to delete) while waiting for the
+    // system delete-request dialog (createDeleteRequest) to return.
+    var pendingMoveResult by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
+
+    // System delete confirmation launcher for MOVE — one dialog for all source files
+    // that were copied via MediaStore/SAF (API 30+). On confirm the originals are
+    // trashed; on cancel the copies remain (the move becomes a copy).
+    val moveDeleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val pending = pendingMoveResult ?: return@rememberLauncherForActivityResult
+        pendingMoveResult = null
+        val message = pending.first
+        val uris = pending.second
+        val finalMessage = if (result.resultCode == android.app.Activity.RESULT_OK) {
+            viewModel.deleteImages(uris)
+            message.replace("Copied", "Moved")
+        } else {
+            "$message — originals kept"
+        }
+        scope.launch { snackbarHostState.showSnackbar(finalMessage) }
+        isMultiSelectMode = false
+        selectedImageUris = emptySet()
+        viewModel.refreshImages()
+    }
+
     /** Launch a copy or move operation on selected URIs. */
     val launchCopyMove: (String, List<String>, File?, Uri?) -> Unit = { operation, uris, destDir, treeUri ->
         if (destDir == null && treeUri == null) {
@@ -170,9 +196,38 @@ fun AlbumScreen(
                         }
                     }
                     val successCount = results.count { it.second.success }
+                    val folderLabel = destinationFolderLabel(destDir, treeUri)
+
+                    // Move: collect sources copied via SAF/MediaStore that need system-delete
+                    // confirmation. On API 30+ one createDeleteRequest dialog covers them all.
+                    if (operation == "move") {
+                        val sourcesToDelete = results
+                            .filter { it.second.success && it.second.sourceNeedsDeletion }
+                            .map { it.first }
+
+                        if (sourcesToDelete.isNotEmpty()) {
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                                val request = FileOperationHelper.createDeleteRequest(context, sourcesToDelete)
+                                if (request != null) {
+                                    val baseMsg = buildString {
+                                        append("Copied $successCount/${uris.size} images to $folderLabel")
+                                        if (failures.isNotEmpty()) {
+                                            append("\n${failures.size} failed — ${failures.first()}")
+                                        }
+                                    }
+                                    pendingMoveResult = baseMsg to sourcesToDelete
+                                    moveDeleteLauncher.launch(IntentSenderRequest.Builder(request).build())
+                                    return@launch
+                                }
+                            }
+                            // API < 30 or request creation failed: delete directly
+                            FileOperationHelper.deleteMediaDirect(context, sourcesToDelete)
+                        }
+                    }
+
                     val label = if (operation == "copy") "Copied" else "Moved"
                     copyMoveMessage = buildString {
-                        append("$label $successCount/${uris.size} images to ${destinationFolderLabel(destDir, treeUri)}")
+                        append("$label $successCount/${uris.size} images to $folderLabel")
                         if (failures.isNotEmpty()) {
                             append("\n${failures.size} failed — ${failures.first()}")
                         }
@@ -211,13 +266,17 @@ fun AlbumScreen(
             targetFolderForOperation = resolveTreeUriToPath(treeUri)
             val op = pendingOperation
             if (op != null) {
+                // Standard media collections (Download, Pictures, DCIM, Movies) use
+                // MediaStore insert with RELATIVE_PATH — zero permission needed, so
+                // skip the All-files-access dialog entirely for those folders.
                 val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
-                        !android.os.Environment.isExternalStorageManager()
+                        !android.os.Environment.isExternalStorageManager() &&
+                        !FileOperationHelper.isStandardMediaCollection(targetFolderForOperation)
                 if (needFullAccess) {
                     // Keep pendingOperation so the copy/move resumes after the
                     // user decides in the dialog — either from the Settings page
                     // (permission granted → direct-path write, works everywhere)
-                    // or via "Continue without it" → SAF as before.
+                    // or via "Later" → SAF as before.
                     showFullAccessDialog = true
                 } else {
                     pendingOperation = null

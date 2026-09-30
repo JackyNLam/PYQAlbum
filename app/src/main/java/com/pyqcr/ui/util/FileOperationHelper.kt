@@ -1,5 +1,6 @@
 package com.pyqcr.ui.util
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.IntentSender
 import android.net.Uri
@@ -33,8 +34,18 @@ object FileOperationHelper {
 
     internal const val TAG = "FileOpHelper"
 
-    /** Outcome of a single copy/move: destination (path or content uri) or the failure reason. */
-    data class FileOpResult(val success: Boolean, val destination: String?, val error: String?)
+    /**
+     * Outcome of a single copy/move: destination (path or content uri) or the failure reason.
+     * @param sourceNeedsDeletion True when a move copied the file successfully but could not
+     *   delete the original — the caller must show the system delete-request dialog (API 30+)
+     *   or delete directly (older APIs). Always false for plain copy.
+     */
+    data class FileOpResult(
+        val success: Boolean,
+        val destination: String?,
+        val error: String?,
+        val sourceNeedsDeletion: Boolean = false
+    )
 
     // ---------- File path resolution ----------
 
@@ -72,11 +83,58 @@ object FileOperationHelper {
         return contentUri.lastPathSegment ?: "unknown_${System.currentTimeMillis()}"
     }
 
+    // ---------- MediaStore RELATIVE_PATH (zero-permission standard collections) ----------
+
+    /**
+     * Check if [destDir] is under a standard MediaStore collection (Download,
+     * Pictures, DCIM, Movies). If so, return the `RELATIVE_PATH` value that
+     * MediaStore expects (e.g. `"Download/BabyName/"`). Returns null for
+     * non-standard folders (arbitrary directories like Manga/Baby/BabyName).
+     *
+     * Only available on API 29+ — `RELATIVE_PATH` was introduced in Q.
+     */
+    fun resolveMediaStorePath(destDir: File): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        val extDir = Environment.getExternalStorageDirectory().absolutePath
+        val absPath = destDir.absolutePath
+        if (!absPath.startsWith(extDir)) return null
+        // rel = "Download/BabyName" or "Manga/Baby/BabyName"
+        val rel = absPath.removePrefix(extDir).removePrefix(File.separator)
+        if (rel.isBlank()) return null
+        val topLevel = rel.substringBefore(File.separator).lowercase()
+        val collectionRoot = when (topLevel) {
+            "download" -> "Download"
+            "pictures" -> "Pictures"
+            "dcim" -> "DCIM"
+            "movies" -> "Movies"
+            else -> return null  // Non-standard folder — use SAF or file path
+        }
+        return if (rel.equals(collectionRoot, ignoreCase = true)) "$collectionRoot/" else "$rel/"
+    }
+
+    /** True if [destDir] is under a standard MediaStore collection (zero-permission write on API 29+). */
+    fun isStandardMediaCollection(destDir: File?): Boolean {
+        if (destDir == null) return false
+        return resolveMediaStorePath(destDir) != null
+    }
+
     // ---------- Single-file operations ----------
 
-    /** Copy a single image into the chosen folder — File fast path first, then SAF. */
+    /**
+     * Copy a single image into the chosen folder.
+     * Tries MediaStore insert (zero-permission for Download/Pictures/DCIM/Movies),
+     * then File I/O (legacy/All-files-access), then SAF (any pickable folder).
+     */
     suspend fun copyImage(context: Context, sourceUri: String, destDir: File?, treeUri: Uri?): FileOpResult {
         if (destDir != null) {
+            // MediaStore RELATIVE_PATH — zero permission for standard collections
+            val relPath = resolveMediaStorePath(destDir)
+            if (relPath != null) {
+                val r = copyViaMediaStore(context, sourceUri, relPath)
+                if (r.success) return r
+                Log.w(TAG, "MediaStore copy failed for $sourceUri (${r.error}) — trying file path")
+            }
+            // File-path fast path (works with legacy storage or All files access)
             val r = copyViaFilePath(context, sourceUri, destDir)
             if (r.success) return r
             Log.w(TAG, "File-path copy failed for $sourceUri (${r.error}) — trying SAF")
@@ -87,22 +145,34 @@ object FileOperationHelper {
         return FileOpResult(false, null, "No writable destination folder")
     }
 
-    /** Move a single image into the chosen folder — true rename, then copy+delete, then SAF. */
+    /**
+     * Move a single image into the chosen folder.
+     * Tries MediaStore insert (zero-permission), then true file rename (same-volume),
+     * then SAF copy. When the copy succeeds but the original can't be deleted
+     * (SAF/MediaStore path on API 30+), the result carries `sourceNeedsDeletion = true`
+     * so the caller can show the system delete-request dialog.
+     */
     suspend fun moveImage(context: Context, sourceUri: String, destDir: File?, treeUri: Uri?): FileOpResult {
         if (destDir != null) {
+            // MediaStore RELATIVE_PATH — zero permission for standard collections
+            val relPath = resolveMediaStorePath(destDir)
+            if (relPath != null) {
+                val copy = copyViaMediaStore(context, sourceUri, relPath)
+                if (copy.success) {
+                    return FileOpResult(true, copy.destination, null, sourceNeedsDeletion = true)
+                }
+                Log.w(TAG, "MediaStore move-copy failed for $sourceUri (${copy.error}) — trying file path")
+            }
+            // True file move (rename) or copy — moveViaFilePath handles rename deletion
             val r = moveViaFilePath(context, sourceUri, destDir)
             if (r.success) return r
             Log.w(TAG, "File-path move failed for $sourceUri (${r.error}) — trying SAF")
         }
+        // SAF copy — source deletion deferred to caller (system delete-request dialog)
         if (treeUri != null) {
             val copy = copyViaSaf(context, sourceUri, treeUri)
             if (!copy.success) return copy
-            val deleted = deleteSourceFile(context, Uri.parse(sourceUri))
-            if (!deleted) {
-                Log.w(TAG, "Source delete failed after SAF copy for $sourceUri")
-                return FileOpResult(false, copy.destination, "File copied to the folder, but the original could not be deleted")
-            }
-            return copy
+            return FileOpResult(true, copy.destination, null, sourceNeedsDeletion = true)
         }
         return FileOpResult(false, null, "No writable destination folder")
     }
@@ -185,19 +255,12 @@ object FileOperationHelper {
                 }
             }
 
-            // Strategy 2: copy + delete fallback (cross-volume or content-only URI),
-            // with the source modified date restored on the destination.
+            // Strategy 2: copy fallback (cross-volume or content-only URI).
+            // Source deletion is deferred to the caller, which shows the system
+            // delete-request dialog on API 30+ or deletes directly on older APIs.
             val copy = copyViaFilePath(context, sourceUri, destDir, preserveLastModified = true)
             if (!copy.success) return@withContext copy
-
-            val deleted = deleteSourceFile(context, contentUri)
-            if (!deleted) {
-                return@withContext FileOpResult(
-                    false, copy.destination,
-                    "File copied to the folder, but the original could not be deleted"
-                )
-            }
-            FileOpResult(true, copy.destination, null)
+            FileOpResult(success = true, destination = copy.destination, error = null, sourceNeedsDeletion = true)
         } catch (e: Exception) {
             Log.e(TAG, "moveViaFilePath failed for $sourceUri", e)
             FileOpResult(false, null, "${e::class.simpleName}: ${e.message}")
@@ -236,6 +299,55 @@ object FileOperationHelper {
                 FileOpResult(true, docUri.toString(), null)
             } catch (e: Exception) {
                 Log.e(TAG, "copyViaSaf failed for $sourceUri", e)
+                FileOpResult(false, null, "${e::class.simpleName}: ${e.message}")
+            }
+        }
+
+    // ---------- Copy via MediaStore insert (zero-permission standard collections) ----------
+
+    /**
+     * Copy a file via MediaStore insert with `RELATIVE_PATH`.
+     *
+     * This is the zero-permission, Play-safe way to write into standard media
+     * collections (Download, Pictures, DCIM, Movies) on API 29+. The app owns
+     * the files it creates, so no runtime permission is needed — exactly how
+     * other gallery apps write to Download without MANAGE_EXTERNAL_STORAGE.
+     */
+    private suspend fun copyViaMediaStore(context: Context, sourceUri: String, relativePath: String): FileOpResult =
+        withContext(Dispatchers.IO) {
+            try {
+                val contentUri = Uri.parse(sourceUri)
+                val fileName = getFileName(context, sourceUri)
+                val mime = mimeTypeFor(fileName)
+
+                val collection = if (relativePath.startsWith("Download", ignoreCase = true)) {
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                } else {
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                }
+
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, mime)
+                    put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
+                }
+                val destUri = context.contentResolver.insert(collection, values)
+                    ?: return@withContext FileOpResult(
+                        false, null,
+                        "MediaStore insert failed — cannot create file in $relativePath"
+                    )
+
+                val input = context.contentResolver.openInputStream(contentUri)
+                val output = context.contentResolver.openOutputStream(destUri)
+                if (input == null || output == null) {
+                    try { context.contentResolver.delete(destUri, null, null) } catch (_: Exception) {}
+                    return@withContext FileOpResult(false, null, "Cannot read source or write to $relativePath")
+                }
+                input.use { i -> output.use { o -> i.copyTo(o) } }
+
+                FileOpResult(true, destUri.toString(), null)
+            } catch (e: Exception) {
+                Log.e(TAG, "copyViaMediaStore failed for $sourceUri", e)
                 FileOpResult(false, null, "${e::class.simpleName}: ${e.message}")
             }
         }
@@ -332,54 +444,10 @@ object FileOperationHelper {
         }
     }
 
-    /** Delete the source file after a successful copy. Tries multiple strategies. */
-    private suspend fun deleteSourceFile(context: Context, contentUri: Uri): Boolean = withContext(Dispatchers.IO) {
-        // Strategy 1: API 30+ — use createDeleteRequest (move to trash, recoverable)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, listOf(contentUri))
-                pendingIntent.send()
-                return@withContext true
-            } catch (e: Exception) {
-                Log.w(TAG, "createDeleteRequest failed, trying fallback", e)
-            }
-        }
-
-        // Strategy 2: resolve file path via _ID query (more reliable than deprecated DATA column)
-        try {
-            val id = contentUri.lastPathSegment
-            if (id != null) {
-                val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DATA)
-                context.contentResolver.query(contentUri, projection, null, null, null)?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val dataIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
-                        if (dataIndex >= 0) {
-                            val filePath = cursor.getString(dataIndex)
-                            if (filePath != null) {
-                                val file = File(filePath)
-                                if (file.exists() && file.delete()) {
-                                    // Remove MediaStore entry after physical deletion
-                                    context.contentResolver.delete(contentUri, null, null)
-                                    return@withContext true
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "resolve-and-delete failed", e)
-        }
-
-        // Strategy 3: just remove from MediaStore (last resort)
-        try {
-            context.contentResolver.delete(contentUri, null, null)
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "deleteFromMediaStore failed", e)
-            false
-        }
-    }
+    // Source deletion after move is handled by the caller: the caller collects
+    // URIs with sourceNeedsDeletion=true and shows the system delete-request
+    // dialog (createDeleteRequest via ActivityResultLauncher) on API 30+, or
+    // calls deleteMediaDirect on older APIs. See batchMoveViaFiles + launchCopyMove.
 
     // ---------- Batch operations ----------
 
