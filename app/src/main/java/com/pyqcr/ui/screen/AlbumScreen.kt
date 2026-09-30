@@ -1390,12 +1390,26 @@ fun AlbumScreen(
                     confirmButton = {
                         TextButton(onClick = {
                             showDestinationDialog = false
-                            launchCopyMove(
-                                destinationDialogOp,
-                                selectedImageUris.toList(),
-                                folderBrowserDir,
-                                null
-                            )
+                            // Non-standard folders (outside Download/Pictures/DCIM/Movies)
+                            // need "All files access" on Android 11+ to write via File I/O.
+                            // Without it, FileOutputStream throws EACCES — same as the SAF
+                            // picker flow, which also shows this dialog for non-standard folders.
+                            val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+                                    !android.os.Environment.isExternalStorageManager() &&
+                                    !FileOperationHelper.isStandardMediaCollection(folderBrowserDir)
+                            if (needFullAccess) {
+                                pendingOperation = destinationDialogOp
+                                targetFolderForOperation = folderBrowserDir
+                                selectedTreeUri = null
+                                showFullAccessDialog = true
+                            } else {
+                                launchCopyMove(
+                                    destinationDialogOp,
+                                    selectedImageUris.toList(),
+                                    folderBrowserDir,
+                                    null
+                                )
+                            }
                         }) {
                             Text("Select folder")
                         }
