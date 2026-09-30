@@ -118,6 +118,39 @@ object FileOperationHelper {
         return resolveMediaStorePath(destDir) != null
     }
 
+    /**
+     * Extract a MediaStore `RELATIVE_PATH` from a SAF tree URI's document ID.
+     * Handles URIs where [resolveTreeUriToPath] fails (e.g. user picked
+     * "Downloads" from the SAF sidebar, which uses a different provider).
+     * Returns null for non-standard collections or secondary volumes.
+     */
+    fun resolveMediaStorePathFromTreeUri(treeUri: Uri?): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        if (treeUri == null) return null
+        return try {
+            val docId = DocumentsContract.getTreeDocumentId(treeUri)
+            if (!docId.startsWith("primary:")) return null
+            val relativePath = docId.removePrefix("primary:")
+            if (relativePath.isBlank()) return null
+            val topLevel = relativePath.substringBefore('/').lowercase()
+            val collectionRoot = when (topLevel) {
+                "download" -> "Download"
+                "pictures" -> "Pictures"
+                "dcim" -> "DCIM"
+                "movies" -> "Movies"
+                else -> return null
+            }
+            if (relativePath.equals(collectionRoot, ignoreCase = true)) "$collectionRoot/" else "$relativePath/"
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** True if the SAF tree URI points to a standard MediaStore collection. */
+    fun isStandardMediaCollectionFromTreeUri(treeUri: Uri?): Boolean {
+        return resolveMediaStorePathFromTreeUri(treeUri) != null
+    }
+
     // ---------- Single-file operations ----------
 
     /**
@@ -126,19 +159,21 @@ object FileOperationHelper {
      * then File I/O (legacy/All-files-access), then SAF (any pickable folder).
      */
     suspend fun copyImage(context: Context, sourceUri: String, destDir: File?, treeUri: Uri?): FileOpResult {
+        // Strategy 1: MediaStore RELATIVE_PATH (zero-permission for standard collections).
+        // Try destDir first, then tree URI — covers SAF sidebar picks where destDir is null.
+        val relPath = resolveMediaStorePath(destDir) ?: resolveMediaStorePathFromTreeUri(treeUri)
+        if (relPath != null) {
+            val r = copyViaMediaStore(context, sourceUri, relPath)
+            if (r.success) return r
+            Log.w(TAG, "MediaStore copy failed for $sourceUri (${r.error}) — trying file path/SAF")
+        }
+        // Strategy 2: File-path fast path (legacy/All-files-access)
         if (destDir != null) {
-            // MediaStore RELATIVE_PATH — zero permission for standard collections
-            val relPath = resolveMediaStorePath(destDir)
-            if (relPath != null) {
-                val r = copyViaMediaStore(context, sourceUri, relPath)
-                if (r.success) return r
-                Log.w(TAG, "MediaStore copy failed for $sourceUri (${r.error}) — trying file path")
-            }
-            // File-path fast path (works with legacy storage or All files access)
             val r = copyViaFilePath(context, sourceUri, destDir)
             if (r.success) return r
             Log.w(TAG, "File-path copy failed for $sourceUri (${r.error}) — trying SAF")
         }
+        // Strategy 3: SAF fallback (any pickable folder)
         if (treeUri != null) {
             return copyViaSaf(context, sourceUri, treeUri)
         }
@@ -153,22 +188,22 @@ object FileOperationHelper {
      * so the caller can show the system delete-request dialog.
      */
     suspend fun moveImage(context: Context, sourceUri: String, destDir: File?, treeUri: Uri?): FileOpResult {
-        if (destDir != null) {
-            // MediaStore RELATIVE_PATH — zero permission for standard collections
-            val relPath = resolveMediaStorePath(destDir)
-            if (relPath != null) {
-                val copy = copyViaMediaStore(context, sourceUri, relPath)
-                if (copy.success) {
-                    return FileOpResult(true, copy.destination, null, sourceNeedsDeletion = true)
-                }
-                Log.w(TAG, "MediaStore move-copy failed for $sourceUri (${copy.error}) — trying file path")
+        // Strategy 1: MediaStore RELATIVE_PATH (zero-permission for standard collections)
+        val relPath = resolveMediaStorePath(destDir) ?: resolveMediaStorePathFromTreeUri(treeUri)
+        if (relPath != null) {
+            val copy = copyViaMediaStore(context, sourceUri, relPath)
+            if (copy.success) {
+                return FileOpResult(true, copy.destination, null, sourceNeedsDeletion = true)
             }
-            // True file move (rename) or copy — moveViaFilePath handles rename deletion
+            Log.w(TAG, "MediaStore move-copy failed for $sourceUri (${copy.error}) — trying file path/SAF")
+        }
+        // Strategy 2: True file move (rename) or copy — moveViaFilePath handles rename deletion
+        if (destDir != null) {
             val r = moveViaFilePath(context, sourceUri, destDir)
             if (r.success) return r
             Log.w(TAG, "File-path move failed for $sourceUri (${r.error}) — trying SAF")
         }
-        // SAF copy — source deletion deferred to caller (system delete-request dialog)
+        // Strategy 3: SAF copy — source deletion deferred to caller (system delete-request dialog)
         if (treeUri != null) {
             val copy = copyViaSaf(context, sourceUri, treeUri)
             if (!copy.success) return copy
@@ -315,6 +350,7 @@ object FileOperationHelper {
      */
     private suspend fun copyViaMediaStore(context: Context, sourceUri: String, relativePath: String): FileOpResult =
         withContext(Dispatchers.IO) {
+            var destUri: Uri? = null
             try {
                 val contentUri = Uri.parse(sourceUri)
                 val fileName = getFileName(context, sourceUri)
@@ -327,11 +363,16 @@ object FileOperationHelper {
                 }
 
                 val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-                    put(MediaStore.Images.Media.MIME_TYPE, mime)
-                    put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                    // IS_PENDING signals the system that the file is being written;
+                    // other apps can't see it until we clear this to 0 after the write.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
                 }
-                val destUri = context.contentResolver.insert(collection, values)
+                destUri = context.contentResolver.insert(collection, values)
                     ?: return@withContext FileOpResult(
                         false, null,
                         "MediaStore insert failed — cannot create file in $relativePath"
@@ -345,9 +386,26 @@ object FileOperationHelper {
                 }
                 input.use { i -> output.use { o -> i.copyTo(o) } }
 
+                // Publish the file — clear IS_PENDING so it becomes visible to
+                // the file manager, gallery, and other apps (API 29+).
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    try {
+                        val publishValues = ContentValues().apply {
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        }
+                        context.contentResolver.update(destUri, publishValues, null, null)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to clear IS_PENDING for $destUri: ${e.message}")
+                    }
+                }
+
                 FileOpResult(true, destUri.toString(), null)
             } catch (e: Exception) {
                 Log.e(TAG, "copyViaMediaStore failed for $sourceUri", e)
+                // Clean up the partial file so we don't leave orphaned pending rows
+                destUri?.let { uri ->
+                    try { context.contentResolver.delete(uri, null, null) } catch (_: Exception) {}
+                }
                 FileOpResult(false, null, "${e::class.simpleName}: ${e.message}")
             }
         }

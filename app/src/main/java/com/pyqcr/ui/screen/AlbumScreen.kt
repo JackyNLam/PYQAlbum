@@ -271,7 +271,8 @@ fun AlbumScreen(
                 // skip the All-files-access dialog entirely for those folders.
                 val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
                         !android.os.Environment.isExternalStorageManager() &&
-                        !FileOperationHelper.isStandardMediaCollection(targetFolderForOperation)
+                        !FileOperationHelper.isStandardMediaCollection(targetFolderForOperation) &&
+                        !FileOperationHelper.isStandardMediaCollectionFromTreeUri(selectedTreeUri)
                 if (needFullAccess) {
                     // Keep pendingOperation so the copy/move resumes after the
                     // user decides in the dialog — either from the Settings page
