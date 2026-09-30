@@ -2,6 +2,9 @@ package com.pyqcr.ui.component
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Label
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,7 +33,8 @@ fun ImageThumbnail(
     contentScale: ContentScale = ContentScale.Fit,
     backgroundColor: Color = Color.White,
     rating: Float = 0f,
-    aiScore: Float? = null
+    aiScore: Float? = null,
+    tagged: Boolean = false
 ) {
     val context = LocalContext.current
     Box(
@@ -87,6 +91,26 @@ fun ImageThumbnail(
                     fontSize = MaterialTheme.typography.labelSmall.fontSize,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center
+                )
+            }
+        }
+
+        // Tag badge
+        if (tagged) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .background(
+                        Color(0xCC000000),
+                        shape = MaterialTheme.shapes.small
+                    )
+                    .padding(horizontal = 4.dp, vertical = 1.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Label,
+                    contentDescription = "Tagged",
+                    tint = Color(0xFFFFB300),
+                    modifier = Modifier.size(13.dp)
                 )
             }
         }

@@ -15,7 +15,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -37,6 +39,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -89,6 +92,10 @@ fun AlbumScreen(
     val app = context.applicationContext as PyqCrApp
     val repository = remember { AlbumRepository(context, app.database) }
     val tagDao = app.database.tagDao()
+
+    // URIs of every tagged image — flows, so thumbnails update as tags change.
+    val allTaggedUris by tagDao.getAllTaggedImageUris().collectAsState(initial = emptyList())
+    val taggedUriSet = remember(allTaggedUris) { allTaggedUris.toSet() }
 
     val images by viewModel.images.collectAsState()
     val folders by viewModel.folders.collectAsState()
@@ -1084,6 +1091,7 @@ fun AlbumScreen(
                                         isMultiSelectMode = isMultiSelectMode,
                                         selectedImageUris = selectedImageUris,
                                         aiSelectedUris = aiSelectedUris,
+                                        taggedUris = taggedUriSet,
                                         groupByMode = groupByMode,
                                         gridState = gridState,
                                         waterfallState = waterfallState,
@@ -1228,7 +1236,8 @@ fun AlbumScreen(
                                                     contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                                                     backgroundColor = Color.White,
                                                     rating = image.rating,
-                                                    aiScore = image.aiScore
+                                                    aiScore = image.aiScore,
+                                                    tagged = image.uri in taggedUriSet
                                                 )
                                                 // AI selection indicator
                                                 if (image.uri in aiSelectedUris) {
@@ -1803,6 +1812,7 @@ private fun ImageGridView(
     isMultiSelectMode: Boolean,
     selectedImageUris: Set<String>,
     aiSelectedUris: Set<String>,
+    taggedUris: Set<String>,
     groupByMode: GroupByMode = GroupByMode.NONE,
     gridState: LazyGridState = rememberLazyGridState(),
     waterfallState: LazyStaggeredGridState = rememberLazyStaggeredGridState(),
@@ -1863,6 +1873,7 @@ private fun ImageGridView(
                                 isMultiSelectMode = isMultiSelectMode,
                                 selectedImageUris = selectedImageUris,
                                 aiSelectedUris = aiSelectedUris,
+                                taggedUris = taggedUris,
                                 onImageClick = onImageClick,
                                 onLongPress = onLongPress,
                                 onMultiSelectImageToggle = onMultiSelectImageToggle
@@ -1888,6 +1899,7 @@ private fun ImageGridView(
                             isMultiSelectMode = isMultiSelectMode,
                             selectedImageUris = selectedImageUris,
                             aiSelectedUris = aiSelectedUris,
+                            taggedUris = taggedUris,
                             onImageClick = onImageClick,
                             onLongPress = onLongPress,
                             onMultiSelectImageToggle = onMultiSelectImageToggle
@@ -1906,6 +1918,7 @@ private fun ImageGridView(
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
                 aiSelectedUris = aiSelectedUris,
+                taggedUris = taggedUris,
                 onImageClick = gridClick,
                 onLongPress = onLongPress,
                 modifier = Modifier.fillMaxSize()
@@ -1920,6 +1933,7 @@ private fun ImageGridView(
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
                 aiSelectedUris = aiSelectedUris,
+                taggedUris = taggedUris,
                 onImageClick = justifiedClick,
                 onLongPress = onLongPress,
                 modifier = Modifier.fillMaxSize()
@@ -1937,6 +1951,7 @@ private fun ImageGridCell(
     isMultiSelectMode: Boolean,
     selectedImageUris: Set<String>,
     aiSelectedUris: Set<String>,
+    taggedUris: Set<String>,
     onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit,
     onMultiSelectImageToggle: ((String) -> Unit)? = null
@@ -1966,7 +1981,8 @@ private fun ImageGridCell(
             contentScale = androidx.compose.ui.layout.ContentScale.Fit,
             backgroundColor = Color.White,
             rating = image.rating,
-            aiScore = image.aiScore
+            aiScore = image.aiScore,
+            tagged = image.uri in taggedUris
         )
         // AI selection indicator (AutoAwesome icon)
         if (image.uri in aiSelectedUris) {
@@ -2031,12 +2047,11 @@ private enum class ViewLayout { GRID, WATERFALL, JUSTIFIED }
 /** Preset background colors offered in the collage options dialog. */
 private val CollageBgPresets = listOf(
     "White" to Color.White,
-    "Black" to Color.Black,
-    "Light Gray" to Color(0xFFE0E0E0),
-    "Beige" to Color(0xFFF5F5DC),
-    "Light Blue" to Color(0xFFBBDEFB),
-    "Pink" to Color(0xFFF8BBD0)
+    "Black" to Color.Black
 )
+
+/** ARGB values of the presets, used to detect whether a custom color is active. */
+private val CollageBgPresetArgb = CollageBgPresets.map { it.second.toArgb() }.toSet()
 
 /**
  * Lets the user configure the collage before it is built:
@@ -2059,10 +2074,12 @@ private fun CollageOptionsDialog(
         onDismissRequest = onDismiss,
         title = { Text("Collage Options (${imageUris.size} images)") },
         text = {
-            Column {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 // Background color for empty space
                 Text("Background color", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(8.dp))
+                // True when the chosen color is not one of the fixed presets.
+                var useCustomColor by remember { mutableStateOf(bgColor !in CollageBgPresetArgb) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     CollageBgPresets.forEach { (_, color) ->
                         val selected = color.toArgb() == bgColor
@@ -2076,9 +2093,44 @@ private fun CollageOptionsDialog(
                                     color = if (selected) MaterialTheme.colorScheme.primary else Color.Gray,
                                     shape = CircleShape
                                 )
-                                .clickable { onBgColorChange(color.toArgb()) }
+                                .clickable {
+                                    useCustomColor = false
+                                    onBgColorChange(color.toArgb())
+                                }
                         )
                     }
+                    // Custom color: rainbow swatch; RGB sliders appear below.
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(
+                                        Color.Red, Color.Yellow, Color.Green,
+                                        Color.Cyan, Color.Blue, Color.Magenta
+                                    )
+                                )
+                            )
+                            .border(
+                                width = if (useCustomColor) 3.dp else 1.dp,
+                                color = if (useCustomColor) MaterialTheme.colorScheme.primary else Color.Gray,
+                                shape = CircleShape
+                            )
+                            .clickable { useCustomColor = true }
+                    )
+                }
+                if (useCustomColor) {
+                    Spacer(Modifier.height(8.dp))
+                    var customR by remember(bgColor) { mutableIntStateOf(android.graphics.Color.red(bgColor)) }
+                    var customG by remember(bgColor) { mutableIntStateOf(android.graphics.Color.green(bgColor)) }
+                    var customB by remember(bgColor) { mutableIntStateOf(android.graphics.Color.blue(bgColor)) }
+                    val emitCustom: (Int, Int, Int) -> Unit = { r, g, b ->
+                        onBgColorChange(android.graphics.Color.rgb(r, g, b))
+                    }
+                    RgbSliderRow("R", customR) { customR = it; emitCustom(customR, customG, customB) }
+                    RgbSliderRow("G", customG) { customG = it; emitCustom(customR, customG, customB) }
+                    RgbSliderRow("B", customB) { customB = it; emitCustom(customR, customG, customB) }
                 }
 
                 Spacer(Modifier.height(16.dp))
@@ -2087,7 +2139,7 @@ private fun CollageOptionsDialog(
                 Text("Columns", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    (2..5).forEach { c ->
+                    (1..5).forEach { c ->
                         FilterChip(
                             selected = columns == c,
                             onClick = { onColumnsChange(c) },
@@ -2162,6 +2214,25 @@ private fun CollageOptionsDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+}
+
+/** One labeled RGB slider used by the collage custom-color picker. */
+@Composable
+private fun RgbSliderRow(label: String, value: Int, onValueChange: (Int) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = label,
+            modifier = Modifier.width(18.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Slider(
+            value = value.toFloat(),
+            onValueChange = { onValueChange(it.toInt()) },
+            valueRange = 0f..255f,
+            modifier = Modifier.weight(1f)
+        )
+    }
 }
 
 /** Return [list] with the element at [from] moved to [to] (bounds-safe). */

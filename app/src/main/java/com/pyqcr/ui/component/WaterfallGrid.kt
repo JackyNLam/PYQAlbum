@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Label
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.Icon
 
@@ -41,6 +42,7 @@ fun WaterfallGrid(
     isMultiSelectMode: Boolean = false,
     selectedImageUris: Set<String> = emptySet(),
     aiSelectedUris: Set<String> = emptySet(),
+    taggedUris: Set<String> = emptySet(),
     onImageClick: ((String) -> Unit)? = null,
     onLongPress: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -103,6 +105,25 @@ fun WaterfallGrid(
                             color = Color(0xFF00BCD4),
                             fontSize = androidx.compose.material3.MaterialTheme.typography.labelSmall.fontSize,
                             fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                // Tag badge
+                if (image.uri in taggedUris) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .background(
+                                Color(0xCC000000),
+                                shape = androidx.compose.material3.MaterialTheme.shapes.small
+                            )
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Label,
+                            contentDescription = "Tagged",
+                            tint = Color(0xFFFFB300),
+                            modifier = Modifier.size(13.dp)
                         )
                     }
                 }

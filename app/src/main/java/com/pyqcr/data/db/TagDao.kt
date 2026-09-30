@@ -61,6 +61,9 @@ interface TagDao {
     @Query("SELECT c.imageUri FROM image_tag_cross_ref c WHERE c.tagId = :tagId")
     suspend fun getImageUrisForTag(tagId: Long): List<String>
 
+    @Query("SELECT DISTINCT c.imageUri FROM image_tag_cross_ref c")
+    fun getAllTaggedImageUris(): Flow<List<String>>
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun addTagToImages(crossRefs: List<ImageTagCrossRef>)
 
