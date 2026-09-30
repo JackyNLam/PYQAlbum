@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -133,28 +134,46 @@ fun AlbumScreen(
     var pendingOperation by remember { mutableStateOf<String?>(null) } // "copy" or "move"
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Default target folder (Pictures/PYQAlbum/)
-    var targetFolderForOperation by remember {
-        mutableStateOf<File?>(FileUtils.getDefaultMoveDir(context))
-    }
+    // Destination for copy/move:
+    //  - targetFolderForOperation: real File path — non-null only when the picked
+    //    folder is on internal storage ("primary:" tree) and resolves to a path.
+    //  - selectedTreeUri: the retained SAF tree URI of the picked folder; used for
+    //    the actual write whenever the File path is unavailable or blocked
+    //    (SD card, cloud providers, Android 11+ scoped-storage paths).
+    var targetFolderForOperation by remember { mutableStateOf<File?>(null) }
+    var selectedTreeUri by remember { mutableStateOf<Uri?>(null) }
 
     /** Launch a copy or move operation on selected URIs. */
-    val launchCopyMove: (String, List<String>, File?) -> Unit = { operation, uris, destDir ->
-        if (destDir == null) {
+    val launchCopyMove: (String, List<String>, File?, Uri?) -> Unit = { operation, uris, destDir, treeUri ->
+        if (destDir == null && treeUri == null) {
             copyMoveMessage = "Destination folder not available"
             scope.launch { snackbarHostState.showSnackbar(copyMoveMessage) }
         } else {
             scope.launch {
                 try {
-                    val successCount = if (operation == "copy") {
-                        com.pyqcr.ui.util.FileOperationHelper.batchCopyViaFiles(context, uris, destDir)
-                            .count { it.second != null }
+                    // Collect a per-file failure reason so the user sees WHY files failed
+                    val failures = mutableListOf<String>()
+                    val results = if (operation == "copy") {
+                        com.pyqcr.ui.util.FileOperationHelper.batchCopyViaFiles(
+                            context, uris, destDir, treeUri
+                        ) { _, r ->
+                            if (!r.success) failures += r.error ?: "Unknown error"
+                        }
                     } else {
-                        com.pyqcr.ui.util.FileOperationHelper.batchMoveViaFiles(context, uris, destDir)
-                            .count { it.second != null }
+                        com.pyqcr.ui.util.FileOperationHelper.batchMoveViaFiles(
+                            context, uris, destDir, treeUri
+                        ) { _, r ->
+                            if (!r.success) failures += r.error ?: "Unknown error"
+                        }
                     }
+                    val successCount = results.count { it.second.success }
                     val label = if (operation == "copy") "Copied" else "Moved"
-                    copyMoveMessage = "$label $successCount/${uris.size} images to ${destDir.name}"
+                    copyMoveMessage = buildString {
+                        append("$label $successCount/${uris.size} images to ${destinationFolderLabel(destDir, treeUri)}")
+                        if (failures.isNotEmpty()) {
+                            append("\n${failures.size} failed — ${failures.first()}")
+                        }
+                    }
                     snackbarHostState.showSnackbar(copyMoveMessage)
                     isMultiSelectMode = false
                     selectedImageUris = emptySet()
@@ -176,13 +195,20 @@ fun AlbumScreen(
         uri?.let { treeUri ->
             val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                     Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            context.contentResolver.takePersistableUriPermission(treeUri, takeFlags)
-            // Resolve the tree URI to a real directory path
+            try {
+                context.contentResolver.takePersistableUriPermission(treeUri, takeFlags)
+            } catch (e: Exception) {
+                // Some providers reject persistable permissions — the URI still
+                // works for writes within this session.
+                Log.w("FolderPicker", "takePersistableUriPermission failed", e)
+            }
+            // The SAF tree URI is the source of truth for writes; the real File
+            // path is kept only when resolution succeeds (internal storage).
+            selectedTreeUri = treeUri
             targetFolderForOperation = resolveTreeUriToPath(treeUri)
-                ?: FileUtils.getDefaultMoveDir(context)
             pendingOperation?.let { op ->
                 pendingOperation = null
-                launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation)
+                launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation, selectedTreeUri)
             }
         }
     }
@@ -1913,12 +1939,26 @@ private fun resolveTreeUriToPath(treeUri: Uri): File? {
             File(android.os.Environment.getExternalStorageDirectory(), relativePath)
         } else {
             // SD card or other volume — hard to resolve to a real File path on modern Android
-            // Fall back to default Pictures/PYQAlbum/
+            // The retained SAF tree URI covers writes here instead (see launchCopyMove).
             null
         }
     } catch (e: Exception) {
         null
     }
+}
+
+/** Human-readable name of the copy/move destination for the result snackbar. */
+private fun destinationFolderLabel(destDir: File?, treeUri: Uri?): String {
+    destDir?.let { return it.name }
+    if (treeUri != null) {
+        return try {
+            val docId = android.provider.DocumentsContract.getTreeDocumentId(treeUri)
+            docId.substringAfterLast('/').ifBlank { "selected folder" }
+        } catch (e: Exception) {
+            "selected folder"
+        }
+    }
+    return "selected folder"
 }
 
 /** File utility helpers for copy/move operations. */

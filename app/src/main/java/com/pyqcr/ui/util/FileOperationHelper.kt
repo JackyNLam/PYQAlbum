@@ -1,12 +1,11 @@
 package com.pyqcr.ui.util
 
-import android.content.ContentResolver
 import android.content.Context
 import android.content.IntentSender
-import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
@@ -14,18 +13,28 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 
 /**
  * Helper for batch copy/move operations on image files.
  *
- * Uses two strategies:
- *   1. If a real file path is available from the DATA column, use File I/O directly.
- *   2. Fallback to SAF DocumentProvider API for content:// URIs.
+ * Uses up to two strategies for the destination folder:
+ *   1. When the picked folder resolves to a real file path on internal storage
+ *      ("primary:" tree URIs), use File I/O directly — the fast path, and it
+ *      enables a true same-volume move via [File.renameTo].
+ *   2. Otherwise (SD card, USB, cloud providers, or Android 11+ scoped-storage
+ *      blocked paths) fall back to the SAF DocumentsContract API using the
+ *      granted tree URI, which can write to any folder the user can pick.
+ *
+ * Every file failure is reported as a [FileOpResult] with a human-readable
+ * reason so the caller can tell the user WHY a file failed (permission denied,
+ * read-only, source delete failed…) instead of a bare count.
  */
 object FileOperationHelper {
 
     internal const val TAG = "FileOpHelper"
+
+    /** Outcome of a single copy/move: destination (path or content uri) or the failure reason. */
+    data class FileOpResult(val success: Boolean, val destination: String?, val error: String?)
 
     // ---------- File path resolution ----------
 
@@ -63,31 +72,76 @@ object FileOperationHelper {
         return contentUri.lastPathSegment ?: "unknown_${System.currentTimeMillis()}"
     }
 
+    // ---------- Single-file operations ----------
+
+    /** Copy a single image into the chosen folder — File fast path first, then SAF. */
+    suspend fun copyImage(context: Context, sourceUri: String, destDir: File?, treeUri: Uri?): FileOpResult {
+        if (destDir != null) {
+            val r = copyViaFilePath(context, sourceUri, destDir)
+            if (r.success) return r
+            Log.w(TAG, "File-path copy failed for $sourceUri (${r.error}) — trying SAF")
+        }
+        if (treeUri != null) {
+            return copyViaSaf(context, sourceUri, treeUri)
+        }
+        return FileOpResult(false, null, "No writable destination folder")
+    }
+
+    /** Move a single image into the chosen folder — true rename, then copy+delete, then SAF. */
+    suspend fun moveImage(context: Context, sourceUri: String, destDir: File?, treeUri: Uri?): FileOpResult {
+        if (destDir != null) {
+            val r = moveViaFilePath(context, sourceUri, destDir)
+            if (r.success) return r
+            Log.w(TAG, "File-path move failed for $sourceUri (${r.error}) — trying SAF")
+        }
+        if (treeUri != null) {
+            val copy = copyViaSaf(context, sourceUri, treeUri)
+            if (!copy.success) return copy
+            val deleted = deleteSourceFile(context, Uri.parse(sourceUri))
+            if (!deleted) {
+                Log.w(TAG, "Source delete failed after SAF copy for $sourceUri")
+                return FileOpResult(false, copy.destination, "File copied to the folder, but the original could not be deleted")
+            }
+            return copy
+        }
+        return FileOpResult(false, null, "No writable destination folder")
+    }
+
     // ---------- Copy/Move via real file path (fast path) ----------
 
-    /** Copy a file using ContentResolver stream (works on all Android versions, incl. 10+ where DATA column is null). */
-    suspend fun copyViaFilePath(
+    /**
+     * Copy a file using ContentResolver stream reads + File I/O writes.
+     * Only works on paths the app may access directly (internal storage media
+     * folders, or legacy full access on Android 10).
+     */
+    private suspend fun copyViaFilePath(
         context: Context,
         sourceUri: String,
         destDir: File,
         preserveLastModified: Boolean = false
-    ): String? = withContext(Dispatchers.IO) {
+    ): FileOpResult = withContext(Dispatchers.IO) {
         try {
             val contentUri = Uri.parse(sourceUri)
             val fileName = getFileName(context, sourceUri)
-            if (!destDir.exists()) destDir.mkdirs()
+            if (!destDir.exists() && !destDir.mkdirs()) {
+                return@withContext FileOpResult(
+                    false, null,
+                    "Cannot create folder \"${destDir.name}\" — write access blocked (Android 11+ scoped storage)"
+                )
+            }
             val destFile = resolveConflict(File(destDir, fileName))
 
             // Remember the source's modified time so we can restore it on the copy
             val sourceLastModified = if (preserveLastModified)
                 getLastModified(context, contentUri) else null
 
-            // Use ContentResolver to read the source stream — works on all Android versions
-            context.contentResolver.openInputStream(contentUri)?.use { input ->
-                FileOutputStream(destFile).use { output ->
-                    input.copyTo(output)
-                }
-            } ?: return@withContext null
+            val input = context.contentResolver.openInputStream(contentUri)
+            if (input == null) {
+                return@withContext FileOpResult(false, null, "Cannot read source image (stream unavailable)")
+            }
+            input.use { i ->
+                FileOutputStream(destFile).use { output -> i.copyTo(output) }
+            }
 
             // Preserve the original modified date when copying (used by move fallback)
             if (sourceLastModified != null && sourceLastModified > 0L) {
@@ -95,30 +149,28 @@ object FileOperationHelper {
             }
 
             MediaStoreUtils.scanFile(context, destFile.absolutePath)
-            destFile.absolutePath
+            FileOpResult(true, destFile.absolutePath, null)
         } catch (e: Exception) {
             Log.e(TAG, "copyViaFilePath failed for $sourceUri", e)
-            null
+            FileOpResult(false, null, "${e::class.simpleName}: ${e.message}")
         }
     }
 
-    /** Move a file to another destination — a real move, not copy+delete, preserving the modified date.
-     *
-     * Strategy (in order of preference):
-     *   1. Resolve the real file path and use [File.renameTo] — this moves the SAME file
-     *      (instant, no re-encoding, and the modified date is untouched).
-     *   2. Cross-volume / non-resolvable paths fall back to stream copy + restore the source
-     *      modified date + delete the source.
-     */
-    suspend fun moveViaFilePath(
+    /** Move a file via real paths — a true move via [File.renameTo] when possible, else copy+delete. */
+    private suspend fun moveViaFilePath(
         context: Context,
         sourceUri: String,
         destDir: File
-    ): String? = withContext(Dispatchers.IO) {
+    ): FileOpResult = withContext(Dispatchers.IO) {
         try {
             val contentUri = Uri.parse(sourceUri)
             val fileName = getFileName(context, sourceUri)
-            if (!destDir.exists()) destDir.mkdirs()
+            if (!destDir.exists() && !destDir.mkdirs()) {
+                return@withContext FileOpResult(
+                    false, null,
+                    "Cannot create folder \"${destDir.name}\" — write access blocked (Android 11+ scoped storage)"
+                )
+            }
             val destFile = resolveConflict(File(destDir, fileName))
 
             // Strategy 1: true file move via renameTo (same volume) — same inode, modified date intact
@@ -129,26 +181,123 @@ object FileOperationHelper {
                     MediaStoreUtils.scanFile(context, destFile.absolutePath)
                     // Remove the stale MediaStore row for the old location
                     deleteSourceEntry(context, contentUri)
-                    return@withContext destFile.absolutePath
+                    return@withContext FileOpResult(true, destFile.absolutePath, null)
                 }
             }
 
             // Strategy 2: copy + delete fallback (cross-volume or content-only URI),
             // with the source modified date restored on the destination.
-            val destPath = copyViaFilePath(context, sourceUri, destDir, preserveLastModified = true)
-            if (destPath == null) return@withContext null
+            val copy = copyViaFilePath(context, sourceUri, destDir, preserveLastModified = true)
+            if (!copy.success) return@withContext copy
 
             val deleted = deleteSourceFile(context, contentUri)
             if (!deleted) {
-                Log.w(TAG, "Source delete may have failed for $sourceUri")
+                return@withContext FileOpResult(
+                    false, copy.destination,
+                    "File copied to the folder, but the original could not be deleted"
+                )
             }
-
-            destPath
+            FileOpResult(true, copy.destination, null)
         } catch (e: Exception) {
             Log.e(TAG, "moveViaFilePath failed for $sourceUri", e)
+            FileOpResult(false, null, "${e::class.simpleName}: ${e.message}")
+        }
+    }
+
+    // ---------- Copy via SAF (works for any pickable folder) ----------
+
+    /** Copy a file through the retained SAF tree URI — works on SD/USB/cloud and scoped-storage blocked paths. */
+    private suspend fun copyViaSaf(context: Context, sourceUri: String, treeUri: Uri): FileOpResult =
+        withContext(Dispatchers.IO) {
+            try {
+                val contentUri = Uri.parse(sourceUri)
+                val fileName = getFileName(context, sourceUri)
+                if (fileName.isBlank()) {
+                    return@withContext FileOpResult(false, null, "Missing file name for $sourceUri")
+                }
+
+                val availableName = findAvailableSafName(context, treeUri, fileName)
+                val docUri = createSafDocument(context, treeUri, mimeTypeFor(fileName), availableName)
+                    ?: return@withContext FileOpResult(
+                        false, null,
+                        "Cannot create file in the chosen folder — it may be read-only or blocked"
+                    )
+
+                val input = context.contentResolver.openInputStream(contentUri)
+                val output = context.contentResolver.openOutputStream(docUri)
+                if (input == null || output == null) {
+                    // Clean up the empty document we just created
+                    try { DocumentsContract.deleteDocument(context.contentResolver, docUri) } catch (_: Exception) {}
+                    return@withContext FileOpResult(false, null, "Cannot read the source image or write to the chosen folder")
+                }
+                input.use { i -> output.use { o -> i.copyTo(o) } }
+
+                FileOpResult(true, docUri.toString(), null)
+            } catch (e: Exception) {
+                Log.e(TAG, "copyViaSaf failed for $sourceUri", e)
+                FileOpResult(false, null, "${e::class.simpleName}: ${e.message}")
+            }
+        }
+
+    /** Create a new document inside the tree, returning its content uri. */
+    private fun createSafDocument(context: Context, treeUri: Uri, mimeType: String, displayName: String): Uri? {
+        return try {
+            DocumentsContract.createDocument(context.contentResolver, treeUri, mimeType, displayName)
+        } catch (e: Exception) {
+            Log.w(TAG, "createDocument failed for $displayName", e)
             null
         }
     }
+
+    /** Find a display name that does not collide with existing children of the tree. */
+    private fun findAvailableSafName(context: Context, treeUri: Uri, fileName: String): String {
+        val existing = querySafChildNames(context, treeUri)
+        var candidate = fileName
+        var counter = 1
+        while (candidate in existing) {
+            val dot = fileName.lastIndexOf('.')
+            val base = if (dot >= 0) fileName.substring(0, dot) else fileName
+            val ext = if (dot >= 0) fileName.substring(dot) else ""
+            candidate = "${base}_$counter$ext"
+            counter++
+        }
+        return candidate
+    }
+
+    /** List display names of the tree's immediate children. */
+    private fun querySafChildNames(context: Context, treeUri: Uri): Set<String> {
+        return try {
+            val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeDocId)
+            val names = mutableSetOf<String>()
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null, null, null
+            )?.use { cursor ->
+                val nameIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                while (cursor.moveToNext()) {
+                    if (nameIdx >= 0) cursor.getString(nameIdx)?.let { names += it }
+                }
+            }
+            names
+        } catch (e: Exception) {
+            Log.w(TAG, "querySafChildNames failed", e)
+            emptySet()
+        }
+    }
+
+    /** Guess a MIME type from the file extension so the created document keeps it. */
+    private fun mimeTypeFor(fileName: String): String = when (fileName.substringAfterLast('.', "").lowercase()) {
+        "png" -> "image/png"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "heic", "heif" -> "image/heic"
+        "bmp" -> "image/bmp"
+        else -> "image/jpeg"
+    }
+
+    // ---------- Source deletion after copy ----------
 
     /** Get the modified time (milliseconds) of a media item, if MediaStore exposes it. */
     private fun getLastModified(context: Context, contentUri: Uri): Long? {
@@ -182,8 +331,6 @@ object FileOperationHelper {
             try {
                 val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, listOf(contentUri))
                 pendingIntent.send()
-                // createDeleteRequest is asynchronous; we wait a bit for the MediaStore to update
-                // by checking if the content URI still resolves
                 return@withContext true
             } catch (e: Exception) {
                 Log.w(TAG, "createDeleteRequest failed, trying fallback", e)
@@ -228,22 +375,39 @@ object FileOperationHelper {
 
     // ---------- Batch operations ----------
 
-    /** Batch copy using file paths. Returns list of (uri, destPathOrNull). */
+    /**
+     * Batch copy. Each result is (sourceUri, FileOpResult).
+     * @param destDir Real destination directory, or null when not resolvable.
+     * @param treeUri Retained SAF tree URI of the picked folder (covers non-resolvable folders).
+     * @param onFileResult Called per file with its result, so the caller can collect failures.
+     */
     suspend fun batchCopyViaFiles(
         context: Context,
         sourceUris: List<String>,
-        destDir: File
-    ): List<Pair<String, String?>> = withContext(Dispatchers.IO) {
-        sourceUris.map { uri -> uri to copyViaFilePath(context, uri, destDir) }
+        destDir: File?,
+        treeUri: Uri? = null,
+        onFileResult: (String, FileOpResult) -> Unit = { _, _ -> }
+    ): List<Pair<String, FileOpResult>> = withContext(Dispatchers.IO) {
+        sourceUris.map { uri ->
+            val r = copyImage(context, uri, destDir, treeUri)
+            onFileResult(uri, r)
+            uri to r
+        }
     }
 
-    /** Batch move using file paths. Returns list of (uri, destPathOrNull). */
+    /** Batch move. Each result is (sourceUri, FileOpResult). See [batchCopyViaFiles]. */
     suspend fun batchMoveViaFiles(
         context: Context,
         sourceUris: List<String>,
-        destDir: File
-    ): List<Pair<String, String?>> = withContext(Dispatchers.IO) {
-        sourceUris.map { uri -> uri to moveViaFilePath(context, uri, destDir) }
+        destDir: File?,
+        treeUri: Uri? = null,
+        onFileResult: (String, FileOpResult) -> Unit = { _, _ -> }
+    ): List<Pair<String, FileOpResult>> = withContext(Dispatchers.IO) {
+        sourceUris.map { uri ->
+            val r = moveImage(context, uri, destDir, treeUri)
+            onFileResult(uri, r)
+            uri to r
+        }
     }
 
     // ---------- Batch delete ----------
