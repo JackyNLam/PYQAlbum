@@ -142,10 +142,14 @@ fun AlbumScreen(
     //    (SD card, cloud providers, Android 11+ scoped-storage paths).
     var targetFolderForOperation by remember { mutableStateOf<File?>(null) }
     var selectedTreeUri by remember { mutableStateOf<Uri?>(null) }
-    // In-app destination picker for copy/move — shows preset folders (Download,
-    // Pictures, DCIM, Movies) plus "Choose folder..." which opens the SAF picker.
+    // In-app folder browser for copy/move — shows all directories under
+    // external storage, with navigation into subdirectories. "Choose folder
+    // (system picker)…" opens the SAF picker for inaccessible locations.
     var showDestinationDialog by remember { mutableStateOf(false) }
     var destinationDialogOp by remember { mutableStateOf("copy") }
+    // Current directory for the in-app folder browser; reset to external storage
+    // root each time the destination dialog opens so the user starts from the top.
+    var folderBrowserDir by remember { mutableStateOf(android.os.Environment.getExternalStorageDirectory()) }
     // Offers "All files access" once (API 30+) — the file-manager-style permission
     // that lets copy/move write into ANY folder via direct paths.
     var showFullAccessDialog by remember { mutableStateOf(false) }
@@ -966,10 +970,12 @@ fun AlbumScreen(
                         },
                         onCopyTo = {
                             destinationDialogOp = "copy"
+                            folderBrowserDir = android.os.Environment.getExternalStorageDirectory()
                             showDestinationDialog = true
                         },
                         onMoveTo = {
                             destinationDialogOp = "move"
+                            folderBrowserDir = android.os.Environment.getExternalStorageDirectory()
                             showDestinationDialog = true
                         },
                         onDelete = {
@@ -1296,33 +1302,76 @@ fun AlbumScreen(
 
             // --- Batch operation dialogs ---
 
-            // In-app destination picker for copy/move — preset standard collections
-            // (zero-permission MediaStore write) plus "Choose folder..." for SAF.
+            // In-app folder browser for copy/move — browse all directories under
+            // external storage. Preset folders at the top for quick access; tap any
+            // directory to descend, use ".." to navigate up, or pick the current
+            // directory with "Select folder". "Choose folder (system picker)…"
+            // opens the SAF tree picker for locations not reachable via File API.
             if (showDestinationDialog) {
                 val isCopy = destinationDialogOp == "copy"
+                val isRoot = folderBrowserDir == android.os.Environment.getExternalStorageDirectory()
+
+                val subDirs = remember(folderBrowserDir) {
+                    folderBrowserDir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }
+                        ?.sortedBy { it.name.lowercase() }
+                        ?: emptyList()
+                }
+
                 AlertDialog(
                     onDismissRequest = { showDestinationDialog = false },
                     title = { Text(if (isCopy) "Copy to..." else "Move to...") },
                     text = {
                         Column {
-                            listOf(
-                                "Download" to android.os.Environment.DIRECTORY_DOWNLOADS,
-                                "Pictures" to android.os.Environment.DIRECTORY_PICTURES,
-                                "DCIM" to android.os.Environment.DIRECTORY_DCIM,
-                                "Movies" to android.os.Environment.DIRECTORY_MOVIES
-                            ).forEach { (label, dirType) ->
-                                TextButton(
-                                    onClick = {
-                                        showDestinationDialog = false
-                                        val destDir = android.os.Environment.getExternalStoragePublicDirectory(dirType)
-                                        launchCopyMove(destinationDialogOp, selectedImageUris.toList(), destDir, null)
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(label, modifier = Modifier.fillMaxWidth())
+                            // Current path breadcrumb
+                            Text(
+                                text = folderBrowserDir.absolutePath,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                            // Scrollable directory list
+                            LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
+                                // ".." parent navigation (hidden at external storage root)
+                                if (!isRoot) {
+                                    item {
+                                        TextButton(
+                                            onClick = { folderBrowserDir = folderBrowserDir.parentFile!! },
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Icon(
+                                                Icons.Default.ArrowUpward,
+                                                contentDescription = "Parent folder",
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                            Text("..", modifier = Modifier.fillMaxWidth())
+                                        }
+                                    }
+                                }
+
+                                items(subDirs.size) { i ->
+                                    val dir = subDirs[i]
+                                    TextButton(
+                                        onClick = { folderBrowserDir = dir },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Folder,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(dir.name, modifier = Modifier.fillMaxWidth())
+                                    }
                                 }
                             }
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                            // SAF fallback for non-standard locations
                             TextButton(
                                 onClick = {
                                     showDestinationDialog = false
@@ -1331,13 +1380,30 @@ fun AlbumScreen(
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("Choose folder...", modifier = Modifier.fillMaxWidth())
+                                Text(
+                                    "Choose folder (system picker)…",
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
                         }
                     },
-                    confirmButton = {},
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showDestinationDialog = false
+                            launchCopyMove(
+                                destinationDialogOp,
+                                selectedImageUris.toList(),
+                                folderBrowserDir,
+                                null
+                            )
+                        }) {
+                            Text("Select folder")
+                        }
+                    },
                     dismissButton = {
-                        TextButton(onClick = { showDestinationDialog = false }) { Text("Cancel") }
+                        TextButton(onClick = { showDestinationDialog = false }) {
+                            Text("Cancel")
+                        }
                     }
                 )
             }
