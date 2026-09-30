@@ -142,6 +142,10 @@ fun AlbumScreen(
     //    (SD card, cloud providers, Android 11+ scoped-storage paths).
     var targetFolderForOperation by remember { mutableStateOf<File?>(null) }
     var selectedTreeUri by remember { mutableStateOf<Uri?>(null) }
+    // In-app destination picker for copy/move — shows preset folders (Download,
+    // Pictures, DCIM, Movies) plus "Choose folder..." which opens the SAF picker.
+    var showDestinationDialog by remember { mutableStateOf(false) }
+    var destinationDialogOp by remember { mutableStateOf("copy") }
     // Offers "All files access" once (API 30+) — the file-manager-style permission
     // that lets copy/move write into ANY folder via direct paths.
     var showFullAccessDialog by remember { mutableStateOf(false) }
@@ -961,12 +965,12 @@ fun AlbumScreen(
                             selectedImageUris = emptySet()
                         },
                         onCopyTo = {
-                            pendingOperation = "copy"
-                            folderPickerLauncher.launch(null)
+                            destinationDialogOp = "copy"
+                            showDestinationDialog = true
                         },
                         onMoveTo = {
-                            pendingOperation = "move"
-                            folderPickerLauncher.launch(null)
+                            destinationDialogOp = "move"
+                            showDestinationDialog = true
                         },
                         onDelete = {
                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -1291,6 +1295,52 @@ fun AlbumScreen(
             }
 
             // --- Batch operation dialogs ---
+
+            // In-app destination picker for copy/move — preset standard collections
+            // (zero-permission MediaStore write) plus "Choose folder..." for SAF.
+            if (showDestinationDialog) {
+                val isCopy = destinationDialogOp == "copy"
+                AlertDialog(
+                    onDismissRequest = { showDestinationDialog = false },
+                    title = { Text(if (isCopy) "Copy to..." else "Move to...") },
+                    text = {
+                        Column {
+                            listOf(
+                                "Download" to android.os.Environment.DIRECTORY_DOWNLOADS,
+                                "Pictures" to android.os.Environment.DIRECTORY_PICTURES,
+                                "DCIM" to android.os.Environment.DIRECTORY_DCIM,
+                                "Movies" to android.os.Environment.DIRECTORY_MOVIES
+                            ).forEach { (label, dirType) ->
+                                TextButton(
+                                    onClick = {
+                                        showDestinationDialog = false
+                                        val destDir = android.os.Environment.getExternalStoragePublicDirectory(dirType)
+                                        launchCopyMove(destinationDialogOp, selectedImageUris.toList(), destDir, null)
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(label, modifier = Modifier.fillMaxWidth())
+                                }
+                            }
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                            TextButton(
+                                onClick = {
+                                    showDestinationDialog = false
+                                    pendingOperation = destinationDialogOp
+                                    folderPickerLauncher.launch(null)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Choose folder...", modifier = Modifier.fillMaxWidth())
+                            }
+                        }
+                    },
+                    confirmButton = {},
+                    dismissButton = {
+                        TextButton(onClick = { showDestinationDialog = false }) { Text("Cancel") }
+                    }
+                )
+            }
 
             // All files access offer (API 30+) — shown after picking a copy/move
             // destination when the app still lacks the file-manager-style permission.

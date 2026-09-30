@@ -357,11 +357,12 @@ object FileOperationHelper {
                 val fileName = getFileName(context, sourceUri)
                 val mime = mimeTypeFor(fileName)
 
-                val collection = if (relativePath.startsWith("Download", ignoreCase = true)) {
-                    MediaStore.Downloads.EXTERNAL_CONTENT_URI
-                } else {
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                }
+                // Always insert into MediaStore.Images regardless of RELATIVE_PATH.
+                // MediaStore.Downloads does NOT reliably support IS_PENDING across
+                // all devices, so files inserted there may stay invisible even after
+                // the IS_PENDING clear. MediaStore.Images has full IS_PENDING support
+                // and RELATIVE_PATH controls the physical directory (e.g. "Download/").
+                val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
 
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
@@ -389,14 +390,20 @@ object FileOperationHelper {
 
                 // Publish the file — clear IS_PENDING so it becomes visible to
                 // the file manager, gallery, and other apps (API 29+).
+                // If the update fails (returns 0 rows), the file stays invisible
+                // forever — clean up the partial row and report failure instead
+                // of silently succeeding with an invisible file.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    try {
-                        val publishValues = ContentValues().apply {
-                            put(MediaStore.MediaColumns.IS_PENDING, 0)
-                        }
-                        context.contentResolver.update(destUri, publishValues, null, null)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to clear IS_PENDING for $destUri: ${e.message}")
+                    val publishValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    }
+                    val updated = context.contentResolver.update(destUri, publishValues, null, null)
+                    if (updated == 0) {
+                        try { context.contentResolver.delete(destUri, null, null) } catch (_: Exception) {}
+                        return@withContext FileOpResult(
+                            false, null,
+                            "Failed to publish file in $relativePath — the device may block writes here"
+                        )
                     }
                 }
 
