@@ -8,6 +8,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -95,24 +96,31 @@ object ImageUtil {
     }
 
     /**
-     * Build a collage bitmap from multiple image URIs.
+     * Build a collage bitmap from multiple image URIs in the order given.
      *
-     * Images are placed at their natural (original) size, packed tightly in a
-     * grid with no padding and no background fill: each image keeps its own
-     * aspect ratio and the output bitmap is exactly large enough to hold them
-     * all. Very large images are downsampled (power-of-two) so the longest side
-     * of each input is at most [maxSourceDimension], keeping memory bounded.
+     * Images are laid out in a uniform grid of [columns] columns on a
+     * [backgroundColor] background. Every cell has the same size (the largest
+     * decoded image's width/height), so images with different aspect ratios are
+     * scaled to fit and letterboxed — the empty space around them shows the
+     * chosen background color instead of ripping the layout. Very large images
+     * are downsampled (power-of-two) so the longest side of each input is at
+     * most [maxSourceDimension], and the output bitmap is capped at
+     * [maxCanvasDimension] on its longest side to keep memory bounded.
      *
      * @return the collage bitmap, or null if none of the sources could be decoded.
      */
     fun createCollage(
         context: Context,
         sourceUris: List<String>,
-        maxSourceDimension: Int = 2048
+        columns: Int = 3,
+        backgroundColor: Int = Color.WHITE,
+        maxSourceDimension: Int = 2048,
+        maxCanvasDimension: Int = 4096
     ): Bitmap? {
         val contentResolver = context.contentResolver
         val n = sourceUris.size
         if (n == 0) return null
+        val colCount = columns.coerceAtLeast(1)
 
         // First pass: read each source's size and the sample size needed to
         // decode it (kept per cell so the second pass decodes at these exact
@@ -138,41 +146,34 @@ object ImageUtil {
                 cells.add(Cell(0, 0, 1))
             }
         }
-        if (cells.none { it.width > 0 }) return null
+        val validCells = cells.filter { it.width > 0 }
+        if (validCells.isEmpty()) return null
 
-        val columns = when {
-            cells.size <= 3 -> cells.size
-            else -> minOf(3, kotlin.math.ceil(kotlin.math.sqrt(cells.size.toDouble())).toInt())
-        }
-        val rows = kotlin.math.ceil(cells.size.toDouble() / columns).toInt()
+        // Uniform grid: all cells share the largest image's size, so the empty
+        // space inside a cell (letterboxing) is filled with the background color.
+        val cellW = validCells.maxOf { it.width }
+        val cellH = validCells.maxOf { it.height }
+        val rows = kotlin.math.ceil(n.toDouble() / colCount).toInt()
 
-        // Layout: images flow left-to-right; each row is as tall as its tallest
-        // image and each row's width is the sum of its images' widths, so the
-        // canvas exactly matches the images with nothing left over.
-        val rowHeights = IntArray(rows)
-        val xOffsets = IntArray(cells.size)
-        val rowWidths = IntArray(rows)
-        var running = 0
-        cells.forEachIndexed { index, cell ->
-            val row = index / columns
-            if (index % columns == 0) running = 0
-            xOffsets[index] = running
-            running += cell.width
-            rowWidths[row] = running
-            rowHeights[row] = maxOf(rowHeights[row], cell.height)
-        }
-        val yOffsets = IntArray(rows)
-        for (row in 1 until rows) {
-            yOffsets[row] = yOffsets[row - 1] + rowHeights[row - 1]
-        }
-        val totalWidth = rowWidths.maxOrNull() ?: 0
-        val totalHeight = rowHeights.sum()
+        val canvasWidth = cellW * colCount
+        val canvasHeight = cellH * rows
 
-        val outBitmap = Bitmap.createBitmap(totalWidth, totalHeight, Bitmap.Config.ARGB_8888)
+        // Keep the output bitmap bounded — very wide/tall layouts would otherwise OOM.
+        val scale = minOf(
+            1f,
+            maxCanvasDimension.toFloat() / canvasWidth.coerceAtLeast(1),
+            maxCanvasDimension.toFloat() / canvasHeight.coerceAtLeast(1)
+        )
+        val outWidth = (canvasWidth * scale).toInt().coerceAtLeast(1)
+        val outHeight = (canvasHeight * scale).toInt().coerceAtLeast(1)
+
+        val outBitmap = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(outBitmap)
+        canvas.drawColor(backgroundColor)
         val paint = Paint().apply { isFilterBitmap = true }
 
-        // Second pass: decode each image and draw it at its natural size.
+        // Second pass: decode each image and draw it centered, scaled to fit its
+        // cell; leftover space shows the background color.
         cells.forEachIndexed { index, cell ->
             if (cell.width == 0) return@forEachIndexed
             val opts = BitmapFactory.Options().apply { inSampleSize = cell.sampleSize }
@@ -183,10 +184,18 @@ object ImageUtil {
             } catch (e: Exception) {
                 null
             } ?: return@forEachIndexed
+
+            val row = index / colCount
+            val col = index % colCount
+            val fitScale = minOf(cellW.toFloat() / cell.width, cellH.toFloat() / cell.height)
+            val drawW = cell.width * fitScale
+            val drawH = cell.height * fitScale
+            val left = (col * cellW + (cellW - drawW) / 2f) * scale
+            val top = (row * cellH + (cellH - drawH) / 2f) * scale
             canvas.drawBitmap(
                 src,
-                xOffsets[index].toFloat(),
-                yOffsets[index / columns].toFloat(),
+                null,
+                RectF(left, top, left + drawW * scale, top + drawH * scale),
                 paint
             )
             src.recycle()

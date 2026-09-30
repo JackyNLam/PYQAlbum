@@ -28,11 +28,14 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   2. Or tap drawer ✨ AI Rating to go directly to AI Rating view
   3. The AI Rating screen shows all selected images in a **square grid** (no separate list view)
   4. **Save Config** button persists API Key + Model name
-  5. **Run AI Rating** button (above the image grid) starts scoring in the **background** (WorkManager) — rating continues even if you leave the screen; a progress bar + status line appear right below the button while it runs
+  5. **Run AI Rating** button (above the image grid) starts scoring in the **background** (WorkManager) — rating continues even if you leave the screen; a determinate progress bar + "X/Y images done" + status line appear right below the button while it runs
   6. **Submit to AI Rating** button (below the grid) runs the same scoring in the foreground with real-time progress feedback and a full debug log
-  7. Selection persists across app launches (SharedPreferences)
+  7. **Stop button** appears while either run is active — cancels the foreground scoring (per-image, responsive) or the background WorkManager job
+  8. No image-count limit — selections of any size are rated (URI list is passed to the background worker via a cache file, sidestepping WorkManager's 10 KiB input-data cap)
+  9. Selection persists across app launches (SharedPreferences)
 - **Multi-select mode**: long-press enters multi-select; the bottom bar's ⋮ menu has **Select All / Deselect All** (applies to the current folder or tag view), **Collage**, batch Tag / Rate / Remove Tags / AI Ranking / Remove AI Info, **Copy to…** and **Move to…** (SAF folder picker to choose destination), and **Delete**
-- **Collage**: select ≥2 images → ⋮ → **Collage** — images are packed edge-to-edge at their original size (no padding or background fill) and saved to `Pictures/PYQAlbum/collage_<timestamp>.jpg`; all inputs plus the output are auto-tagged with a unique **`Collage <timestamp>`** tag so the set is easy to find and re-edit under the Tag view
+- **Remove Tags** (multi-select ⋮) lists **only the tags actually present on the selected images** — tags that none of the selected images carry are not offered
+- **Collage**: select ≥2 images → ⋮ → **Collage** — opens an options dialog first: **background color** for empty space (White / Black / Gray / Beige / Light Blue / Pink), **number of columns** (2–5), and **image order** (▲▼ reorder; images flow left-to-right, top-to-bottom). Images are scaled to fit uniform cells on the chosen background and saved to `Pictures/PYQAlbum/collage_<timestamp>.jpg`; all inputs plus the output are auto-tagged with a unique **`Collage <timestamp>`** tag so the set is easy to find and re-edit under the Tag view
 - **Copy**: files are written via ContentResolver stream to the chosen folder (works on all Android versions)
 - **Move**: real file move — same-volume moves use `File.renameTo` (instant, preserves the modified date); cross-volume / content-only URIs fall back to copy + restore the modified date + delete the source (API 30+ uses a recoverable delete request)
 - **Default destination**: `Pictures/PYQAlbum/` (fallback if external folder can't be resolved)
@@ -191,9 +194,11 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - Model Name input (e.g. `qwen3.8-omni-flash`)
   - **Save Config** button — persists both API Key and Model name
 - **Run AI Rating** button — sits **above the image grid** and runs the rating in the **background** via WorkManager (keeps running even if you leave the screen)
-  - While any rating is in progress, a progress bar appears **below the button**: determinate (images processed / total) during the foreground flow, indeterminate for background runs, with a status line
+  - While any rating is in progress, a **determinate progress bar** appears below the button with "**X / Y images done**", a percentage, and a phase status line ("Resizing… / AI Rating — n/m images / Saving scores…") — for both foreground and background runs (background progress is polled via `BackgroundProgress`)
   - Polls the background worker every 2 seconds (`AiRatingWorkManager.isRunning`) and shows the background worker's debug log on-screen in the same terminal-style panel ("Clear Background Debug Log")
   - Disabled while a foreground or background run is active, or when there is no API key or selection
+  - A red **Stop** button replaces the progress area controls while a run is active: it cancels the foreground coroutine immediately (mid-batch HTTP calls are aborted via OkHttp call cancellation) or cancels the WorkManager job for background runs
+  - Handles **more than 50 images** — the Worker's URI list is passed through a cache file, so arbitrary selection sizes work (WorkManager input data is capped at 10 KiB)
 - **Selected images** shown in a **3-column square grid** (not a list view):
   - Each thumbnail has a green border + ✕ overlay
   - Tap any thumbnail to deselect it

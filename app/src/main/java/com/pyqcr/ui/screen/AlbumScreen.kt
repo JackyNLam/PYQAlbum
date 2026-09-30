@@ -10,6 +10,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -18,6 +19,7 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -32,11 +34,14 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -111,6 +116,8 @@ fun AlbumScreen(
     var showRateDialog by remember { mutableStateOf(false) }
     var showRemoveTagsDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    // Tags that exist on the currently selected images (for the Remove Tags dialog)
+    var selectedImageTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
 
     // Tag mode local state
     var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
@@ -226,71 +233,91 @@ fun AlbumScreen(
 
     // Collage creation state
     var isCreatingCollage by remember { mutableStateOf(false) }
+    var showCollageDialog by remember { mutableStateOf(false) }
+    var collageColumns by remember { mutableIntStateOf(3) }
+    var collageBgColor by remember { mutableIntStateOf(android.graphics.Color.WHITE) }
+    var collageImageOrder by remember { mutableStateOf<List<String>>(emptyList()) }
 
-    /** Build a collage from the current selection; tag the input images + the collage
-     *  output with a unique tag so the whole set can be found and edited together. */
-    val createCollageFromSelection: () -> Unit = {
+    /** Open the collage options dialog (background color / columns / image order). */
+    val openCollageDialog: () -> Unit = {
         val uris = selectedImageUris.toList()
         if (uris.size < 2) {
             scope.launch { snackbarHostState.showSnackbar("Select at least 2 images to make a collage") }
         } else if (!isCreatingCollage) {
-            isCreatingCollage = true
-            scope.launch {
-                try {
-                    val tagName = "Collage " + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-                    val fileName = "collage_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date()) + ".jpg"
+            collageImageOrder = uris
+            collageColumns = minOf(3, uris.size)
+            showCollageDialog = true
+        }
+    }
 
-                    // Create the unique tag if it does not exist yet
-                    var tag = tagDao.getTagByName(tagName)
-                    var tagId = if (tag != null) tag.id else tagDao.insertTag(TagEntity(name = tagName))
-                    if (tagId == -1L) {
-                        tag = tagDao.getTagByName(tagName)
-                        tagId = tag?.id ?: -1L
-                    }
-                    if (tagId == -1L) {
-                        snackbarHostState.showSnackbar("Failed to create the collage tag")
-                        return@launch
-                    }
+    /** Build a collage from [uris] (already in the user's chosen order); tag the
+     *  input images + the collage output with a unique tag so the whole set can
+     *  be found and edited together. */
+    val buildCollage: (List<String>) -> Unit = { orderedUris ->
+        isCreatingCollage = true
+        showCollageDialog = false
+        scope.launch {
+            try {
+                val tagName = "Collage " + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+                val fileName = "collage_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date()) + ".jpg"
 
-                    // Build the collage grid and save it to Pictures/PYQAlbum/
-                    val bitmap = withContext(Dispatchers.IO) { ImageUtil.createCollage(context, uris) }
-                    if (bitmap == null) {
-                        snackbarHostState.showSnackbar("Failed to create collage — could not decode the selected images")
-                        return@launch
-                    }
-                    val collageUri = withContext(Dispatchers.IO) { ImageUtil.saveCollageBitmap(context, bitmap, fileName) }
-                    if (collageUri == null) {
-                        snackbarHostState.showSnackbar("Failed to save the collage image")
-                        return@launch
-                    }
-
-                    // Register the collage in the library (folder PYQAlbum) so it shows up immediately
-                    val imageDao = app.database.imageDao()
-                    imageDao.insertImage(
-                        ImageEntity(
-                            uri = collageUri,
-                            displayName = fileName,
-                            width = bitmap.width,
-                            height = bitmap.height,
-                            sizeBytes = bitmap.byteCount.toLong(),
-                            dateAdded = System.currentTimeMillis() / 1000,
-                            folderName = "PYQAlbum"
-                        )
-                    )
-
-                    // Tag every original input + the collage output with the unique tag
-                    tagDao.addTagToImages((uris + collageUri).map { uri ->
-                        ImageTagCrossRef(imageUri = uri, tagId = tagId)
-                    })
-
-                    snackbarHostState.showSnackbar("Collage saved & tagged \"$tagName\"")
-                    isMultiSelectMode = false
-                    selectedImageUris = emptySet()
-                } catch (e: Exception) {
-                    snackbarHostState.showSnackbar("Collage failed: ${e.message}")
-                } finally {
-                    isCreatingCollage = false
+                // Create the unique tag if it does not exist yet
+                var tag = tagDao.getTagByName(tagName)
+                var tagId = if (tag != null) tag.id else tagDao.insertTag(TagEntity(name = tagName))
+                if (tagId == -1L) {
+                    tag = tagDao.getTagByName(tagName)
+                    tagId = tag?.id ?: -1L
                 }
+                if (tagId == -1L) {
+                    snackbarHostState.showSnackbar("Failed to create the collage tag")
+                    return@launch
+                }
+
+                // Build the collage grid and save it to Pictures/PYQAlbum/
+                val bitmap = withContext(Dispatchers.IO) {
+                    ImageUtil.createCollage(
+                        context = context,
+                        sourceUris = orderedUris,
+                        columns = collageColumns,
+                        backgroundColor = collageBgColor
+                    )
+                }
+                if (bitmap == null) {
+                    snackbarHostState.showSnackbar("Failed to create collage — could not decode the selected images")
+                    return@launch
+                }
+                val collageUri = withContext(Dispatchers.IO) { ImageUtil.saveCollageBitmap(context, bitmap, fileName) }
+                if (collageUri == null) {
+                    snackbarHostState.showSnackbar("Failed to save the collage image")
+                    return@launch
+                }
+
+                // Register the collage in the library (folder PYQAlbum) so it shows up immediately
+                val imageDao = app.database.imageDao()
+                imageDao.insertImage(
+                    ImageEntity(
+                        uri = collageUri,
+                        displayName = fileName,
+                        width = bitmap.width,
+                        height = bitmap.height,
+                        sizeBytes = bitmap.byteCount.toLong(),
+                        dateAdded = System.currentTimeMillis() / 1000,
+                        folderName = "PYQAlbum"
+                    )
+                )
+
+                // Tag every original input + the collage output with the unique tag
+                tagDao.addTagToImages((orderedUris + collageUri).map { uri ->
+                    ImageTagCrossRef(imageUri = uri, tagId = tagId)
+                })
+
+                snackbarHostState.showSnackbar("Collage saved & tagged \"$tagName\"")
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            } catch (e: Exception) {
+                snackbarHostState.showSnackbar("Collage failed: ${e.message}")
+            } finally {
+                isCreatingCollage = false
             }
         }
     }
@@ -780,7 +807,7 @@ fun AlbumScreen(
                         onSelectAll = {
                             selectedImageUris = if (allContextSelected) emptySet() else selectedImageUris + contextUris.toSet()
                         },
-                        onCollage = { createCollageFromSelection() },
+                        onCollage = { openCollageDialog() },
                         onAddTag = {
                             showTagDialog = true
                         },
@@ -1228,9 +1255,13 @@ fun AlbumScreen(
                 )
             }
 
-            // Remove Tags dialog
+            // Remove Tags dialog — only tags actually present on the selected images
             if (showRemoveTagsDialog) {
                 var tagToRemove by remember { mutableStateOf<TagEntity?>(null) }
+                // Reload the tags of the current selection whenever the dialog opens
+                LaunchedEffect(showRemoveTagsDialog, selectedImageUris) {
+                    selectedImageTags = tagDao.getTagsForImages(selectedImageUris.toList())
+                }
                 AlertDialog(
                     onDismissRequest = { showRemoveTagsDialog = false },
                     title = { Text("Remove Tags from ${selectedImageUris.size} image(s)") },
@@ -1238,9 +1269,9 @@ fun AlbumScreen(
                         Column {
                             Text("Select a tag to remove from all selected images:")
                             Spacer(Modifier.height(8.dp))
-                            if (allTags.isNotEmpty()) {
+                            if (selectedImageTags.isNotEmpty()) {
                                 LazyColumn(modifier = Modifier.heightIn(max = 250.dp)) {
-                                    items(allTags) { tag ->
+                                    items(selectedImageTags, key = { it.id }) { tag ->
                                         OutlinedButton(
                                             onClick = { tagToRemove = tag },
                                             modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
@@ -1254,21 +1285,39 @@ fun AlbumScreen(
                                     }
                                 }
                             } else {
-                                Text("No tags available.")
+                                Text("No tags on the selected images.")
                             }
                         }
                     },
                     confirmButton = {
-                        TextButton(onClick = {
-                            tagToRemove?.let { tag ->
-                                viewModel.batchRemoveTagsFromImages(selectedImageUris.toList(), tag.name)
-                            }
-                            showRemoveTagsDialog = false
-                        }) { Text("Remove") }
+                        TextButton(
+                            onClick = {
+                                tagToRemove?.let { tag ->
+                                    viewModel.batchRemoveTagsFromImages(selectedImageUris.toList(), tag.name)
+                                }
+                                showRemoveTagsDialog = false
+                            },
+                            enabled = tagToRemove != null
+                        ) { Text("Remove") }
                     },
                     dismissButton = {
                         TextButton(onClick = { showRemoveTagsDialog = false }) { Text("Cancel") }
                     }
+                )
+            }
+            // Collage options dialog — background color / columns / image order
+            if (showCollageDialog) {
+                CollageOptionsDialog(
+                    imageUris = collageImageOrder,
+                    allImages = allImages,
+                    columns = collageColumns,
+                    onColumnsChange = { collageColumns = it },
+                    bgColor = collageBgColor,
+                    onBgColorChange = { collageBgColor = it },
+                    order = collageImageOrder,
+                    onOrderChange = { collageImageOrder = it },
+                    onConfirm = { buildCollage(collageImageOrder) },
+                    onDismiss = { showCollageDialog = false }
                 )
             }
             // Delete confirmation dialog (Android 9 and below — no system delete dialog)
@@ -1685,6 +1734,153 @@ private fun ImageGridCell(
 
 enum class BrowseMode { FOLDER, TAG }
 private enum class ViewLayout { GRID, WATERFALL, JUSTIFIED }
+
+// ---------- Collage options ----------
+
+/** Preset background colors offered in the collage options dialog. */
+private val CollageBgPresets = listOf(
+    "White" to Color.White,
+    "Black" to Color.Black,
+    "Light Gray" to Color(0xFFE0E0E0),
+    "Beige" to Color(0xFFF5F5DC),
+    "Light Blue" to Color(0xFFBBDEFB),
+    "Pink" to Color(0xFFF8BBD0)
+)
+
+/**
+ * Lets the user configure the collage before it is built:
+ * background color for empty space, number of columns, and the image order.
+ */
+@Composable
+private fun CollageOptionsDialog(
+    imageUris: List<String>,
+    allImages: List<ImageItem>,
+    columns: Int,
+    onColumnsChange: (Int) -> Unit,
+    bgColor: Int,
+    onBgColorChange: (Int) -> Unit,
+    order: List<String>,
+    onOrderChange: (List<String>) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Collage Options (${imageUris.size} images)") },
+        text = {
+            Column {
+                // Background color for empty space
+                Text("Background color", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CollageBgPresets.forEach { (_, color) ->
+                        val selected = color.toArgb() == bgColor
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(color)
+                                .border(
+                                    width = if (selected) 3.dp else 1.dp,
+                                    color = if (selected) MaterialTheme.colorScheme.primary else Color.Gray,
+                                    shape = CircleShape
+                                )
+                                .clickable { onBgColorChange(color.toArgb()) }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                // Number of columns
+                Text("Columns", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    (2..5).forEach { c ->
+                        FilterChip(
+                            selected = columns == c,
+                            onClick = { onColumnsChange(c) },
+                            enabled = c <= imageUris.size,
+                            label = { Text("$c") }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                // Image order
+                Text("Image order", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Images are placed left-to-right, top-to-bottom in the order below — use ▲▼ to reorder.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
+                    itemsIndexed(order) { index, uri ->
+                        val name = allImages.find { it.uri == uri }?.displayName
+                            ?: uri.substringAfterLast('/')
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${index + 1}.",
+                                modifier = Modifier.width(28.dp),
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(
+                                onClick = { onOrderChange(moveCollageItem(order, index, index - 1)) },
+                                enabled = index > 0
+                            ) {
+                                Icon(
+                                    Icons.Default.ArrowUpward,
+                                    contentDescription = "Move up",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { onOrderChange(moveCollageItem(order, index, index + 1)) },
+                                enabled = index < order.size - 1
+                            ) {
+                                Icon(
+                                    Icons.Default.ArrowDownward,
+                                    contentDescription = "Move down",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Create Collage") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+/** Return [list] with the element at [from] moved to [to] (bounds-safe). */
+private fun moveCollageItem(list: List<String>, from: Int, to: Int): List<String> {
+    if (from < 0 || to < 0 || from >= list.size || to >= list.size || from == to) return list
+    val result = list.toMutableList()
+    val item = result.removeAt(from)
+    result.add(to, item)
+    return result
+}
 
 // Used by RatingScreen.kt (still accessible via nav route)
 enum class SortMode { USER_RATING_DESC, AI_SCORE_DESC }

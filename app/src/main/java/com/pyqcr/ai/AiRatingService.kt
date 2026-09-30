@@ -5,14 +5,21 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.pyqcr.data.model.AiRatingResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.io.File
+import java.io.IOException
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.coroutineContext
 
 /**
  * AI Rating Service that calls DashScope (Alibaba Cloud Bailian) API.
@@ -66,6 +73,11 @@ class AiRatingService {
         val totalBatches = (resizedImagePaths.size + batchSize - 1) / batchSize
 
         while (pendingPaths.isNotEmpty()) {
+            // Cooperative cancellation — allows the UI Stop button to abort
+            // between batches (and the cancellable HTTP call below aborts
+            // mid-batch).
+            coroutineContext.ensureActive()
+
             val batch = pendingPaths.take(batchSize)
             pendingPaths.removeAll(batch)
             batchNum++
@@ -111,11 +123,12 @@ class AiRatingService {
             var batchDone = false
 
             while (!batchDone && retryCount < maxRetries) {
+                coroutineContext.ensureActive()
                 retryCount++
                 try {
                     onDebug("▶️ Sending batch $batchNum/$totalBatches (${batch.size} images, attempt $retryCount/$maxRetries)...")
                     val startTime = System.currentTimeMillis()
-                    val response = client.newCall(request).execute()
+                    val response = executeCancellable(request)
                     val elapsedMs = System.currentTimeMillis() - startTime
                     val responseCode = response.code
                     val responseHeaders = response.headers.toString()
@@ -234,6 +247,10 @@ class AiRatingService {
                     batchDone = true
                     onDebug("✅ Batch $batchNum completed — $batchSucceeded images scored successfully")
 
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // Let cancellation (Stop button / WorkManager cancel) propagate
+                    // cleanly instead of logging it as a failure.
+                    throw e
                 } catch (e: Exception) {
                     onDebug("❌ EXCEPTION for batch $batchNum (attempt $retryCount/$maxRetries): ${e::class.simpleName}: ${e.message}")
                     onDebug("Stack trace: ${e.stackTraceToString().take(1000)}")
@@ -254,6 +271,29 @@ class AiRatingService {
         onProgress(resizedImagePaths.size, resizedImagePaths.size)
         allResults
     }
+
+    /**
+     * Execute an OkHttp request as a cancellable suspend function.
+     *
+     * When the surrounding coroutine is cancelled (e.g. the user taps Stop),
+     * the in-flight HTTP call is cancelled immediately instead of blocking the
+     * IO thread until the read timeout elapses.
+     */
+    private suspend fun executeCancellable(request: Request): Response =
+        suspendCancellableCoroutine { cont ->
+            val call = client.newCall(request)
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    // No-op resume after cancellation is safe.
+                    cont.resumeWithException(e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    cont.resume(response)
+                }
+            })
+        }
 
     /**
      * Return a human-readable message for API errors that will never succeed on retry.

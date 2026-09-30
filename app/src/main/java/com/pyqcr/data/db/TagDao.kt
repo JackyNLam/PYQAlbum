@@ -50,6 +50,14 @@ interface TagDao {
     """)
     fun getTagsForImage(imageUri: String): Flow<List<TagEntity>>
 
+    @Query("""
+        SELECT DISTINCT t.* FROM tags t
+        INNER JOIN image_tag_cross_ref c ON t.id = c.tagId
+        WHERE c.imageUri IN (:imageUris)
+        ORDER BY t.name
+    """)
+    suspend fun getTagsForImages(imageUris: List<String>): List<TagEntity>
+
     @Query("SELECT c.imageUri FROM image_tag_cross_ref c WHERE c.tagId = :tagId")
     suspend fun getImageUrisForTag(tagId: Long): List<String>
 

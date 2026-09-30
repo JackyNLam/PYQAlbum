@@ -10,6 +10,7 @@ import com.pyqcr.PyqCrApp
 import com.pyqcr.data.repository.AlbumRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
+import java.io.File
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -18,7 +19,12 @@ import kotlin.coroutines.coroutineContext
  * Input data keys:
  *  - "apiKey" : the DashScope API key
  *  - "modelName" : model name (e.g. qwen3.8-omni-flash)
- *  - "imageUris" : comma-separated list of content:// URIs to rate (limit 50)
+ *  - "urisFile" : absolute path of a cache file with one content:// URI per line
+ *                 (written by AiRatingWorkManager; deleted after reading).
+ *
+ * The URI list is passed via a file rather than the WorkRequest input data so
+ * that arbitrarily large selections (>50 images) can be rated — WorkManager's
+ * Data payload is capped at 10 KiB.
  *
  * NOTE: Running as a foreground worker requires the app manifest to declare
  * android:foregroundServiceType="dataSync" on WorkManager's SystemForegroundService,
@@ -69,16 +75,27 @@ class AiRatingWorker(
     private suspend fun runRating(): Result {
         val apiKey = inputData.getString("apiKey") ?: return Result.failure()
         val modelName = inputData.getString("modelName") ?: "qwen3.8-omni-flash"
-        val imageUris = (inputData.getString("imageUris") ?: "")
-            .split(",")
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
+        // Read the URI list from the cache file; fall back to the legacy
+        // comma-separated "imageUris" input data if no file was provided.
+        val urisFile = inputData.getString("urisFile")
+        val imageUris = if (urisFile != null) {
+            val f = File(urisFile)
+            val lines = if (f.exists()) f.readLines() else emptyList()
+            f.delete()
+            lines.map { it.trim() }.filter { it.isNotBlank() }
+        } else {
+            (inputData.getString("imageUris") ?: "")
+                .split(",")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+        }
         val totalImages = imageUris.size
 
         if (imageUris.isEmpty()) return Result.success()
 
-        // Start a fresh on-screen debug log for this session (worker -> UI polling)
+        // Start a fresh on-screen debug log + progress state for this session
         BackgroundDebugLog.clear()
+        BackgroundProgress.reset()
 
         val log = { msg: String ->
             Log.d(TAG, msg)
@@ -95,7 +112,8 @@ class AiRatingWorker(
         val resizedPaths = mutableListOf<String>()
         val resizedToOriginalUri = mutableMapOf<String, String>()
         for ((idx, uriStr) in imageUris.withIndex()) {
-            safeSetForeground(createForegroundInfo("Resizing (${idx + 1}/$totalImages)...", idx, totalImages))
+            BackgroundProgress.update(BackgroundProgress.PHASE_RESIZING, idx + 1, totalImages, "Resizing (${idx + 1}/$totalImages)")
+            safeSetForeground(createForegroundInfo("Resizing (${idx + 1}/$totalImages)...", idx + 1, totalImages))
             log("Resizing [${idx + 1}/$totalImages]: ${uriStr.substringAfterLast('/')}")
             val resized = resizer.resizeForAi(Uri.parse(uriStr))
             if (resized != null) {
@@ -109,6 +127,7 @@ class AiRatingWorker(
 
         if (resizedPaths.isEmpty()) {
             log("No images could be resized")
+            BackgroundProgress.update(BackgroundProgress.PHASE_DONE, 0, totalImages, "No images could be resized")
             safeSetForeground(createFinishedForegroundInfo(0, totalImages))
             return Result.success()
         }
@@ -125,6 +144,7 @@ class AiRatingWorker(
             resizedImagePaths = resizedPaths,
             onProgress = { current, totalCount ->
                 val label = "AI Rating — $current/$totalCount images"
+                BackgroundProgress.update(BackgroundProgress.PHASE_RATING, current, totalCount, label)
                 // Non-suspend callback: use the async variant of setForeground
                 safeSetForegroundAsync(createForegroundInfo(label, current, totalCount))
                 log("Progress: $current/$totalCount")
@@ -140,7 +160,8 @@ class AiRatingWorker(
 
         // Step 3: Save results
         var savedCount = 0
-        for ((_idx, result) in ratingResults.withIndex()) {
+        BackgroundProgress.update(BackgroundProgress.PHASE_SAVING, 0, ratingResults.size, "Saving scores...")
+        for ((idx, result) in ratingResults.withIndex()) {
             val origUri = resizedToOriginalUri[result.imageUri]
                 ?: resizedToOriginalUri.entries.firstOrNull { it.key.endsWith(result.imageName) }?.value
 
@@ -151,11 +172,18 @@ class AiRatingWorker(
                 }
                 savedCount++
             }
+            BackgroundProgress.update(
+                BackgroundProgress.PHASE_SAVING,
+                idx + 1,
+                ratingResults.size,
+                "Saving scores... ($savedCount saved)"
+            )
             coroutineContext.ensureActive()
         }
 
         resizer.clearCache()
         log("Done: $savedCount scores saved")
+        BackgroundProgress.update(BackgroundProgress.PHASE_DONE, savedCount, totalImages, "Done: $savedCount scores saved")
 
         // Final notification: error if nothing was saved and we have a reason
         if (savedCount == 0) {
