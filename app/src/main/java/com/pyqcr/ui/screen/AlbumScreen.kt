@@ -142,6 +142,9 @@ fun AlbumScreen(
     //    (SD card, cloud providers, Android 11+ scoped-storage paths).
     var targetFolderForOperation by remember { mutableStateOf<File?>(null) }
     var selectedTreeUri by remember { mutableStateOf<Uri?>(null) }
+    // Offers "All files access" once (API 30+) — the file-manager-style permission
+    // that lets copy/move write into ANY folder via direct paths.
+    var showFullAccessDialog by remember { mutableStateOf(false) }
 
     /** Launch a copy or move operation on selected URIs. */
     val launchCopyMove: (String, List<String>, File?, Uri?) -> Unit = { operation, uris, destDir, treeUri ->
@@ -206,10 +209,42 @@ fun AlbumScreen(
             // path is kept only when resolution succeeds (internal storage).
             selectedTreeUri = treeUri
             targetFolderForOperation = resolveTreeUriToPath(treeUri)
-            pendingOperation?.let { op ->
-                pendingOperation = null
-                launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation, selectedTreeUri)
+            val op = pendingOperation
+            if (op != null) {
+                val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+                        !android.os.Environment.isExternalStorageManager()
+                if (needFullAccess) {
+                    // Keep pendingOperation so the copy/move resumes after the
+                    // user decides in the dialog — either from the Settings page
+                    // (permission granted → direct-path write, works everywhere)
+                    // or via "Continue without it" → SAF as before.
+                    showFullAccessDialog = true
+                } else {
+                    pendingOperation = null
+                    launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation, selectedTreeUri)
+                }
             }
+        }
+    }
+
+    // Opens the "All files access" settings page; on return the pending copy/move
+    // runs automatically (with the permission it uses direct paths like a file
+    // manager; without it, it falls back to SAF).
+    val fullAccessLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        pendingOperation?.let { op ->
+            pendingOperation = null
+            launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation, selectedTreeUri)
+        }
+    }
+
+    /** Runs the pending copy/move now — used when the user declines All files access. */
+    val continueCopyMoveWithoutFullAccess: () -> Unit = {
+        showFullAccessDialog = false
+        pendingOperation?.let { op ->
+            pendingOperation = null
+            launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation, selectedTreeUri)
         }
     }
 
@@ -1197,6 +1232,46 @@ fun AlbumScreen(
 
             // --- Batch operation dialogs ---
 
+            // All files access offer (API 30+) — shown after picking a copy/move
+            // destination when the app still lacks the file-manager-style permission.
+            // With it, copies/moves write via direct paths into ANY folder; without
+            // it the app keeps using the SAF per-folder grant.
+            if (showFullAccessDialog) {
+                AlertDialog(
+                    onDismissRequest = { continueCopyMoveWithoutFullAccess() },
+                    title = { Text("Copy/Move to any folder?") },
+                    text = {
+                        Text(
+                            "The chosen folder sits outside Android's media folders, which " +
+                            "normal apps cannot write to directly. Granting \"All files access\" " +
+                            "(the same permission your file manager has) lets the app copy/move " +
+                            "into ANY folder on this phone, exactly like a file manager.\n\n" +
+                            "Android will open a settings screen — enable the switch there, then " +
+                            "the copy/move starts automatically."
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showFullAccessDialog = false
+                            try {
+                                fullAccessLauncher.launch(
+                                    Intent(
+                                        android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                )
+                            } catch (e: Exception) {
+                                // No such settings screen on this device — just proceed
+                                continueCopyMoveWithoutFullAccess()
+                            }
+                        }) { Text("Grant access") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { continueCopyMoveWithoutFullAccess() }) { Text("Later") }
+                    }
+                )
+            }
+
             // Add Tag dialog
             if (showTagDialog) {
                 var tagInput by remember { mutableStateOf("") }
@@ -1938,9 +2013,13 @@ private fun resolveTreeUriToPath(treeUri: Uri): File? {
             val relativePath = docId.removePrefix("primary:")
             File(android.os.Environment.getExternalStorageDirectory(), relativePath)
         } else {
-            // SD card or other volume — hard to resolve to a real File path on modern Android
-            // The retained SAF tree URI covers writes here instead (see launchCopyMove).
-            null
+            // Secondary volume (SD card): the docId volume label doubles as the
+            // mount point (e.g. /storage/1C23-45AB). Direct-path I/O there only
+            // works with "All files access" granted — otherwise the raw write
+            // fails with EACCES and the SAF tree URI covers it (see launchCopyMove).
+            val colon = docId.indexOf(':')
+            if (colon > 0) File("/storage/${docId.substring(0, colon)}", docId.substring(colon + 1))
+            else null
         }
     } catch (e: Exception) {
         null

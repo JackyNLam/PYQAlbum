@@ -220,7 +220,8 @@ object FileOperationHelper {
                 val docUri = createSafDocument(context, treeUri, mimeTypeFor(fileName), availableName)
                     ?: return@withContext FileOpResult(
                         false, null,
-                        "Cannot create file in the chosen folder — it may be read-only or blocked"
+                        "Cannot create files in the chosen folder (read-only or blocked by the ROM) — " +
+                        "granting All files access from the copy/move prompt enables any folder"
                     )
 
                 val input = context.contentResolver.openInputStream(contentUri)
@@ -242,7 +243,14 @@ object FileOperationHelper {
     /** Create a new document inside the tree, returning its content uri. */
     private fun createSafDocument(context: Context, treeUri: Uri, mimeType: String, displayName: String): Uri? {
         return try {
-            DocumentsContract.createDocument(context.contentResolver, treeUri, mimeType, displayName)
+            val created = DocumentsContract.createDocument(context.contentResolver, treeUri, mimeType, displayName)
+            if (created != null) return created
+            // Some providers misbehave when handed a pure tree URI — retry using
+            // the tree-root document URI, the classic form.
+            val rootDoc = DocumentsContract.buildDocumentUriUsingTree(
+                treeUri, DocumentsContract.getTreeDocumentId(treeUri)
+            )
+            DocumentsContract.createDocument(context.contentResolver, rootDoc, mimeType, displayName)
         } catch (e: Exception) {
             Log.w(TAG, "createDocument failed for $displayName", e)
             null

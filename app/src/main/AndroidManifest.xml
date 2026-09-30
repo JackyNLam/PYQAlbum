@@ -10,6 +10,15 @@
     <!-- Save modified images -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
+    <!--
+        All files access (optional, API 30+): lets copy/move write into ANY folder
+        on the phone (non-media folders, SD cards) via direct paths, just like a
+        file manager. The user grants it once in Settings; without it the app falls
+        back to the SAF per-folder grant. Restricted by Google Play policy, but
+        this app is distributed via direct APK installs.
+    -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
     <!-- Network for AI API -->
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Foreground service for background AI rating -->
