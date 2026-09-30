@@ -20,6 +20,8 @@ import java.io.IOException
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * AI Rating Service that calls DashScope (Alibaba Cloud Bailian) API.

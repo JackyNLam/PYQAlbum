@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -1309,7 +1310,7 @@ fun AlbumScreen(
             if (showCollageDialog) {
                 CollageOptionsDialog(
                     imageUris = collageImageOrder,
-                    allImages = allImages,
+                    allImages = images,
                     columns = collageColumns,
                     onColumnsChange = { collageColumns = it },
                     bgColor = collageBgColor,
