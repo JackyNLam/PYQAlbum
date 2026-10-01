@@ -614,10 +614,29 @@ object FileOperationHelper {
         if (destination.startsWith("/")) return resolveContentUriByPath(context, destination)
         if (destination.startsWith("content://") && treeUri != null) {
             return try {
+                // DocumentsContract.getDocumentPath is a hidden API, so resolve the
+                // document's path under the tree manually from the doc IDs, e.g.
+                // docId "primary:DCIM/A/1.jpg" under tree "primary:DCIM/A" -> "/1.jpg".
                 val docId = DocumentsContract.getDocumentId(Uri.parse(destination))
-                val docPath = DocumentsContract.getDocumentPath(treeUri, docId) ?: return null
-                val fullPath = Environment.getExternalStorageDirectory().absolutePath +
-                    File.separator + (docPath.path?.trimStart('/') ?: return null)
+                val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
+                val docParts = docId.split(":", limit = 2)
+                val treeParts = treeDocId.split(":", limit = 2)
+                if (docParts.size != 2 || treeParts.size != 2 || docParts[0] != treeParts[0]) {
+                    return null
+                }
+                if (!docParts[1].startsWith(treeParts[1])) return null
+                val treePath = treeParts[1].trim('/')
+                val relPath = docParts[1].removePrefix(treeParts[1]).trimStart('/')
+                val volumeRoot = if (docParts[0].equals("primary", ignoreCase = true)) {
+                    Environment.getExternalStorageDirectory().absolutePath
+                } else {
+                    resolveVolumeRoot(context, docParts[0]) ?: return null
+                }
+                val fullPath = buildString {
+                    append(volumeRoot)
+                    if (treePath.isNotEmpty()) append(File.separator).append(treePath)
+                    if (relPath.isNotEmpty()) append(File.separator).append(relPath)
+                }
                 resolveContentUriByPath(context, fullPath)
             } catch (e: Exception) {
                 Log.w(TAG, "resolveNewImageUri failed for $destination: ${e.message}")
@@ -625,6 +644,19 @@ object FileOperationHelper {
             }
         }
         return null
+    }
+
+    /** Absolute root path of a secondary storage volume (e.g. an SD card) by its UUID. */
+    private fun resolveVolumeRoot(context: Context, volumeId: String): String? {
+        return try {
+            val sm = context.getSystemService(Context.STORAGE_SERVICE) as android.os.storage.StorageManager
+            sm.storageVolumes
+                .firstOrNull { it.isMounted && it.uuid?.equals(volumeId, ignoreCase = true) == true }
+                ?.directory?.absolutePath
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveVolumeRoot failed for $volumeId: ${e.message}")
+            null
+        }
     }
 
     /** Look up the MediaStore content URI of an image by its real file path. */

@@ -168,6 +168,23 @@ fun AlbumScreen(
         mutableStateOf<Triple<String, List<String>, Map<String, String>>?>(null)
     }
 
+    /** Re-point tag cross-refs to the new URI of each image that was just moved. */
+    fun remapMovedTags(oldToNew: Map<String, String>) {
+        if (oldToNew.isEmpty()) return
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                oldToNew.forEach { (oldUri, destination) ->
+                    val newUri = FileOperationHelper.resolveNewImageUri(
+                        context, destination, selectedTreeUri
+                    )
+                    if (newUri != null && newUri != oldUri) {
+                        tagDao.moveImageCrossRef(oldUri, newUri)
+                    }
+                }
+            }
+        }
+    }
+
     // System delete confirmation launcher for MOVE — one dialog for all source files
     // that were copied via MediaStore/SAF (API 30+). On confirm the originals are
     // trashed; on cancel the copies remain (the move becomes a copy).
@@ -276,23 +293,6 @@ fun AlbumScreen(
                 } catch (e: Exception) {
                     copyMoveMessage = "Operation failed: ${e.message}"
                     snackbarHostState.showSnackbar(copyMoveMessage)
-                }
-            }
-        }
-    }
-
-    /** Re-point tag cross-refs to the new URI of each image that was just moved. */
-    fun remapMovedTags(oldToNew: Map<String, String>) {
-        if (oldToNew.isEmpty()) return
-        scope.launch {
-            withContext(Dispatchers.IO) {
-                oldToNew.forEach { (oldUri, destination) ->
-                    val newUri = FileOperationHelper.resolveNewImageUri(
-                        context, destination, selectedTreeUri
-                    )
-                    if (newUri != null && newUri != oldUri) {
-                        tagDao.moveImageCrossRef(oldUri, newUri)
-                    }
                 }
             }
         }
@@ -2147,14 +2147,20 @@ private fun CollageOptionsDialog(
                         modifier = Modifier
                             .size(34.dp)
                             .clip(CircleShape)
-                            .background(
-                                if (useCustomColor) Color(customR, customG, customB)
-                                else Brush.linearGradient(
-                                    listOf(
-                                        Color.Red, Color.Yellow, Color.Green,
-                                        Color.Cyan, Color.Blue, Color.Magenta
+                            .then(
+                                if (useCustomColor) {
+                                    // Live preview of the custom color while sliders move
+                                    Modifier.background(Color(customR, customG, customB))
+                                } else {
+                                    Modifier.background(
+                                        Brush.linearGradient(
+                                            listOf(
+                                                Color.Red, Color.Yellow, Color.Green,
+                                                Color.Cyan, Color.Blue, Color.Magenta
+                                            )
+                                        )
                                     )
-                                )
+                                }
                             )
                             .border(
                                 width = if (useCustomColor) 3.dp else 1.dp,
