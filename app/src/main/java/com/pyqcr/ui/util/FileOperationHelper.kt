@@ -651,7 +651,11 @@ object FileOperationHelper {
         return try {
             val sm = context.getSystemService(Context.STORAGE_SERVICE) as android.os.storage.StorageManager
             sm.storageVolumes
-                .firstOrNull { it.isMounted && it.uuid?.equals(volumeId, ignoreCase = true) == true }
+                .firstOrNull {
+                    // StorageVolume.isMounted is hidden; getState() is the public equivalent.
+                    (it.state == Environment.MEDIA_MOUNTED || it.state == Environment.MEDIA_MOUNTED_READ_ONLY)
+                        && it.uuid?.equals(volumeId, ignoreCase = true) == true
+                }
                 ?.directory?.absolutePath
         } catch (e: Exception) {
             Log.w(TAG, "resolveVolumeRoot failed for $volumeId: ${e.message}")
