@@ -64,6 +64,17 @@ interface TagDao {
     @Query("SELECT DISTINCT c.imageUri FROM image_tag_cross_ref c")
     fun getAllTaggedImageUris(): Flow<List<String>>
 
+    /** Re-point one image's cross-refs to [newUri] (used after an in-app move). */
+    @Query("UPDATE image_tag_cross_ref SET imageUri = :newUri WHERE imageUri = :oldUri")
+    suspend fun moveImageCrossRef(oldUri: String, newUri: String)
+
+    /**
+     * Drop cross-refs whose image is no longer in the library (moved/deleted
+     * outside the app). [uris] must not be empty — SQLite rejects `NOT IN ()`.
+     */
+    @Query("DELETE FROM image_tag_cross_ref WHERE imageUri NOT IN (:uris)")
+    suspend fun deleteCrossRefsNotIn(uris: List<String>)
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun addTagToImages(crossRefs: List<ImageTagCrossRef>)
 

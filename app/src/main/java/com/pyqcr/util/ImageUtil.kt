@@ -96,16 +96,22 @@ object ImageUtil {
     }
 
     /**
-     * Build a collage bitmap from multiple image URIs in the order given.
+     * Build a collage bitmap by joining the source images edge-to-edge, without
+     * letterboxing and without downscaling the sources.
      *
-     * Images are laid out in a uniform grid of [columns] columns on a
-     * [backgroundColor] background. Every cell has the same size (the largest
-     * decoded image's width/height), so images with different aspect ratios are
-     * scaled to fit and letterboxed — the empty space around them shows the
-     * chosen background color instead of ripping the layout. Very large images
-     * are downsampled (power-of-two) so the longest side of each input is at
-     * most [maxSourceDimension], and the output bitmap is capped at
-     * [maxCanvasDimension] on its longest side to keep memory bounded.
+     * Images are arranged in [columns] columns, top-to-bottom. Every row fills
+     * the full canvas width: each image keeps its aspect ratio and is scaled
+     * only as much as needed so the row's combined width matches the widest row
+     * (measured at the tallest source's height). The canvas is the sum of the
+     * row sizes, so e.g. a 2×2 collage of four 12MP photos yields a ~48MP image
+     * (≈4× one original) — and mixed landscape/portrait sets are joined flush
+     * with no background bars, because each image has its own proportional cell.
+     *
+     * Output size is bounded only for safety: if the joined canvas would exceed
+     * [maxCanvasPixels] (or ~70% of the app heap), everything is scaled down
+     * uniformly so the request cannot OOM the process. Sources are decoded one
+     * at a time, at most as large as the cell they occupy in the final canvas,
+     * and recycled immediately.
      *
      * @return the collage bitmap, or null if none of the sources could be decoded.
      */
@@ -114,18 +120,17 @@ object ImageUtil {
         sourceUris: List<String>,
         columns: Int = 3,
         backgroundColor: Int = Color.WHITE,
-        maxSourceDimension: Int = 2048,
-        maxCanvasDimension: Int = 4096
+        maxCanvasPixels: Long = 120_000_000L
     ): Bitmap? {
         val contentResolver = context.contentResolver
         val n = sourceUris.size
         if (n == 0) return null
         val colCount = columns.coerceAtLeast(1)
 
-        // First pass: read each source's size and the sample size needed to
-        // decode it (kept per cell so the second pass decodes at these exact
-        // dimensions, which keeps the layout seamless).
-        data class Cell(val width: Int, val height: Int, val sampleSize: Int)
+        // Bounds pass — read each source's intrinsic size without decoding pixels.
+        // Cells stay aligned with [sourceUris] (unreadable sources get a zero
+        // placeholder) so the draw pass can map a cell back to its input URI.
+        data class Cell(val width: Int, val height: Int)
         val cells = ArrayList<Cell>(n)
         sourceUris.forEach { uriString ->
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -134,71 +139,93 @@ object ImageUtil {
                     BitmapFactory.decodeStream(input, null, bounds)
                 }
             } catch (e: Exception) {
-                // ignore — this cell is skipped
+                // ignore — this source is skipped
             }
             if (bounds.outWidth > 0 && bounds.outHeight > 0) {
-                var sampleSize = 1
-                while (kotlin.math.max(bounds.outWidth, bounds.outHeight) / sampleSize > maxSourceDimension) {
-                    sampleSize *= 2
-                }
-                cells.add(Cell(bounds.outWidth / sampleSize, bounds.outHeight / sampleSize, sampleSize))
+                cells.add(Cell(bounds.outWidth, bounds.outHeight))
             } else {
-                cells.add(Cell(0, 0, 1))
+                cells.add(Cell(0, 0))
             }
         }
-        val validCells = cells.filter { it.width > 0 }
-        if (validCells.isEmpty()) return null
+        // List of (index into sourceUris, bounds) for the readable sources only.
+        val valid = cells.mapIndexedNotNull { i, cell -> if (cell.width > 0) i to cell else null }
+        if (valid.isEmpty()) return null
 
-        // Uniform grid: all cells share the largest image's size, so the empty
-        // space inside a cell (letterboxing) is filled with the background color.
-        val cellW = validCells.maxOf { it.width }
-        val cellH = validCells.maxOf { it.height }
-        val rows = kotlin.math.ceil(n.toDouble() / colCount).toInt()
+        // Group the valid sources into rows of at most [colCount] images.
+        val rows = ArrayList<List<Int>>()
+        var index = 0
+        while (index < valid.size) {
+            val row = ArrayList<Int>()
+            repeat(minOf(colCount, valid.size - index)) { row.add(index); index++ }
+            rows.add(row)
+        }
 
-        val canvasWidth = cellW * colCount
-        val canvasHeight = cellH * rows
+        // Layout: canvas width = the widest row when each image sits at the
+        // tallest source's height; every row then fills that same width, so its
+        // height is width ÷ (sum of its aspect ratios) and nothing is letterboxed.
+        val rowAspectSums = rows.map { row ->
+            row.sumOf { valid[it].second.width.toDouble() / valid[it].second.height }
+        }
+        val refHeight = valid.maxOf { it.second.height }
+        val canvasWidthD = refHeight.toDouble() * (rowAspectSums.maxOrNull() ?: 0.0)
+        val rowHeights = rowAspectSums.map { (canvasWidthD / it).toFloat() }
+        val canvasHeight = rowHeights.sum()
+        val canvasWidth = canvasWidthD.toFloat()
 
-        // Keep the output bitmap bounded — very wide/tall layouts would otherwise OOM.
-        val scale = minOf(
-            1f,
-            maxCanvasDimension.toFloat() / canvasWidth.coerceAtLeast(1),
-            maxCanvasDimension.toFloat() / canvasHeight.coerceAtLeast(1)
-        )
+        // Safety cap: keep the output inside [maxCanvasPixels] and ~70% of the
+        // app heap (the canvas bitmap plus the one in-flight source decoding must
+        // both fit). A uniform scale keeps the flush layout intact.
+        val totalPixels = canvasWidthD * canvasHeight.toDouble()
+        val heapMb = (context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager)
+            ?.memoryClass ?: 256
+        val heapBudget = heapMb.toLong() * 175_000L  // ≈ 70% of heap bytes ÷ 4 bytes/pixel
+        val budget = minOf(maxCanvasPixels, heapBudget.coerceAtLeast(8_000_000L))
+        val scale = if (totalPixels > budget) {
+            kotlin.math.sqrt(budget.toDouble() / totalPixels).toFloat()
+        } else 1f
+
         val outWidth = (canvasWidth * scale).toInt().coerceAtLeast(1)
         val outHeight = (canvasHeight * scale).toInt().coerceAtLeast(1)
-
         val outBitmap = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(outBitmap)
         canvas.drawColor(backgroundColor)
         val paint = Paint().apply { isFilterBitmap = true }
 
-        // Second pass: decode each image and draw it centered, scaled to fit its
-        // cell; leftover space shows the background color.
-        cells.forEachIndexed { index, cell ->
-            if (cell.width == 0) return@forEachIndexed
-            val opts = BitmapFactory.Options().apply { inSampleSize = cell.sampleSize }
-            val src = try {
-                contentResolver.openInputStream(Uri.parse(sourceUris[index]))?.use { input ->
-                    BitmapFactory.decodeStream(input, null, opts)
+        // Draw pass — decode each source just large enough for its final cell
+        // (power-of-two inSampleSize), draw it flush with its neighbours, recycle.
+        var y = 0f
+        rows.forEachIndexed { rowIndex, row ->
+            val rowHeight = rowHeights[rowIndex]
+            var x = 0f
+            row.forEach { entry ->
+                val (srcIndex, cell) = valid[entry]
+                val drawWidth = (rowHeight * cell.width / cell.height).toFloat()
+                val finalW = drawWidth * scale
+                val finalH = rowHeight * scale
+                var sample = 1
+                while (cell.width / (sample shl 1) >= finalW && cell.height / (sample shl 1) >= finalH) {
+                    sample = sample shl 1
                 }
-            } catch (e: Exception) {
-                null
-            } ?: return@forEachIndexed
-
-            val row = index / colCount
-            val col = index % colCount
-            val fitScale = minOf(cellW.toFloat() / cell.width, cellH.toFloat() / cell.height)
-            val drawW = cell.width * fitScale
-            val drawH = cell.height * fitScale
-            val left = (col * cellW + (cellW - drawW) / 2f) * scale
-            val top = (row * cellH + (cellH - drawH) / 2f) * scale
-            canvas.drawBitmap(
-                src,
-                null,
-                RectF(left, top, left + drawW * scale, top + drawH * scale),
-                paint
-            )
-            src.recycle()
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                val src = try {
+                    contentResolver.openInputStream(Uri.parse(sourceUris[srcIndex]))?.use { input ->
+                        BitmapFactory.decodeStream(input, null, opts)
+                    }
+                } catch (e: Exception) {
+                    null
+                }
+                if (src != null) {
+                    canvas.drawBitmap(
+                        src,
+                        null,
+                        RectF(x * scale, y * scale, (x + drawWidth) * scale, (y + rowHeight) * scale),
+                        paint
+                    )
+                    src.recycle()
+                }
+                x += drawWidth
+            }
+            y += rowHeight
         }
         return outBitmap
     }

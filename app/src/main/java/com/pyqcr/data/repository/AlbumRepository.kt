@@ -123,6 +123,16 @@ class AlbumRepository(
         }
         imageDao.deleteAll()
         imageDao.insertImages(images)
+
+        // Keep tag cross-refs consistent with the library: drop any row whose URI
+        // no longer exists in MediaStore (image moved/deleted outside the app).
+        // Left in place, such a row can silently match an unrelated image when
+        // MediaStore recycles the numeric ID. Skipped when the library is empty
+        // (e.g. MediaStore briefly unavailable) so tags are never wiped wholesale.
+        val liveUris = images.map { it.uri }
+        if (liveUris.isNotEmpty()) {
+            tagDao.deleteCrossRefsNotIn(liveUris)
+        }
     }
 
     private fun loadImagesFromMediaStore(): List<ImageEntity> {

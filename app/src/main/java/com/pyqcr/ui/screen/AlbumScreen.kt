@@ -161,9 +161,12 @@ fun AlbumScreen(
     // that lets copy/move write into ANY folder via direct paths.
     var showFullAccessDialog by remember { mutableStateOf(false) }
 
-    // Move: stores (snackbar message, source URIs to delete) while waiting for the
-    // system delete-request dialog (createDeleteRequest) to return.
-    var pendingMoveResult by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
+    // Move: stores (snackbar message, source URIs to delete, old→new URI map for
+    // re-pointing tag cross-refs) while waiting for the system delete-request
+    // dialog (createDeleteRequest) to return.
+    var pendingMoveResult by remember {
+        mutableStateOf<Triple<String, List<String>, Map<String, String>>?>(null)
+    }
 
     // System delete confirmation launcher for MOVE — one dialog for all source files
     // that were copied via MediaStore/SAF (API 30+). On confirm the originals are
@@ -175,7 +178,11 @@ fun AlbumScreen(
         pendingMoveResult = null
         val message = pending.first
         val uris = pending.second
+        val remap = pending.third
         val finalMessage = if (result.resultCode == android.app.Activity.RESULT_OK) {
+            // Tags follow the moved files — re-point their cross-refs to the new
+            // URIs BEFORE the old rows (and their cross-refs) are removed.
+            remapMovedTags(remap)
             viewModel.deleteImages(uris)
             message.replace("Copied", "Moved")
         } else {
@@ -220,6 +227,18 @@ fun AlbumScreen(
                             .filter { it.second.success && it.second.sourceNeedsDeletion }
                             .map { it.first }
 
+                        // Old→new URI map for every successfully moved file, so tag
+                        // cross-refs can follow the file to its new location.
+                        val remap = results.mapNotNull { (src, r) ->
+                            if (r.success && r.destination != null && r.destination != src) {
+                                src to r.destination
+                            } else null
+                        }.toMap()
+                        // Files moved without needing deletion (true renames) can be
+                        // re-pointed right away; the rest wait for the delete dialog.
+                        val deferredRemap = remap.filterKeys { it in sourcesToDelete }
+                        remapMovedTags(remap - deferredRemap.keys)
+
                         if (sourcesToDelete.isNotEmpty()) {
                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                                 val request = FileOperationHelper.createDeleteRequest(context, sourcesToDelete)
@@ -230,13 +249,14 @@ fun AlbumScreen(
                                             append("\n${failures.size} failed — ${failures.first()}")
                                         }
                                     }
-                                    pendingMoveResult = baseMsg to sourcesToDelete
+                                    pendingMoveResult = Triple(baseMsg, sourcesToDelete, deferredRemap)
                                     moveDeleteLauncher.launch(IntentSenderRequest.Builder(request).build())
                                     return@launch
                                 }
                             }
                             // API < 30 or request creation failed: delete directly
                             FileOperationHelper.deleteMediaDirect(context, sourcesToDelete)
+                            remapMovedTags(deferredRemap)
                         }
                     }
 
@@ -256,6 +276,23 @@ fun AlbumScreen(
                 } catch (e: Exception) {
                     copyMoveMessage = "Operation failed: ${e.message}"
                     snackbarHostState.showSnackbar(copyMoveMessage)
+                }
+            }
+        }
+    }
+
+    /** Re-point tag cross-refs to the new URI of each image that was just moved. */
+    fun remapMovedTags(oldToNew: Map<String, String>) {
+        if (oldToNew.isEmpty()) return
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                oldToNew.forEach { (oldUri, destination) ->
+                    val newUri = FileOperationHelper.resolveNewImageUri(
+                        context, destination, selectedTreeUri
+                    )
+                    if (newUri != null && newUri != oldUri) {
+                        tagDao.moveImageCrossRef(oldUri, newUri)
+                    }
                 }
             }
         }
@@ -2080,6 +2117,11 @@ private fun CollageOptionsDialog(
                 Spacer(Modifier.height(8.dp))
                 // True when the chosen color is not one of the fixed presets.
                 var useCustomColor by remember { mutableStateOf(bgColor !in CollageBgPresetArgb) }
+                // Per-channel state — hoisted so the custom swatch below can preview
+                // the color live while the sliders are dragged.
+                var customR by remember(bgColor) { mutableIntStateOf(android.graphics.Color.red(bgColor)) }
+                var customG by remember(bgColor) { mutableIntStateOf(android.graphics.Color.green(bgColor)) }
+                var customB by remember(bgColor) { mutableIntStateOf(android.graphics.Color.blue(bgColor)) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     CollageBgPresets.forEach { (_, color) ->
                         val selected = color.toArgb() == bgColor
@@ -2099,13 +2141,15 @@ private fun CollageOptionsDialog(
                                 }
                         )
                     }
-                    // Custom color: rainbow swatch; RGB sliders appear below.
+                    // Custom color: while active it previews the current custom color
+                    // live; before any custom color is picked it shows a rainbow hint.
                     Box(
                         modifier = Modifier
                             .size(34.dp)
                             .clip(CircleShape)
                             .background(
-                                Brush.linearGradient(
+                                if (useCustomColor) Color(customR, customG, customB)
+                                else Brush.linearGradient(
                                     listOf(
                                         Color.Red, Color.Yellow, Color.Green,
                                         Color.Cyan, Color.Blue, Color.Magenta
@@ -2122,11 +2166,8 @@ private fun CollageOptionsDialog(
                 }
                 if (useCustomColor) {
                     Spacer(Modifier.height(8.dp))
-                    var customR by remember(bgColor) { mutableIntStateOf(android.graphics.Color.red(bgColor)) }
-                    var customG by remember(bgColor) { mutableIntStateOf(android.graphics.Color.green(bgColor)) }
-                    var customB by remember(bgColor) { mutableIntStateOf(android.graphics.Color.blue(bgColor)) }
                     val emitCustom: (Int, Int, Int) -> Unit = { r, g, b ->
-                        onBgColorChange(android.graphics.Color.rgb(r, g, b))
+                        onBgColorChange(Color(r, g, b).toArgb())
                     }
                     RgbSliderRow("R", customR) { customR = it; emitCustom(customR, customG, customB) }
                     RgbSliderRow("G", customG) { customG = it; emitCustom(customR, customG, customB) }

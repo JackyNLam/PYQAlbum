@@ -601,6 +601,52 @@ object FileOperationHelper {
 
     // ---------- Helpers ----------
 
+    /**
+     * Resolve the URI that should represent [destination] in the library after a
+     * copy/move, so callers can re-point tag cross-refs to the moved file:
+     *   1. MediaStore content URIs pass through unchanged.
+     *   2. Real file paths (true file moves) are looked up by their DATA column.
+     *   3. SAF document URIs are resolved back through the tree, then by DATA.
+     * Returns null when the new image cannot be located in MediaStore yet.
+     */
+    fun resolveNewImageUri(context: Context, destination: String, treeUri: Uri?): String? {
+        if (destination.startsWith("content://media/")) return destination
+        if (destination.startsWith("/")) return resolveContentUriByPath(context, destination)
+        if (destination.startsWith("content://") && treeUri != null) {
+            return try {
+                val docId = DocumentsContract.getDocumentId(Uri.parse(destination))
+                val docPath = DocumentsContract.getDocumentPath(treeUri, docId) ?: return null
+                val fullPath = Environment.getExternalStorageDirectory().absolutePath +
+                    File.separator + (docPath.path?.trimStart('/') ?: return null)
+                resolveContentUriByPath(context, fullPath)
+            } catch (e: Exception) {
+                Log.w(TAG, "resolveNewImageUri failed for $destination: ${e.message}")
+                null
+            }
+        }
+        return null
+    }
+
+    /** Look up the MediaStore content URI of an image by its real file path. */
+    private fun resolveContentUriByPath(context: Context, filePath: String): String? {
+        return try {
+            val projection = arrayOf(MediaStore.Images.Media._ID)
+            val selection = "${MediaStore.Images.Media.DATA}=?"
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection, selection, arrayOf(filePath), null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
+                    Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString()).toString()
+                } else null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveContentUriByPath failed for $filePath: ${e.message}")
+            null
+        }
+    }
+
     private fun resolveConflict(file: File): File {
         var f = file
         var counter = 1
