@@ -1,5 +1,15 @@
 package com.pyqcr.ai
 
+import android.content.ContentValues
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
@@ -24,11 +34,25 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
+ * Normalized crop rectangle with coordinates 0f..1f relative to image dimensions.
+ */
+data class CropRect(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+) {
+    /** Minimum 1% of the image to be a valid selection. */
+    fun isValid(): Boolean = right - left > 0.01f && bottom - top > 0.01f
+}
+
+/**
  * AI Edit Service that calls the Wan2.7 Image Edit API via DashScope.
  *
- * This service sends source image(s) + a reference target image + a custom prompt
- * to the Wan2.7-image-pro multimodal model, receives edited images back,
- * and saves them to local storage.
+ * This service sends cropped area(s) of source image(s) + an optional reference
+ * target image + a custom prompt to the Wan2.7-image-pro multimodal model,
+ * then composites the AI-edited area back onto the original source at the
+ * same position and saves the result to a gallery-visible location.
  */
 class AiEditService {
 
@@ -44,29 +68,28 @@ class AiEditService {
     /**
      * Edit images using the Wan2.7 Image Edit API.
      *
-     * @param apiKey DashScope API key
-     * @param modelName Model name (e.g. wan2.7-image-pro, wan2.7-image)
-     * @param sourceImagePaths Local file paths of source images to edit
-     * @param targetImagePath Local file path of the reference/target image
-     * @param prompt Custom prompt describing the edit
-     * @param outputDir Directory to save output images
-     * @param onProgress Callback with (current, total)
-     * @param onDebug Callback for debug log messages
-     * @param onFatalError Callback for fatal errors
-     * @return List of saved output file paths
+     * When [cropRects] contains an entry for a source path, only the cropped
+     * area is sent to the AI; the result is composited back onto the original
+     * image at the crop position and saved to the device gallery (MediaStore).
+     * Without crop rects, the full image is sent and saved in the output dir
+     * (original behavior).
+     *
+     * @return List of saved file paths or MediaStore content:// URIs.
      */
     suspend fun editImages(
         apiKey: String,
         modelName: String,
         sourceImagePaths: List<String>,
+        cropRects: Map<String, CropRect> = emptyMap(),
         targetImagePath: String?,
         prompt: String,
         outputDir: File,
+        context: Context,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
         onDebug: (String) -> Unit = {},
         onFatalError: (String) -> Unit = {}
     ): List<String> = withContext(Dispatchers.IO) {
-        val outputPaths = mutableListOf<String>()
+        val outputUris = mutableListOf<String>()
         val total = sourceImagePaths.size
         var completed = 0
 
@@ -75,9 +98,19 @@ class AiEditService {
 
             onDebug("▶️ Editing image ${index + 1}/$total: ${File(sourcePath).name}")
 
-            val sourceBase64 = encodeImageToBase64(sourcePath)
+            val cropRect = cropRects[sourcePath]
+            val sourceBase64: String?
+            val hasCrop = cropRect != null && cropRect.isValid()
+
+            if (hasCrop) {
+                onDebug("  Cropping area (${cropRect!!.left:.2f},${cropRect.top:.2f})-(${cropRect.right:.2f},${cropRect.bottom:.2f})...")
+                sourceBase64 = cropAndEncode(sourcePath, cropRect)
+            } else {
+                sourceBase64 = encodeImageToBase64(sourcePath)
+            }
+
             if (sourceBase64 == null) {
-                onDebug("❌ Failed to encode source image: $sourcePath")
+                onDebug("❌ Failed to process source image: $sourcePath")
                 completed++
                 onProgress(completed, total)
                 continue
@@ -150,7 +183,7 @@ class AiEditService {
                         if (fatal != null) {
                             onDebug("🛑 FATAL API error: $fatal")
                             onFatalError(fatal)
-                            return@withContext outputPaths
+                            return@withContext outputUris
                         }
                         onDebug("❌ HTTP $responseCode, retrying...")
                         continue
@@ -165,13 +198,38 @@ class AiEditService {
 
                     onDebug("  Image URL received, downloading...")
 
-                    // Download and save the image
-                    val outputFileName = "ai_edit_${System.currentTimeMillis()}_${index}.jpg"
-                    val outputFile = File(outputDir, outputFileName)
-                    downloadImage(imageUrl, outputFile)
-                    outputPaths.add(outputFile.absolutePath)
-                    imageSaved = true
-                    onDebug("✅ Saved: ${outputFile.absolutePath}")
+                    // Download AI-edited area to a temp file
+                    val tempFile = File(outputDir, ".ai_edit_temp_${index}_${System.currentTimeMillis()}.jpg")
+                    downloadImage(imageUrl, tempFile)
+
+                    if (hasCrop && cropRect != null) {
+                        // Composite the edited area back onto the original
+                        val savedUri = compositeAndSaveToMediaStore(
+                            context = context,
+                            originalPath = sourcePath,
+                            editedAreaPath = tempFile.absolutePath,
+                            cropRect = cropRect,
+                            suffix = "_ai_edit_${index}",
+                            onDebug = onDebug
+                        )
+                        if (savedUri != null) {
+                            outputUris.add(savedUri)
+                            imageSaved = true
+                            onDebug("✅ Saved to gallery: $savedUri")
+                        } else {
+                            onDebug("❌ Failed to composite and save — retrying...")
+                        }
+                        // Clean up temp file
+                        tempFile.delete()
+                    } else {
+                        // No crop: save the raw AI result directly
+                        val outputFileName = "ai_edit_${System.currentTimeMillis()}_${index}.jpg"
+                        val outputFile = File(outputDir, outputFileName)
+                        tempFile.renameTo(outputFile)
+                        outputUris.add(outputFile.absolutePath)
+                        imageSaved = true
+                        onDebug("✅ Saved: ${outputFile.absolutePath}")
+                    }
 
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
@@ -191,33 +249,219 @@ class AiEditService {
             onProgress(completed, total)
         }
 
-        outputPaths
+        outputUris
+    }
+
+    // ---- Crop & Composite helpers ----
+
+    /**
+     * Crop the source image to the normalized [CropRect] and encode the
+     * cropped area as a base64 data URL string.
+     */
+    private fun cropAndEncode(sourcePath: String, cropRect: CropRect): String? {
+        return try {
+            val srcBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
+            val iw = srcBitmap.width
+            val ih = srcBitmap.height
+            val pixelRect = android.graphics.Rect(
+                (cropRect.left * iw).toInt().coerceIn(0, iw),
+                (cropRect.top * ih).toInt().coerceIn(0, ih),
+                (cropRect.right * iw).toInt().coerceIn(0, iw),
+                (cropRect.bottom * ih).toInt().coerceIn(0, ih)
+            )
+            if (pixelRect.width() <= 0 || pixelRect.height() <= 0) {
+                srcBitmap.recycle()
+                return null
+            }
+            val cropped = Bitmap.createBitmap(
+                srcBitmap,
+                pixelRect.left, pixelRect.top,
+                pixelRect.width(), pixelRect.height()
+            )
+            srcBitmap.recycle()
+
+            val bytes = java.io.ByteArrayOutputStream()
+            cropped.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
+            cropped.recycle()
+            Base64.getEncoder().encodeToString(bytes.toByteArray())
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
     }
 
     /**
+     * Composite the AI-edited area bitmap onto the original image at the crop
+     * position, then save the result to the device gallery via MediaStore.
+     *
+     * @return The MediaStore content:// URI string, or null on failure.
+     */
+    private fun compositeAndSaveToMediaStore(
+        context: Context,
+        originalPath: String,
+        editedAreaPath: String,
+        cropRect: CropRect,
+        suffix: String,
+        onDebug: (String) -> Unit
+    ): String? {
+        return try {
+            // Load original and edited bitmaps
+            val original = BitmapFactory.decodeFile(originalPath) ?: return null
+            val edited = BitmapFactory.decodeFile(editedAreaPath) ?: run {
+                original.recycle(); return null
+            }
+
+            val iw = original.width
+            val ih = original.height
+            val pixelRect = android.graphics.Rect(
+                (cropRect.left * iw).toInt().coerceIn(0, iw),
+                (cropRect.top * ih).toInt().coerceIn(0, ih),
+                (cropRect.right * iw).toInt().coerceIn(0, iw),
+                (cropRect.bottom * ih).toInt().coerceIn(0, ih)
+            )
+            val cropW = pixelRect.width()
+            val cropH = pixelRect.height()
+
+            // Scale the AI-edited area to match the crop dimensions
+            val scaledEdited = if (edited.width != cropW || edited.height != cropH) {
+                onDebug("  Scaling AI result from ${edited.width}x${edited.height} to ${cropW}x${cropH}")
+                Bitmap.createScaledBitmap(edited, cropW, cropH, true)
+            } else {
+                edited
+            }
+
+            // Composite onto the original
+            val result = original.copy(Bitmap.Config.ARGB_8888, true)
+            val canvas = Canvas(result)
+            val paint = Paint().apply { isFilterBitmap = true }
+            canvas.drawBitmap(scaledEdited, pixelRect.left.toFloat(), pixelRect.top.toFloat(), paint)
+
+            // Save via MediaStore (gallery-visible)
+            val fileName = "PYQAlbum_AI_Edit_${System.currentTimeMillis()}$suffix.jpg"
+            val savedUri = saveToMediaStore(context, result, fileName, onDebug)
+
+            // Clean up
+            original.recycle()
+            edited.recycle()
+            if (scaledEdited !== edited) scaledEdited.recycle()
+            result.recycle()
+
+            savedUri
+        } catch (e: Exception) {
+            onDebug("  ❌ Composite failed: ${e::class.simpleName}: ${e.message}")
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Save a bitmap to the device gallery (Pictures/PYQAlbum/) via MediaStore
+     * on API 29+, or to the public Pictures directory on older versions.
+     *
+     * @return The content:// URI string, or null on failure.
+     */
+    private fun saveToMediaStore(
+        context: Context,
+        bitmap: Bitmap,
+        fileName: String,
+        onDebug: (String) -> Unit
+    ): String? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(
+                        MediaStore.Images.Media.RELATIVE_PATH,
+                        Environment.DIRECTORY_PICTURES + "/PYQAlbum"
+                    )
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = context.contentResolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    values
+                ) ?: return null
+
+                val written = context.contentResolver.openOutputStream(uri)?.use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                } ?: false
+
+                if (!written) {
+                    context.contentResolver.delete(uri, null, null)
+                    return null
+                }
+
+                // Clear IS_PENDING to make the image visible
+                val updateValues = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                val updated = context.contentResolver.update(uri, updateValues, null, null)
+                if (updated == 0) {
+                    onDebug("  ⚠️ MediaStore update returned 0 — file may be invisible")
+                    context.contentResolver.delete(uri, null, null)
+                    return null
+                }
+
+                uri.toString()
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "PYQAlbum"
+                )
+                if (!dir.exists()) dir.mkdirs()
+                val file = File(dir, fileName)
+                FileOutputStream(file).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                }
+                // Scan so the gallery picks it up
+                try {
+                    android.media.MediaScannerConnection.scanFile(
+                        context, arrayOf(file.absolutePath), null, null
+                    )
+                } catch (_: Exception) {}
+                file.absolutePath
+            }
+        } catch (e: Exception) {
+            onDebug("  ❌ MediaStore save failed: ${e::class.simpleName}: ${e.message}")
+            e.printStackTrace()
+            null
+        }
+    }
+
+    // ---- Chat-compatible fallback (updated with crop support) ----
+
+    /**
      * Try the chat-completions compatible endpoint as a fallback.
-     * Some models support both endpoints.
+     * When [cropRects] is provided, applies the same crop→composite flow.
      */
     suspend fun editImagesChatCompatible(
         apiKey: String,
         modelName: String,
         sourceImagePaths: List<String>,
+        cropRects: Map<String, CropRect> = emptyMap(),
         targetImagePath: String?,
         prompt: String,
         outputDir: File,
+        context: Context,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
         onDebug: (String) -> Unit = {},
         onFatalError: (String) -> Unit = {}
     ): List<String> = withContext(Dispatchers.IO) {
-        val outputPaths = mutableListOf<String>()
+        val outputUris = mutableListOf<String>()
         val total = sourceImagePaths.size
         var completed = 0
 
         for ((index, sourcePath) in sourceImagePaths.withIndex()) {
             coroutineContext.ensureActive()
-            onDebug("▶️ Editing image ${index + 1}/$total (chat-compatible endpoint): ${File(sourcePath).name}")
+            onDebug("▶️ Editing image ${index + 1}/$total (chat-compatible): ${File(sourcePath).name}")
 
-            val sourceBase64 = encodeImageToBase64(sourcePath)
+            val cropRect = cropRects[sourcePath]
+            val hasCrop = cropRect != null && cropRect.isValid()
+
+            val sourceBase64 = if (hasCrop) {
+                cropAndEncode(sourcePath, cropRect!!)
+            } else {
+                encodeImageToBase64(sourcePath)
+            }
             if (sourceBase64 == null) {
                 completed++
                 onProgress(completed, total)
@@ -270,16 +514,31 @@ class AiEditService {
                             ?.get("content")?.asString ?: ""
                         onDebug("  Content: ${messageContent.take(300)}")
 
-                        // Try to extract an image URL from the response content
                         val imgUrlMatch = Regex("""(https?://[^\s"']+\.(?:jpg|jpeg|png|webp))""")
                             .find(messageContent)
                         if (imgUrlMatch != null) {
                             val imageUrl = imgUrlMatch.value
-                            val outputFileName = "ai_edit_${System.currentTimeMillis()}_${index}.jpg"
-                            val outputFile = File(outputDir, outputFileName)
-                            downloadImage(imageUrl, outputFile)
-                            outputPaths.add(outputFile.absolutePath)
-                            onDebug("✅ Saved from URL: ${outputFile.absolutePath}")
+                            val tempFile = File(outputDir, ".ai_edit_temp_fb_${index}_${System.currentTimeMillis()}.jpg")
+                            downloadImage(imageUrl, tempFile)
+
+                            if (hasCrop && cropRect != null) {
+                                val savedUri = compositeAndSaveToMediaStore(
+                                    context, sourcePath, tempFile.absolutePath, cropRect,
+                                    "_ai_edit_fb_$index", onDebug
+                                )
+                                if (savedUri != null) {
+                                    outputUris.add(savedUri)
+                                    onDebug("✅ Saved to gallery: $savedUri")
+                                } else {
+                                    onDebug("❌ Composite failed")
+                                }
+                                tempFile.delete()
+                            } else {
+                                val outFile = File(outputDir, "ai_edit_${System.currentTimeMillis()}_${index}.jpg")
+                                tempFile.renameTo(outFile)
+                                outputUris.add(outFile.absolutePath)
+                                onDebug("✅ Saved: ${outFile.absolutePath}")
+                            }
                         } else {
                             onDebug("❌ No image URL in chat-compatible response")
                         }
@@ -295,31 +554,17 @@ class AiEditService {
             onProgress(completed, total)
         }
 
-        outputPaths
+        outputUris
     }
+
+    // ---- Original helpers (unchanged) ----
 
     /**
      * Extract the first image URL from the Wan2.7 API response JSON.
-     *
-     * Response format expected:
-     * {
-     *   "output": {
-     *     "choices": [
-     *       {
-     *         "message": {
-     *           "content": [
-     *             {"type": "image", "image": {"url": "https://..."}}
-     *           ]
-     *         }
-     *       }
-     *     ]
-     *   }
-     * }
      */
     private fun extractImageUrl(rawBody: String): String? {
         return try {
             val root = JsonParser.parseString(rawBody).asJsonObject
-            // Try "output.choices[].message.content[].image.url" format
             val output = root.getAsJsonObject("output") ?: return null
             val choices = output.getAsJsonArray("choices") ?: return null
             if (choices.size() == 0) return null
@@ -330,7 +575,6 @@ class AiEditService {
                 val obj = item.asJsonObject
                 val type = obj.get("type")?.asString
                 if (type == "image") {
-                    // The "image" field may be a string (direct URL) or an object {"url": "..."}
                     val imageValue = obj.get("image")
                     if (imageValue != null) {
                         if (imageValue.isJsonPrimitive && imageValue.asJsonPrimitive.isString) {
@@ -340,20 +584,14 @@ class AiEditService {
                         val url = imageObj.get("url")?.asString
                         if (url != null) return url
                     }
-
-                    // Also try direct "url" field
                     val directUrl = obj.get("url")?.asString
                     if (directUrl != null) return directUrl
                 }
             }
-            // Fallback: try "result_url" or direct url field in output
             val resultUrl = output.get("result_url")?.asString
             if (resultUrl != null) return resultUrl
-
-            // Fallback: check output for "image_url"
             val outputImageUrl = output.get("image_url")?.asString
             if (outputImageUrl != null) return outputImageUrl
-
             null
         } catch (e: Exception) {
             null

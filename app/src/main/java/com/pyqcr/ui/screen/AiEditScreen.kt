@@ -39,6 +39,7 @@ import com.pyqcr.ui.component.ImageThumbnail
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.pyqcr.ai.AiEditService
+import com.pyqcr.ai.CropRect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -78,8 +79,11 @@ fun AiEditScreen(
 
     // Image data
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
-    var selectedSourceUris by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var selectedSourceAreas by remember { mutableStateOf<Map<String, CropRect>>(emptyMap()) }
     var selectedTargetUri by remember { mutableStateOf<String?>(null) }
+
+    // Area selection dialog state
+    var areaDialogUri by remember { mutableStateOf<String?>(null) }
 
     // Operation state
     var isRunning by remember { mutableStateOf(false) }
@@ -116,9 +120,9 @@ fun AiEditScreen(
                     }
                 },
                 actions = {
-                    if (selectedSourceUris.isNotEmpty() || selectedTargetUri != null) {
+                    if (selectedSourceAreas.isNotEmpty() || selectedTargetUri != null) {
                         TextButton(onClick = {
-                            selectedSourceUris = emptySet()
+                            selectedSourceAreas = emptyMap()
                             selectedTargetUri = null
                             outputPaths = emptyList()
                             debugLog = emptyList()
@@ -259,12 +263,12 @@ fun AiEditScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Source Images",
+                                text = "Source Images (tap to set area)",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "${selectedSourceUris.size} selected",
+                                text = "${selectedSourceAreas.size} selected",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary
                             )
@@ -303,15 +307,17 @@ fun AiEditScreen(
                                     .background(Color.Black)
                             ) {
                                 gridItems(nonTargetImages, key = { it.uri }) { image ->
-                                    val isSelected = image.uri in selectedSourceUris
+                                    val isSelected = image.uri in selectedSourceAreas
                                     Box(
                                         modifier = Modifier
                                             .aspectRatio(1f)
                                             .clickable {
-                                                selectedSourceUris = if (isSelected) {
-                                                    selectedSourceUris - image.uri
+                                                if (isSelected) {
+                                                    // Remove selection
+                                                    selectedSourceAreas = selectedSourceAreas - image.uri
                                                 } else {
-                                                    selectedSourceUris + image.uri
+                                                    // Open area selection dialog
+                                                    areaDialogUri = image.uri
                                                 }
                                             }
                                     ) {
@@ -349,10 +355,16 @@ fun AiEditScreen(
                             }
                         }
 
-                        // Show selected source thumbnails
-                        if (selectedSourceUris.isNotEmpty()) {
+                        // Show selected source thumbnails with crop indicators
+                        if (selectedSourceAreas.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
-                            val selSrc = allImages.filter { it.uri in selectedSourceUris }
+                            Text(
+                                text = "Selected (tap ✕ to remove):",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            val selSrc = allImages.filter { it.uri in selectedSourceAreas }
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(4),
                                 contentPadding = PaddingValues(2.dp),
@@ -363,11 +375,12 @@ fun AiEditScreen(
                                     .heightIn(max = 200.dp)
                             ) {
                                 gridItems(selSrc, key = { it.uri }) { image ->
+                                    val rect = selectedSourceAreas[image.uri]
                                     Box(
                                         modifier = Modifier
                                             .aspectRatio(1f)
                                             .clickable {
-                                                selectedSourceUris = selectedSourceUris - image.uri
+                                                selectedSourceAreas = selectedSourceAreas - image.uri
                                             }
                                     ) {
                                         ImageThumbnail(
@@ -380,6 +393,21 @@ fun AiEditScreen(
                                                 .fillMaxSize()
                                                 .border(2.dp, Color.Green)
                                         )
+                                        // Crop area overlay
+                                        if (rect != null) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .padding(
+                                                        start = (rect.left * 100).dp / 100f,
+                                                        top = (rect.top * 100).dp / 100f,
+                                                        end = ((1f - rect.right) * 100).dp / 100f,
+                                                        bottom = ((1f - rect.bottom) * 100).dp / 100f
+                                                    )
+                                                    .border(1.5.dp, Color.White)
+                                            )
+                                        }
+                                        // Remove button
                                         Box(
                                             modifier = Modifier
                                                 .align(Alignment.TopEnd)
@@ -387,6 +415,23 @@ fun AiEditScreen(
                                                 .padding(2.dp)
                                         ) {
                                             Text("✕", color = Color.White, fontSize = MaterialTheme.typography.labelSmall.fontSize)
+                                        }
+                                        // Area label
+                                        if (rect != null) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomStart)
+                                                    .background(Color(0xCC000000), RoundedCornerShape(2.dp))
+                                                    .padding(horizontal = 3.dp, vertical = 1.dp)
+                                            ) {
+                                                val pctH = ((rect.bottom - rect.top) * 100).toInt()
+                                                val pctW = ((rect.right - rect.left) * 100).toInt()
+                                                Text(
+                                                    "${pctW}×${pctH}%",
+                                                    color = Color(0xFF90EE90),
+                                                    fontSize = MaterialTheme.typography.labelSmall.fontSize
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -427,7 +472,7 @@ fun AiEditScreen(
                         }
 
                         if (showTargetPicker) {
-                            val nonSourceImages = allImages.filter { it.uri !in selectedSourceUris }
+                            val nonSourceImages = allImages.filter { it.uri !in selectedSourceAreas }
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(4),
                                 contentPadding = PaddingValues(2.dp),
@@ -519,7 +564,7 @@ fun AiEditScreen(
                             Toast.makeText(context, "Please enter and save API Key first", Toast.LENGTH_SHORT).show()
                             return@Button
                         }
-                        if (selectedSourceUris.isEmpty()) {
+                        if (selectedSourceAreas.isEmpty()) {
                             Toast.makeText(context, "Please select at least one source image", Toast.LENGTH_SHORT).show()
                             return@Button
                         }
@@ -534,16 +579,23 @@ fun AiEditScreen(
 
                         isRunning = true
                         currentProgress = 0
-                        totalProgress = selectedSourceUris.size
+                        totalProgress = selectedSourceAreas.size
                         debugLog = emptyList()
                         outputPaths = emptyList()
                         currentStatus = "Starting AI Edit..."
 
                         scope.launch {
                             val service = AiEditService()
-                            val sourcePaths = allImages
-                                .filter { it.uri in selectedSourceUris }
-                                .mapNotNull { resolveContentUriToPath(context, it.uri) }
+                            // Resolve all source URIs to file paths and build cropRects map
+                            val sourcePaths = mutableListOf<String>()
+                            val cropRectsMap = mutableMapOf<String, CropRect>()
+                            for ((uri, cropRect) in selectedSourceAreas) {
+                                val path = resolveContentUriToPath(context, uri)
+                                if (path != null) {
+                                    sourcePaths.add(path)
+                                    cropRectsMap[path] = cropRect
+                                }
+                            }
                             val targetPath = if (selectedTargetUri != null) {
                                 resolveContentUriToPath(context, selectedTargetUri!!)
                             } else null
@@ -558,9 +610,11 @@ fun AiEditScreen(
                                     apiKey = apiKey,
                                     modelName = modelName,
                                     sourceImagePaths = sourcePaths,
+                                    cropRects = cropRectsMap,
                                     targetImagePath = targetPath,
                                     prompt = customPrompt,
                                     outputDir = outputDir,
+                                    context = context,
                                     onProgress = { cur, total ->
                                         currentProgress = cur
                                         totalProgress = total
@@ -581,9 +635,11 @@ fun AiEditScreen(
                                         apiKey = apiKey,
                                         modelName = modelName,
                                         sourceImagePaths = sourcePaths,
+                                        cropRects = cropRectsMap,
                                         targetImagePath = targetPath,
                                         prompt = customPrompt,
                                         outputDir = outputDir,
+                                        context = context,
                                         onProgress = { cur, total ->
                                             currentProgress = cur
                                             totalProgress = total
@@ -600,8 +656,8 @@ fun AiEditScreen(
                                 }
 
                                 if (outputPaths.isNotEmpty()) {
-                                    currentStatus = "✅ ${outputPaths.size} images edited successfully"
-                                    addDebug("✅ Completed: ${outputPaths.size} images saved")
+                                    currentStatus = "✅ ${outputPaths.size} images edited and saved to gallery"
+                                    addDebug("✅ Completed: ${outputPaths.size} images saved to Pictures/PYQAlbum/")
                                 } else {
                                     currentStatus = "No results generated"
                                     addDebug("❌ No images were generated")
@@ -615,7 +671,7 @@ fun AiEditScreen(
                             }
                         }
                     },
-                    enabled = !isRunning && apiKey.isNotBlank() && selectedSourceUris.isNotEmpty() && customPrompt.isNotBlank(),
+                    enabled = !isRunning && apiKey.isNotBlank() && selectedSourceAreas.isNotEmpty() && customPrompt.isNotBlank(),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     if (isRunning) {
@@ -695,8 +751,13 @@ fun AiEditScreen(
                     item {
                         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.padding(12.dp)) {
+                                val displayName = if (path.startsWith("content://")) {
+                                    Uri.parse(path).lastPathSegment ?: path
+                                } else {
+                                    File(path).name
+                                }
                                 Text(
-                                    text = File(path).name,
+                                    text = displayName,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -708,6 +769,19 @@ fun AiEditScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = MaterialTheme.typography.labelSmall.fontSize
                                 )
+                                Spacer(Modifier.height(4.dp))
+                                // Show a thumbnail preview
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 150.dp)
+                                ) {
+                                    ImageThumbnail(
+                                        imageUri = path,
+                                        modifier = Modifier.fillMaxSize(),
+                                        backgroundColor = Color.Black
+                                    )
+                                }
                             }
                         }
                     }
@@ -717,6 +791,20 @@ fun AiEditScreen(
             // Bottom spacer
             item { Spacer(Modifier.height(32.dp)) }
         }
+    }
+
+    // Area selection dialog
+    areaDialogUri?.let { uri ->
+        AreaSelectionDialog(
+            imageUri = uri,
+            onConfirm = { cropRect ->
+                selectedSourceAreas = selectedSourceAreas + (uri to cropRect)
+                areaDialogUri = null
+            },
+            onDismiss = {
+                areaDialogUri = null
+            }
+        )
     }
 }
 
