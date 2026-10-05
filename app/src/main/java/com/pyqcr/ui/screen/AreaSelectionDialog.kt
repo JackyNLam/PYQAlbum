@@ -17,7 +17,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.pyqcr.ai.CropRect
 
 /**
