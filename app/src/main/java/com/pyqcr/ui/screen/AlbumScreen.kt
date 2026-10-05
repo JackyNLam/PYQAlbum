@@ -50,6 +50,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.content.ContentValues
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import com.pyqcr.ui.util.MediaStoreUtils
 import com.pyqcr.PyqCrApp
 import com.pyqcr.data.db.ImageEntity
 import com.pyqcr.data.db.ImageTagCrossRef
@@ -411,6 +418,7 @@ fun AlbumScreen(
     var collageColumns by remember { mutableIntStateOf(3) }
     var collageBgColor by remember { mutableIntStateOf(android.graphics.Color.WHITE) }
     var collageImageOrder by remember { mutableStateOf<List<String>>(emptyList()) }
+    var showResizeDialog by remember { mutableStateOf(false) }
 
     /** Open the collage options dialog (background color / columns / image order). */
     val openCollageDialog: () -> Unit = {
@@ -419,7 +427,7 @@ fun AlbumScreen(
             scope.launch { snackbarHostState.showSnackbar("Select at least 2 images to make a collage") }
         } else if (!isCreatingCollage) {
             collageImageOrder = uris
-            collageColumns = minOf(3, uris.size)
+            collageColumns = minOf(10, uris.size)
             showCollageDialog = true
         }
     }
@@ -492,6 +500,98 @@ fun AlbumScreen(
                 snackbarHostState.showSnackbar("Collage failed: ${e.message}")
             } finally {
                 isCreatingCollage = false
+            }
+        }
+    }
+
+    /** Resize selected images to target pixel width. */
+    val batchResize: (List<String>, Int, String) -> Unit = { uris, targetWidth, saveMode ->
+        scope.launch {
+            try {
+                var successCount = 0
+                var failCount = 0
+                val contentResolver = context.contentResolver
+                for (uriStr in uris) {
+                    val uri = Uri.parse(uriStr)
+                    val ok = withContext(Dispatchers.IO) {
+                        try {
+                            // Decode bounds
+                            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, boundsOpts) }
+                            val ow = boundsOpts.outWidth
+                            val oh = boundsOpts.outHeight
+                            if (ow <= 0 || oh <= 0) return@withContext false
+
+                            val scale = targetWidth.toFloat() / ow
+                            val fw = targetWidth.coerceAtLeast(1)
+                            val fh = (oh * scale).toInt().coerceAtLeast(1)
+
+                            var sample = 1
+                            while (ow / (sample shl 1) >= fw && oh / (sample shl 1) >= fh) sample = sample shl 1
+
+                            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+                            val sampled = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOpts) } ?: return@withContext false
+                            val resized = Bitmap.createScaledBitmap(sampled, fw, fh, true)
+                            sampled.recycle()
+
+                            when (saveMode) {
+                                "replace" -> {
+                                    contentResolver.openOutputStream(uri, "wt")?.use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                                        ?: run { resized.recycle(); return@withContext false }
+                                }
+                                "suffix" -> {
+                                    val name = try {
+                                        contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DISPLAY_NAME), null, null, null)?.use { c ->
+                                            if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)) else null
+                                        }
+                                    } catch (e: Exception) { null } ?: "image_${System.currentTimeMillis()}.jpg"
+                                    val base = name.substringBeforeLast('.')
+                                    val ext = name.substringAfterLast('.', "jpg")
+                                    val newName = "${base}_resized.$ext"
+
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                        val relPath = try {
+                                            contentResolver.query(uri, arrayOf(MediaStore.Images.Media.RELATIVE_PATH), null, null, null)?.use { c ->
+                                                if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH)) else null
+                                            }
+                                        } catch (e: Exception) { null } ?: Environment.DIRECTORY_PICTURES + "/PYQAlbum"
+
+                                        val values = ContentValues().apply {
+                                            put(MediaStore.Images.Media.DISPLAY_NAME, newName)
+                                            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                                            put(MediaStore.Images.Media.RELATIVE_PATH, relPath)
+                                        }
+                                        val newUri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                                            ?: run { resized.recycle(); return@withContext false }
+                                        contentResolver.openOutputStream(newUri)?.use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                                            ?: run { resized.recycle(); contentResolver.delete(newUri, null, null); return@withContext false }
+                                    } else {
+                                        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "PYQAlbum")
+                                        if (!dir.exists()) dir.mkdirs()
+                                        val file = File(dir, newName)
+                                        java.io.FileOutputStream(file).use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                                        MediaStoreUtils.scanFile(context, file.absolutePath)
+                                    }
+                                }
+                            }
+                            resized.recycle()
+                            true
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            false
+                        }
+                    }
+                    if (ok) successCount++ else failCount++
+                }
+                snackbarHostState.showSnackbar(
+                    if (failCount == 0) "Resized $successCount image(s) to ${targetWidth}px wide"
+                    else "Resized $successCount image(s), $failCount failed"
+                )
+                if (saveMode == "suffix") viewModel.refreshImages()
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            } catch (e: Exception) {
+                snackbarHostState.showSnackbar("Resize failed: ${e.message}")
             }
         }
     }
@@ -1023,6 +1123,9 @@ fun AlbumScreen(
                             } else {
                                 showDeleteDialog = true
                             }
+                        },
+                        onResize = {
+                            showResizeDialog = true
                         }
                     )
                 }
@@ -1663,6 +1766,17 @@ fun AlbumScreen(
                     onDismiss = { showCollageDialog = false }
                 )
             }
+            // Batch resize dialog
+            if (showResizeDialog) {
+                ResizeOptionsDialog(
+                    imageCount = selectedImageUris.size,
+                    onDismiss = { showResizeDialog = false },
+                    onConfirm = { targetWidth, saveMode ->
+                        showResizeDialog = false
+                        batchResize(selectedImageUris.toList(), targetWidth, saveMode)
+                    }
+                )
+            }
             // Delete confirmation dialog (Android 9 and below — no system delete dialog)
             if (showDeleteDialog) {
                 AlertDialog(
@@ -1715,6 +1829,7 @@ private fun BatchMultiSelectBar(
     onRate: () -> Unit,
     onSelectForAi: () -> Unit,
     onRemoveAiInfo: () -> Unit,
+    onResize: () -> Unit,
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit,
     onDelete: () -> Unit
@@ -1776,6 +1891,12 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onRemoveAiInfo() },
                         text = { Text("Remove AI Info") },
                         leadingIcon = { Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onResize() },
+                        text = { Text("Resize") },
+                        leadingIcon = { Icon(Icons.Default.PhotoSizeSelectLarge, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     HorizontalDivider()
                     DropdownMenuItem(
@@ -2186,7 +2307,7 @@ private fun CollageOptionsDialog(
                 Text("Columns", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    (1..5).forEach { c ->
+                    (1..10).forEach { c ->
                         FilterChip(
                             selected = columns == c,
                             onClick = { onColumnsChange(c) },
@@ -2357,4 +2478,88 @@ internal object FileUtils {
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
+}
+
+/**
+ * Batch resize options dialog.
+ * Lets the user choose a target width (500 / 1000 / 2000 / custom) and
+ * whether to replace the original or save a copy with "_resized" suffix.
+ */
+@Composable
+private fun ResizeOptionsDialog(
+    imageCount: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (targetWidth: Int, saveMode: String) -> Unit
+) {
+    var selectedWidth by remember { mutableIntStateOf(500) }
+    var customWidth by remember { mutableStateOf("") }
+    var saveMode by remember { mutableStateOf("replace") }
+    var useCustom by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Batch Resize ($imageCount images)") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text("Target width (pixels)", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(500, 1000, 2000).forEach { w ->
+                        FilterChip(
+                            selected = !useCustom && selectedWidth == w,
+                            onClick = { selectedWidth = w; useCustom = false },
+                            label = { Text("${w}px") }
+                        )
+                    }
+                    FilterChip(
+                        selected = useCustom,
+                        onClick = { useCustom = true },
+                        label = { Text("Custom") }
+                    )
+                }
+                if (useCustom) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = customWidth,
+                        onValueChange = { customWidth = it.filter { c -> c.isDigit() } },
+                        label = { Text("Width in px") },
+                        singleLine = true
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Text("Save mode", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(
+                        selected = saveMode == "replace",
+                        onClick = { saveMode = "replace" }
+                    )
+                    Text("Replace original", modifier = Modifier.padding(start = 4.dp))
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(
+                        selected = saveMode == "suffix",
+                        onClick = { saveMode = "suffix" }
+                    )
+                    Text("Save as copy with \"_resized\" suffix", modifier = Modifier.padding(start = 4.dp))
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val w = if (useCustom) customWidth.toIntOrNull() ?: 500 else selectedWidth
+                    onConfirm(w, saveMode)
+                },
+                enabled = !useCustom || customWidth.toIntOrNull() != null
+            ) {
+                Text("Resize")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
