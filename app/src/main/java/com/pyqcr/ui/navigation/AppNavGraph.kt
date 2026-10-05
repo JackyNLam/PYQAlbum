@@ -18,6 +18,7 @@ object Routes {
     const val RATING = "rating"
     const val IMAGE_DETAIL = "image_detail/{imageUri}"
     const val AI_RATING = "ai_rating"
+    const val AI_EDIT = "ai_edit"
     const val AI_SELECT = "ai_select"
     const val BATCH_EDIT = "batch_edit/{mode}"
 
@@ -67,6 +68,9 @@ fun AppNavGraph() {
                 },
                 onNavigateToAiSelection = {
                     navController.navigate(Routes.AI_SELECT)
+                },
+                onNavigateToAiEdit = {
+                    navController.navigate(Routes.AI_EDIT)
                 }
             )
         }
@@ -119,6 +123,12 @@ fun AppNavGraph() {
 
         composable(Routes.AI_RATING) {
             AiRatingScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.AI_EDIT) {
+            AiEditScreen(
                 onBack = { navController.popBackStack() }
             )
         }

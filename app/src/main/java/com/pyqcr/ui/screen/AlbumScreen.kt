@@ -94,6 +94,7 @@ import java.util.*
 fun AlbumScreen(
     onImageClick: (String, imageList: List<String>) -> Unit,
     onNavigateToAiSelection: () -> Unit,
+    onNavigateToAiEdit: () -> Unit = {},
     viewModel: AlbumViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -759,6 +760,16 @@ fun AlbumScreen(
                 Spacer(Modifier.weight(1f))
 
                 HorizontalDivider()
+
+                DrawerItem(
+                    icon = Icons.Default.Edit,
+                    label = "AI Edit",
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onNavigateToAiEdit()
+                    }
+                )
 
                 DrawerItem(
                     icon = Icons.Default.AutoAwesome,
