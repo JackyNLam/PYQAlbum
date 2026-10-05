@@ -14,7 +14,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - **Grid**: 3 columns, square thumbnails (1:1 aspect ratio)
   - **Waterfall (River)**: 3 columns, Pinterest-style staggered heights
   - **Justified Grid**: 3 images per row, fixed height (120dp), dynamic width proportional to aspect ratio
-- **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Rating
+- **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Edit, AI Rating
 - **Click thumbnail** → full-screen detail view (safe null handling, no crash)
 - **Long-press** → enters multi-select mode directly (no intermediate dialog); bottom bar shows selected count, action menu (⋮), and Cancel
 - **Sort inside a folder**: Use the Sort (↕) button in the toolbar:
@@ -61,6 +61,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 │           ├── PyqCrApp.kt              # Application class + Coil ImageLoaderFactory
 │           ├── MainActivity.kt           # Single Activity, edge-to-edge
 │           ├── ai/
+│           │   ├── AiEditService.kt      # Wan2.7 Image Edit API (DashScope)
 │           │   ├── AiRatingService.kt    # DashScope API batch scoring (10 img/batch)
 │           │   └── ImageResizer.kt       # Resize to 800px max, cache in ai_rating/
 │           ├── data/
@@ -69,7 +70,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 │           │   └── repository/ ...       # MediaStore scan + Room flows
 │           ├── ui/
 │           │   ├── component/ ...        # ImageThumbnail, WaterfallGrid, JustifiedGrid, RatingBar, TagChip
-│           │   ├── navigation/ ...       # AppNavGraph with 7 routes
+│           │   ├── navigation/ ...       # AppNavGraph with 8 routes
 │           │   ├── screen/ ...           # All screens
 │           │   ├── theme/ ...            # Material3 dynamic color
 │           │   └── viewmodel/ ...        # AlbumViewModel
@@ -84,7 +85,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 ---
 
-## 7 Navigation Routes
+## 8 Navigation Routes
 
 | Route | Screen | Purpose |
 |-------|--------|---------|
@@ -92,7 +93,8 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | `tag` | `TagScreen` | Tag list → images per tag *(can be discovered via drawer, or navigated separately)* |
 | `rating` | `RatingScreen` | Sort/filter by user rating or AI score *(still accessible via nav route)* |
 | `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, swipe down to go back, swipe up for controls |
-| `ai_rating` | `AiRatingScreen` | **Direct entry point for AI features**: config + selected image grid + submit |
+| `ai_edit` | `AiEditScreen` | **AI Image Editing**: Wan2.7-powered source image + target reference → prompt → swap/edit |
+| `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
 
@@ -102,7 +104,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 | Action | Result |
 |--------|--------|
-| **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Rating |
+| **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Edit / AI Rating |
 | **Tap folder card** (Folder mode) | Enter folder to see images in selected layout (folder cards show image count, sortable by modified date / count / name) |
 | **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking (toggle) |
@@ -113,7 +115,8 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Toolbar Layout button** (inside folder) | Dropdown: Grid (▦) / Waterfall (🌊) / Justified (▭) |
 | **Toolbar Sort button** (folder list) | Dropdown: ↓Modified date (default) / ↓Count / ↑Name |
 | **Toolbar Sort button** (inside folder) | Dropdown: ↓Modified date (default) / ↑Name / Rating ↓ / AI Score ↓ / Group by submenu |
-| **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Rating |
+| **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Edit / AI Rating |
+| **AI Edit** | Via drawer ✏️ |
 | **AI Rating** | Via drawer ✨ |
 | **Multi-select mode** | Batch actions (⋮ menu): Select All / Deselect All / Collage / Tag / Rate / Remove Tags / AI Ranking / Remove AI Info / Copy to… / Move to… / Delete |
 | **Select All / Deselect All** (⋮ in multi-select) | Toggles selection of every image in the current folder or tag view |
@@ -225,6 +228,36 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - Results section: sorted by score descending, shows score + AI reasoning
 - "Clear All" action in top bar to reset selection
 - Error messages shown via Toast for empty API key, missing images, or API failures
+
+### AI Edit Screen
+- **API Configuration** card with:
+  - DashScope API Key input (encrypted storage via separate EncryptedSharedPreferences from AI Rating)
+  - Model Name input (e.g. `wan2.7-image-pro`)
+  - **Save Config** button — persists both API Key and Model name
+- **Edit Prompt** card: multi-line `OutlinedTextField` (3–6 lines) for the user's custom edit instruction (e.g. "replace the person with the one from the target image")
+- **Source Images** card:
+  - Tap to open a **4-column LazyVerticalGrid** gallery picker to select source images
+  - Multi-select with ✓ green overlay badge and green border
+  - Red ✕ remove button per thumbnail
+  - At least one source image required to run
+- **Target Image** card:
+  - Tap to open a **4-column LazyVerticalGrid** gallery picker for single reference/target image
+  - Orange border (Color 0xFFFF9800) on the selected target thumbnail
+  - Close button (✕) to deselect target
+  - Optional — if omitted, the edit operates on source image content alone
+- **Run AI Edit** button:
+  - Validates API key, at least one source image, and non-empty prompt
+  - Launches `AiEditService.editImages()` via OkHttp coroutine
+  - **LinearProgressIndicator** with "X / Y images done" status
+- **Debug Log** panel — dark terminal-style card (Color 0xFF1E1E2E background + 0xFFCDD6F4 text, monospace font):
+  - Per-image progress: encoding → API send → retry tracking → download → save
+  - Full HTTP response status and body preview (up to 2000 chars)
+  - Error classification: quota exhausted, invalid API key, access denied, account arrears
+  - Retry logic: up to 3 attempts per image with exponential backoff
+  - "Clear Debug Log" button
+- **Results section**: list of saved file paths for successfully edited images
+- Uses **Wan2.7 Image Edit API** (DashScope `multimodal-generation/generation` endpoint) with fallback to chat-compatible endpoint
+- The service encodes source and target images to base64, composes a multimodal request with the custom prompt, downloads the edited result image, and saves it to the app's output directory
 
 ### Tag/Rating Assignment
 - **Long-press dialog** shows existing tags as selectable buttons before offering a "create new" option

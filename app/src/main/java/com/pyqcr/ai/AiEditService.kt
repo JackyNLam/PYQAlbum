@@ -330,9 +330,16 @@ class AiEditService {
                 val obj = item.asJsonObject
                 val type = obj.get("type")?.asString
                 if (type == "image") {
-                    val imageObj = obj.getAsJsonObject("image")
-                    val url = imageObj?.get("url")?.asString
-                    if (url != null) return url
+                    // The "image" field may be a string (direct URL) or an object {"url": "..."}
+                    val imageValue = obj.get("image")
+                    if (imageValue != null) {
+                        if (imageValue.isJsonPrimitive && imageValue.asJsonPrimitive.isString) {
+                            return imageValue.asString
+                        }
+                        val imageObj = imageValue.asJsonObject
+                        val url = imageObj.get("url")?.asString
+                        if (url != null) return url
+                    }
 
                     // Also try direct "url" field
                     val directUrl = obj.get("url")?.asString
