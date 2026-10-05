@@ -2306,7 +2306,10 @@ private fun CollageOptionsDialog(
                 // Number of columns
                 Text("Columns", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
                     (1..10).forEach { c ->
                         FilterChip(
                             selected = columns == c,
@@ -2511,19 +2514,21 @@ private fun ResizeOptionsDialog(
                             label = { Text("${w}px") }
                         )
                     }
-                    FilterChip(
-                        selected = useCustom,
-                        onClick = { useCustom = true },
-                        label = { Text("Custom") }
-                    )
                 }
+                Spacer(Modifier.height(8.dp))
+                FilterChip(
+                    selected = useCustom,
+                    onClick = { useCustom = !useCustom; if (!useCustom) customWidth = "" },
+                    label = { Text("Custom") }
+                )
                 if (useCustom) {
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = customWidth,
                         onValueChange = { customWidth = it.filter { c -> c.isDigit() } },
                         label = { Text("Width in px") },
-                        singleLine = true
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
                 Spacer(Modifier.height(16.dp))
