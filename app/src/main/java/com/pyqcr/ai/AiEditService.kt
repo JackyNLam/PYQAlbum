@@ -103,7 +103,7 @@ class AiEditService {
             val hasCrop = cropRect != null && cropRect.isValid()
 
             if (hasCrop) {
-                onDebug("  Cropping area (${cropRect!!.left:.2f},${cropRect.top:.2f})-(${cropRect.right:.2f},${cropRect.bottom:.2f})...")
+                onDebug("  Cropping area (${"%.2f".format(cropRect!!.left)},${"%.2f".format(cropRect.top)})-(${"%.2f".format(cropRect.right)},${"%.2f".format(cropRect.bottom)})...")
                 sourceBase64 = cropAndEncode(sourcePath, cropRect)
             } else {
                 sourceBase64 = encodeImageToBase64(sourcePath)
