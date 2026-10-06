@@ -1,8 +1,10 @@
 package com.pyqcr.ui.screen
 
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,7 +28,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -395,18 +401,12 @@ fun AiEditScreen(
                                                 .fillMaxSize()
                                                 .border(2.dp, Color.Green)
                                         )
-                                        // Crop area overlay
+                                        // Crop area overlay — correctly maps normalized
+                                        // coords through ContentScale.Fit letterboxing
                                         if (rect != null) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .fillMaxSize()
-                                                    .padding(
-                                                        start = (rect.left * 100).dp / 100f,
-                                                        top = (rect.top * 100).dp / 100f,
-                                                        end = ((1f - rect.right) * 100).dp / 100f,
-                                                        bottom = ((1f - rect.bottom) * 100).dp / 100f
-                                                    )
-                                                    .border(1.5.dp, Color.White)
+                                            ThumbnailCropOverlay(
+                                                imageUri = image.uri,
+                                                cropRect = rect
                                             )
                                         }
                                         // Remove button
@@ -812,6 +812,70 @@ fun AiEditScreen(
     }
 }
 
+/**
+ * Overlay composable that draws the [CropRect] on a square thumbnail,
+ * correctly accounting for [ContentScale.Fit] letterboxing.
+ *
+ * The thumbnail box is a square; the image inside may not fill it.
+ * We load the intrinsic image dimensions and compute the actual
+ * displayed image bounds so the crop rect is positioned correctly.
+ */
+@Composable
+private fun ThumbnailCropOverlay(
+    imageUri: String,
+    cropRect: CropRect
+) {
+    val context = LocalContext.current
+    var imageDims by remember(imageUri) { mutableStateOf<Pair<Int, Int>?>(null) }
+    var boxSize by remember { mutableStateOf(Size.Zero) }
+
+    LaunchedEffect(imageUri) {
+        imageDims = loadBitmapDimensions(context, imageUri)
+    }
+
+    Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .onSizeChanged { boxSize = Size(it.width.toFloat(), it.height.toFloat()) }
+    ) {
+        if (boxSize.width <= 0 || boxSize.height <= 0) return@Canvas
+        val dims = imageDims
+
+        val displayLeft: Float
+        val displayTop: Float
+        val displayRight: Float
+        val displayBottom: Float
+        if (dims != null) {
+            val imgW = dims.first.toFloat()
+            val imgH = dims.second.toFloat()
+            val scale = minOf(boxSize.width / imgW, boxSize.height / imgH)
+            val displayW = imgW * scale
+            val displayH = imgH * scale
+            val offsetX = (boxSize.width - displayW) / 2f
+            val offsetY = (boxSize.height - displayH) / 2f
+            displayLeft = cropRect.left * displayW + offsetX
+            displayTop = cropRect.top * displayH + offsetY
+            displayRight = cropRect.right * displayW + offsetX
+            displayBottom = cropRect.bottom * displayH + offsetY
+        } else {
+            displayLeft = cropRect.left * boxSize.width
+            displayTop = cropRect.top * boxSize.height
+            displayRight = cropRect.right * boxSize.width
+            displayBottom = cropRect.bottom * boxSize.height
+        }
+
+        drawRect(
+            color = Color.White,
+            topLeft = Offset(displayLeft, displayTop),
+            size = Size(
+                displayRight - displayLeft,
+                displayBottom - displayTop
+            ),
+            style = Stroke(width = 2.dp.toPx())
+        )
+    }
+}
+
 // ---------- Persistence helpers (separate from AiRatingScreen's prefs) ----------
 
 private const val AI_EDIT_PREFS = "pyqcr_ai_edit_prefs"
@@ -889,6 +953,29 @@ private fun resolveContentUriToPath(context: Context, uriStr: String): String? {
         tempFile.absolutePath
     } catch (e: Exception) {
         e.printStackTrace()
+        null
+    }
+}
+
+/**
+ * Load just the pixel dimensions of an image without decoding the full bitmap.
+ * Supports content:// URIs and file paths.
+ */
+private fun loadBitmapDimensions(context: Context, uriStr: String): Pair<Int, Int>? {
+    return try {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        if (uriStr.startsWith("content://")) {
+            val uri = Uri.parse(uriStr)
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                BitmapFactory.decodeStream(input, null, opts)
+            }
+        } else {
+            BitmapFactory.decodeFile(uriStr, opts)
+        }
+        if (opts.outWidth > 0 && opts.outHeight > 0) {
+            Pair(opts.outWidth, opts.outHeight)
+        } else null
+    } catch (e: Exception) {
         null
     }
 }

@@ -1,5 +1,8 @@
 package com.pyqcr.ui.screen
 
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
@@ -15,6 +18,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import coil3.compose.AsyncImage
@@ -24,7 +28,8 @@ import com.pyqcr.ai.CropRect
  * Full-screen dialog that shows the source image and lets the user drag
  * to select a rectangular area. Returns the selection as a normalized [CropRect].
  *
- * Coordinates are 0f..1f relative to the displayed image container size.
+ * Coordinates are 0f..1f relative to the image itself (not the container),
+ * accounting for letterboxing from ContentScale.Fit.
  */
 @Composable
 fun AreaSelectionDialog(
@@ -35,6 +40,15 @@ fun AreaSelectionDialog(
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
     var containerSize by remember { mutableStateOf(Size.Zero) }
+    var imageDims by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    val context = LocalContext.current
+
+    // Load intrinsic image dimensions so we can compute the actual
+    // displayed image bounds within the container (ContentScale.Fit
+    // centers the image with letterboxing).
+    LaunchedEffect(imageUri) {
+        imageDims = loadImageDimensions(context, imageUri)
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -139,11 +153,9 @@ fun AreaSelectionDialog(
                             val s = dragStart ?: return@Button
                             val e = dragEnd ?: return@Button
                             if (containerSize.width <= 0 || containerSize.height <= 0) return@Button
-                            val rect = CropRect(
-                                left = minOf(s.x, e.x) / containerSize.width,
-                                top = minOf(s.y, e.y) / containerSize.height,
-                                right = maxOf(s.x, e.x) / containerSize.width,
-                                bottom = maxOf(s.y, e.y) / containerSize.height
+
+                            val rect = dragToCropRect(
+                                s, e, containerSize, imageDims
                             )
                             if (rect.isValid()) onConfirm(rect)
                         },
@@ -152,5 +164,76 @@ fun AreaSelectionDialog(
                 }
             }
         }
+    }
+}
+
+/**
+ * Convert drag coordinates (in container space) to a normalized [CropRect]
+ * by mapping onto the actual displayed image bounds, accounting for
+ * [ContentScale.Fit] letterboxing.
+ */
+private fun dragToCropRect(
+    dragStart: Offset,
+    dragEnd: Offset,
+    containerSize: Size,
+    imageDims: Pair<Int, Int>?
+): CropRect {
+    val dims = imageDims
+    if (dims != null && containerSize.width > 0 && containerSize.height > 0) {
+        val imgW = dims.first.toFloat()
+        val imgH = dims.second.toFloat()
+
+        // ContentScale.Fit math
+        val scale = minOf(containerSize.width / imgW, containerSize.height / imgH)
+        val displayW = imgW * scale
+        val displayH = imgH * scale
+        val offsetX = (containerSize.width - displayW) / 2f
+        val offsetY = (containerSize.height - displayH) / 2f
+
+        // Clamp drag positions to the displayed image bounds
+        fun clampToImage(pos: Offset): Offset {
+            return Offset(
+                (pos.x - offsetX).coerceIn(0f, displayW) / displayW,
+                (pos.y - offsetY).coerceIn(0f, displayH) / displayH
+            )
+        }
+        val startN = clampToImage(dragStart)
+        val endN = clampToImage(dragEnd)
+        return CropRect(
+            left = minOf(startN.x, endN.x),
+            top = minOf(startN.y, endN.y),
+            right = maxOf(startN.x, endN.x),
+            bottom = maxOf(startN.y, endN.y)
+        )
+    }
+    // Fallback: normalize by container size (no image dims available)
+    return CropRect(
+        left = (minOf(dragStart.x, dragEnd.x) / containerSize.width).coerceIn(0f, 1f),
+        top = (minOf(dragStart.y, dragEnd.y) / containerSize.height).coerceIn(0f, 1f),
+        right = (maxOf(dragStart.x, dragEnd.x) / containerSize.width).coerceIn(0f, 1f),
+        bottom = (maxOf(dragStart.y, dragEnd.y) / containerSize.height).coerceIn(0f, 1f)
+    )
+}
+
+/**
+ * Load just the pixel dimensions of an image without decoding the full bitmap.
+ * Supports content:// URIs and file paths.
+ */
+private fun loadImageDimensions(context: Context, uriStr: String): Pair<Int, Int>? {
+    return try {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        if (uriStr.startsWith("content://")) {
+            val uri = Uri.parse(uriStr)
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                BitmapFactory.decodeStream(input, null, opts)
+            }
+        } else {
+            BitmapFactory.decodeFile(uriStr, opts)
+        }
+        if (opts.outWidth > 0 && opts.outHeight > 0) {
+            Pair(opts.outWidth, opts.outHeight)
+        } else null
+    } catch (e: Exception) {
+        null
     }
 }
