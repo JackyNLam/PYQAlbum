@@ -363,35 +363,42 @@ class AiEditService {
                 srcBitmap.recycle()
                 return null
             }
-            var cropped = Bitmap.createBitmap(
+            val cropped = Bitmap.createBitmap(
                 srcBitmap,
                 pixelRect.left, pixelRect.top,
                 pixelRect.width(), pixelRect.height()
             )
             srcBitmap.recycle()
 
-            // Upscale to at least 512px on each side
-            val MIN_SIDE = 512
-            var inputW = cropped.width
-            var inputH = cropped.height
-            if (inputW < MIN_SIDE || inputH < MIN_SIDE) {
-                val scale = MIN_SIDE.toFloat() / minOf(inputW, inputH)
-                val newW = (inputW * scale).roundToInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
-                val newH = (inputH * scale).roundToInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
-                val scaled = Bitmap.createScaledBitmap(cropped, newW, newH, true)
-                cropped.recycle()
-                cropped = scaled
-                inputW = newW
-                inputH = newH
-            }
+            // Resize the crop area to a standard square so the AI model
+            // gets a square image and returns the same size predictably.
+            val SQUARE_SIZE = 1024
+            // 1. Resize proportionally so min dimension = SQUARE_SIZE
+            val minSide = minOf(cropped.width, cropped.height)
+            val scale = if (minSide < SQUARE_SIZE) {
+                SQUARE_SIZE.toFloat() / minSide.toFloat()
+            } else 1f
+            val resizedW = (cropped.width * scale).roundToInt()
+            val resizedH = (cropped.height * scale).roundToInt()
+            val resized = Bitmap.createScaledBitmap(cropped, resizedW, resizedH, true)
+            cropped.recycle()
+            // 2. Center-crop to SQUARE_SIZE x SQUARE_SIZE
+            val square = Bitmap.createBitmap(
+                resized,
+                (resizedW - SQUARE_SIZE) / 2,
+                (resizedH - SQUARE_SIZE) / 2,
+                SQUARE_SIZE,
+                SQUARE_SIZE
+            )
+            resized.recycle()
 
             val bytes = java.io.ByteArrayOutputStream()
-            cropped.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
-            cropped.recycle()
+            square.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
+            square.recycle()
             CroppedImageData(
                 base64 = Base64.getEncoder().encodeToString(bytes.toByteArray()),
-                width = inputW,
-                height = inputH
+                width = SQUARE_SIZE,
+                height = SQUARE_SIZE
             )
         } catch (e: Exception) {
             e.printStackTrace()
@@ -401,8 +408,8 @@ class AiEditService {
 
     /**
      * Load an entire image file, encode it as base64, and return its pixel
-     * dimensions. Also upscales if either side is < 512px, applying the same
-     * minimum-resolution policy as [cropAndEncode].
+     * dimensions. Resizes to a standard square for predictable AI output,
+     * matching the same policy as [cropAndEncode].
      */
     private fun loadFullImageData(sourcePath: String): CroppedImageData? {
         return try {
@@ -411,30 +418,32 @@ class AiEditService {
 
             val rawBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
             val srcBitmap = applyExifOrientation(sourcePath, rawBitmap)
-            var inputW = srcBitmap.width
-            var inputH = srcBitmap.height
 
-            // Upscale to at least 512px on each side
-            val MIN_SIDE = 512
-            var bitmap = srcBitmap
-            if (inputW < MIN_SIDE || inputH < MIN_SIDE) {
-                val scale = MIN_SIDE.toFloat() / minOf(inputW, inputH)
-                val newW = (inputW * scale).roundToInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
-                val newH = (inputH * scale).roundToInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
-                val scaled = Bitmap.createScaledBitmap(srcBitmap, newW, newH, true)
-                srcBitmap.recycle()
-                bitmap = scaled
-                inputW = newW
-                inputH = newH
-            }
+            val SQUARE_SIZE = 1024
+            val minSide = minOf(srcBitmap.width, srcBitmap.height)
+            val scale = if (minSide < SQUARE_SIZE) {
+                SQUARE_SIZE.toFloat() / minSide.toFloat()
+            } else 1f
+            val resizedW = (srcBitmap.width * scale).roundToInt()
+            val resizedH = (srcBitmap.height * scale).roundToInt()
+            val resized = Bitmap.createScaledBitmap(srcBitmap, resizedW, resizedH, true)
+            srcBitmap.recycle()
+            val square = Bitmap.createBitmap(
+                resized,
+                (resizedW - SQUARE_SIZE) / 2,
+                (resizedH - SQUARE_SIZE) / 2,
+                SQUARE_SIZE,
+                SQUARE_SIZE
+            )
+            resized.recycle()
 
             val bytes = java.io.ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
-            bitmap.recycle()
+            square.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
+            square.recycle()
             CroppedImageData(
                 base64 = Base64.getEncoder().encodeToString(bytes.toByteArray()),
-                width = inputW,
-                height = inputH
+                width = SQUARE_SIZE,
+                height = SQUARE_SIZE
             )
         } catch (e: Exception) {
             e.printStackTrace()
