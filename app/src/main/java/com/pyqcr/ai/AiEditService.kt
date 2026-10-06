@@ -32,6 +32,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.roundToInt
 
 /**
  * Normalized crop rectangle with coordinates 0f..1f relative to image dimensions.
@@ -283,11 +284,15 @@ class AiEditService {
             val srcBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
             val iw = srcBitmap.width
             val ih = srcBitmap.height
+            // Use roundToInt() instead of toInt() so pixel boundaries are the
+            // nearest integer, avoiding the systematic truncation bias that
+            // makes the cropped area slightly larger when left and right have
+            // different fractional parts.
             val pixelRect = android.graphics.Rect(
-                (cropRect.left * iw).toInt().coerceIn(0, iw),
-                (cropRect.top * ih).toInt().coerceIn(0, ih),
-                (cropRect.right * iw).toInt().coerceIn(0, iw),
-                (cropRect.bottom * ih).toInt().coerceIn(0, ih)
+                (cropRect.left * iw).roundToInt().coerceIn(0, iw),
+                (cropRect.top * ih).roundToInt().coerceIn(0, ih),
+                (cropRect.right * iw).roundToInt().coerceIn(0, iw),
+                (cropRect.bottom * ih).roundToInt().coerceIn(0, ih)
             )
             if (pixelRect.width() <= 0 || pixelRect.height() <= 0) {
                 srcBitmap.recycle()
@@ -306,8 +311,8 @@ class AiEditService {
             var inputH = cropped.height
             if (inputW < MIN_SIDE || inputH < MIN_SIDE) {
                 val scale = MIN_SIDE.toFloat() / minOf(inputW, inputH)
-                val newW = (inputW * scale).toInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
-                val newH = (inputH * scale).toInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
+                val newW = (inputW * scale).roundToInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
+                val newH = (inputH * scale).roundToInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
                 val scaled = Bitmap.createScaledBitmap(cropped, newW, newH, true)
                 cropped.recycle()
                 cropped = scaled
@@ -348,8 +353,8 @@ class AiEditService {
             var bitmap = srcBitmap
             if (inputW < MIN_SIDE || inputH < MIN_SIDE) {
                 val scale = MIN_SIDE.toFloat() / minOf(inputW, inputH)
-                val newW = (inputW * scale).toInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
-                val newH = (inputH * scale).toInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
+                val newW = (inputW * scale).roundToInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
+                val newH = (inputH * scale).roundToInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
                 val scaled = Bitmap.createScaledBitmap(srcBitmap, newW, newH, true)
                 srcBitmap.recycle()
                 bitmap = scaled
@@ -394,11 +399,12 @@ class AiEditService {
 
             val iw = original.width
             val ih = original.height
+            // roundToInt() instead of toInt() — must match cropAndEncode
             val pixelRect = android.graphics.Rect(
-                (cropRect.left * iw).toInt().coerceIn(0, iw),
-                (cropRect.top * ih).toInt().coerceIn(0, ih),
-                (cropRect.right * iw).toInt().coerceIn(0, iw),
-                (cropRect.bottom * ih).toInt().coerceIn(0, ih)
+                (cropRect.left * iw).roundToInt().coerceIn(0, iw),
+                (cropRect.top * ih).roundToInt().coerceIn(0, ih),
+                (cropRect.right * iw).roundToInt().coerceIn(0, iw),
+                (cropRect.bottom * ih).roundToInt().coerceIn(0, ih)
             )
             val cropW = pixelRect.width()
             val cropH = pixelRect.height()
@@ -415,7 +421,11 @@ class AiEditService {
             // to avoid sub-pixel rendering offsets when drawing at the crop position.
             val result = original.copy(Bitmap.Config.ARGB_8888, true)
             val canvas = Canvas(result)
-            val paint = Paint().apply { isFilterBitmap = true }
+            // isFilterBitmap=false since the AI result is already pre-scaled to
+            // cropW×cropH — no filtering needed for a 1:1 pixel copy, and it
+            // prevents bilinear edge bleed that could make the composite seem
+            // slightly larger than the selection.
+            val paint = Paint().apply { isFilterBitmap = false }
             canvas.drawBitmap(scaledEdited,
                 android.graphics.Rect(0, 0, scaledEdited.width, scaledEdited.height),
                 android.graphics.Rect(pixelRect.left, pixelRect.top, pixelRect.right, pixelRect.bottom),
