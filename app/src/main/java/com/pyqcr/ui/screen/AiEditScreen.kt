@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -724,13 +725,15 @@ fun AiEditScreen(
                     ) {
                         Column(modifier = Modifier.padding(8.dp)) {
                             debugLog.forEach { line ->
-                                Text(
-                                    text = line,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFFCDD6F4),
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    fontSize = MaterialTheme.typography.labelSmall.fontSize
-                                )
+                                SelectionContainer {
+                                    Text(
+                                        text = line,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFFCDD6F4),
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        fontSize = MaterialTheme.typography.labelSmall.fontSize
+                                    )
+                                }
                             }
                         }
                     }

@@ -667,7 +667,7 @@ class AiEditService {
             for (item in content) {
                 val obj = item.asJsonObject
                 val type = obj.get("type")?.asString
-                if (type == "image") {
+                if (type == "image" || type == "image_url") {
                     val imageValue = obj.get("image")
                     if (imageValue != null) {
                         if (imageValue.isJsonPrimitive && imageValue.asJsonPrimitive.isString) {
@@ -679,6 +679,12 @@ class AiEditService {
                     }
                     val directUrl = obj.get("url")?.asString
                     if (directUrl != null) return directUrl
+                }
+                // Some models (e.g. qwen-image-edit-plus) omit the "type"
+                // field and only include "image" + "role".
+                val imageValue = obj.get("image")
+                if (imageValue != null && imageValue.isJsonPrimitive && imageValue.asJsonPrimitive.isString) {
+                    return imageValue.asString
                 }
             }
             val resultUrl = output.get("result_url")?.asString
