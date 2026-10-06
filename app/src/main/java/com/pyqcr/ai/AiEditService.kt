@@ -591,7 +591,7 @@ class AiEditService {
                 onDebug("  Response HTTP ${response.code}")
 
                 if (response.isSuccessful) {
-                    val jsonResponse = JsonParser.parseString(rawBody).asJsonObject
+                    val jsonResponse = JsonParser.parseString(rawBody.sanitizeJson()).asJsonObject
                     val choices = jsonResponse.getAsJsonArray("choices")
                     if (choices != null && choices.size() > 0) {
                         val messageContent = choices[0].asJsonObject
@@ -646,10 +646,18 @@ class AiEditService {
 
     /**
      * Extract the first image URL from the Wan2.7 API response JSON.
+     * Strips any leading/trailing non-JSON characters before parsing.
      */
     private fun extractImageUrl(rawBody: String): String? {
         return try {
-            val root = JsonParser.parseString(rawBody).asJsonObject
+            // Sanitize: find the first '{' and last '}' to strip any
+            // non-JSON prefix/suffix (e.g. encoding artifacts or
+            // gateway banners) that would break JsonParser.
+            val start = rawBody.indexOf('{')
+            val end = rawBody.lastIndexOf('}')
+            if (start == -1 || end == -1 || start >= end) return null
+            val clean = rawBody.substring(start, end + 1)
+            val root = JsonParser.parseString(clean).asJsonObject
             val output = root.getAsJsonObject("output") ?: return null
             val choices = output.getAsJsonArray("choices") ?: return null
             if (choices.size() == 0) return null
@@ -739,4 +747,15 @@ class AiEditService {
     companion object {
         private const val TAG = "AiEditService"
     }
+}
+
+/**
+ * Strip leading/trailing non-JSON characters from a raw response body
+ * so [JsonParser.parseString] does not choke on encoding artifacts.
+ */
+private fun String.sanitizeJson(): String {
+    val start = indexOf('{')
+    val end = lastIndexOf('}')
+    if (start == -1 || end == -1 || start >= end) return this
+    return substring(start, end + 1)
 }
