@@ -49,7 +49,7 @@ data class CropRect(
 /**
  * Image data prepared for the AI API: base64-encoded bytes with the pixel
  * dimensions of the image being sent (after optional upscaling to meet the
- * minimum 200px resolution requirement).
+ * minimum 512px resolution requirement).
  */
 data class CroppedImageData(
     val base64: String,
@@ -271,8 +271,8 @@ class AiEditService {
      * Crop the source image to the normalized [CropRect] and encode the
      * cropped area as a base64 data URL string.
      *
-     * If the cropped region is smaller than 200px on either side, it is
-     * upscaled proportionally so the minimum dimension is at least 200px,
+     * If the cropped region is smaller than 512px on either side, it is
+     * upscaled proportionally so the minimum dimension is at least 512px,
      * satisfying the minimum resolution requirement of some AI models.
      *
      * @return [CroppedImageData] with the base64 string and the actual pixel
@@ -300,8 +300,8 @@ class AiEditService {
             )
             srcBitmap.recycle()
 
-            // Upscale to at least 200px on each side
-            val MIN_SIDE = 200
+            // Upscale to at least 512px on each side
+            val MIN_SIDE = 512
             var inputW = cropped.width
             var inputH = cropped.height
             if (inputW < MIN_SIDE || inputH < MIN_SIDE) {
@@ -331,7 +331,7 @@ class AiEditService {
 
     /**
      * Load an entire image file, encode it as base64, and return its pixel
-     * dimensions. Also upscales if either side is < 200px, applying the same
+     * dimensions. Also upscales if either side is < 512px, applying the same
      * minimum-resolution policy as [cropAndEncode].
      */
     private fun loadFullImageData(sourcePath: String): CroppedImageData? {
@@ -343,8 +343,8 @@ class AiEditService {
             var inputW = srcBitmap.width
             var inputH = srcBitmap.height
 
-            // Upscale to at least 200px on each side
-            val MIN_SIDE = 200
+            // Upscale to at least 512px on each side
+            val MIN_SIDE = 512
             var bitmap = srcBitmap
             if (inputW < MIN_SIDE || inputH < MIN_SIDE) {
                 val scale = MIN_SIDE.toFloat() / minOf(inputW, inputH)

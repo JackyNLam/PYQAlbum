@@ -76,7 +76,6 @@ fun AiEditScreen(
 
     // Custom prompt
     var customPrompt by remember { mutableStateOf(loadAiEditPrompt(context)) }
-    var promptSaved by remember { mutableStateOf(false) }
 
     // Image data
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
@@ -191,7 +190,7 @@ fun AiEditScreen(
 
                         Spacer(Modifier.height(12.dp))
 
-                        // Save Config button
+                        // Save Config button (saves API key, model name, AND prompt)
                         var configSaved by remember { mutableStateOf(false) }
                         Button(
                             onClick = {
@@ -201,6 +200,7 @@ fun AiEditScreen(
                                 }
                                 saveAiEditApiKey(context, apiKey)
                                 saveAiEditModelName(context, modelName)
+                                saveAiEditPrompt(context, customPrompt)
                                 configSaved = true
                                 Toast.makeText(context, "Configuration saved", Toast.LENGTH_SHORT).show()
                             },
@@ -241,7 +241,7 @@ fun AiEditScreen(
 
                         OutlinedTextField(
                             value = customPrompt,
-                            onValueChange = { customPrompt = it; promptSaved = false },
+                            onValueChange = { customPrompt = it },
                             label = { Text("Describe the edit") },
                             placeholder = {
                                 Text("e.g. Apply the style from the reference image to the source image")
@@ -250,34 +250,6 @@ fun AiEditScreen(
                             maxLines = 6,
                             modifier = Modifier.fillMaxWidth()
                         )
-
-                        Spacer(Modifier.height(8.dp))
-
-                        // Save Prompt button
-                        Button(
-                            onClick = {
-                                saveAiEditPrompt(context, customPrompt)
-                                promptSaved = true
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(
-                                Icons.Default.Save,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Save Prompt")
-                        }
-
-                        if (promptSaved) {
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                text = "✓ Prompt saved",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
                     }
                 }
             }
