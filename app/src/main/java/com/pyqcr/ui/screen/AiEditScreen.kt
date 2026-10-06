@@ -75,7 +75,8 @@ fun AiEditScreen(
     var showApiKey by remember { mutableStateOf(false) }
 
     // Custom prompt
-    var customPrompt by remember { mutableStateOf("") }
+    var customPrompt by remember { mutableStateOf(loadAiEditPrompt(context)) }
+    var promptSaved by remember { mutableStateOf(false) }
 
     // Image data
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
@@ -240,7 +241,7 @@ fun AiEditScreen(
 
                         OutlinedTextField(
                             value = customPrompt,
-                            onValueChange = { customPrompt = it },
+                            onValueChange = { customPrompt = it; promptSaved = false },
                             label = { Text("Describe the edit") },
                             placeholder = {
                                 Text("e.g. Apply the style from the reference image to the source image")
@@ -249,6 +250,34 @@ fun AiEditScreen(
                             maxLines = 6,
                             modifier = Modifier.fillMaxWidth()
                         )
+
+                        Spacer(Modifier.height(8.dp))
+
+                        // Save Prompt button
+                        Button(
+                            onClick = {
+                                saveAiEditPrompt(context, customPrompt)
+                                promptSaved = true
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Default.Save,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Save Prompt")
+                        }
+
+                        if (promptSaved) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = "✓ Prompt saved",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
             }
@@ -813,7 +842,8 @@ fun AiEditScreen(
 private const val AI_EDIT_PREFS = "pyqcr_ai_edit_prefs"
 private const val KEY_API_KEY = "ai_edit_api_key"
 private const val KEY_MODEL_NAME = "ai_edit_model_name"
-private const val DEFAULT_EDIT_MODEL = "wan2.7-image-pro"
+private const val KEY_SAVED_PROMPT = "ai_edit_saved_prompt"
+private const val DEFAULT_EDIT_MODEL = "qwen-image-edit-plus"
 
 private fun getEditEncryptedPrefs(context: Context): android.content.SharedPreferences? {
     return try {
@@ -850,6 +880,16 @@ private fun loadAiEditModelName(context: Context): String {
 private fun saveAiEditModelName(context: Context, model: String) {
     val prefs = context.getSharedPreferences("pyqcr_ai_edit_config", Context.MODE_PRIVATE)
     prefs.edit().putString(KEY_MODEL_NAME, model).apply()
+}
+
+private fun loadAiEditPrompt(context: Context): String {
+    val prefs = context.getSharedPreferences("pyqcr_ai_edit_config", Context.MODE_PRIVATE)
+    return prefs.getString(KEY_SAVED_PROMPT, "") ?: ""
+}
+
+private fun saveAiEditPrompt(context: Context, prompt: String) {
+    val prefs = context.getSharedPreferences("pyqcr_ai_edit_config", Context.MODE_PRIVATE)
+    prefs.edit().putString(KEY_SAVED_PROMPT, prompt).apply()
 }
 
 /**

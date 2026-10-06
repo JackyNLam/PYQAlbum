@@ -47,6 +47,17 @@ data class CropRect(
 }
 
 /**
+ * Image data prepared for the AI API: base64-encoded bytes with the pixel
+ * dimensions of the image being sent (after optional upscaling to meet the
+ * minimum 200px resolution requirement).
+ */
+data class CroppedImageData(
+    val base64: String,
+    val width: Int,
+    val height: Int
+)
+
+/**
  * AI Edit Service that calls the Wan2.7 Image Edit API via DashScope.
  *
  * This service sends cropped area(s) of source image(s) + an optional reference
@@ -99,22 +110,24 @@ class AiEditService {
             onDebug("▶️ Editing image ${index + 1}/$total: ${File(sourcePath).name}")
 
             val cropRect = cropRects[sourcePath]
-            val sourceBase64: String?
+            val inputImageData: CroppedImageData?
             val hasCrop = cropRect != null && cropRect.isValid()
 
             if (hasCrop) {
                 onDebug("  Cropping area (${"%.2f".format(cropRect!!.left)},${"%.2f".format(cropRect.top)})-(${"%.2f".format(cropRect.right)},${"%.2f".format(cropRect.bottom)})...")
-                sourceBase64 = cropAndEncode(sourcePath, cropRect)
+                inputImageData = cropAndEncode(sourcePath, cropRect)
             } else {
-                sourceBase64 = encodeImageToBase64(sourcePath)
+                inputImageData = loadFullImageData(sourcePath)
             }
 
-            if (sourceBase64 == null) {
+            if (inputImageData == null) {
                 onDebug("❌ Failed to process source image: $sourcePath")
                 completed++
                 onProgress(completed, total)
                 continue
             }
+
+            onDebug("  Input image: ${inputImageData.width}x${inputImageData.height}")
 
             val targetBase64 = if (targetImagePath != null) {
                 encodeImageToBase64(targetImagePath)
@@ -123,7 +136,7 @@ class AiEditService {
             // Build content array: source image, optional target reference, prompt
             val content = mutableListOf<Map<String, Any>>()
             content.add(mapOf(
-                "image" to "data:image/jpeg;base64,$sourceBase64"
+                "image" to "data:image/jpeg;base64,${inputImageData.base64}"
             ))
             if (targetBase64 != null) {
                 content.add(mapOf(
@@ -143,7 +156,7 @@ class AiEditService {
                     )
                 ),
                 "parameters" to mapOf(
-                    "size" to "2K",
+                    "size" to "${inputImageData.width}*${inputImageData.height}",
                     "watermark" to false,
                     "n" to 1
                 )
@@ -257,8 +270,15 @@ class AiEditService {
     /**
      * Crop the source image to the normalized [CropRect] and encode the
      * cropped area as a base64 data URL string.
+     *
+     * If the cropped region is smaller than 200px on either side, it is
+     * upscaled proportionally so the minimum dimension is at least 200px,
+     * satisfying the minimum resolution requirement of some AI models.
+     *
+     * @return [CroppedImageData] with the base64 string and the actual pixel
+     *         dimensions of the image sent to the AI (after any upscaling).
      */
-    private fun cropAndEncode(sourcePath: String, cropRect: CropRect): String? {
+    private fun cropAndEncode(sourcePath: String, cropRect: CropRect): CroppedImageData? {
         return try {
             val srcBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
             val iw = srcBitmap.width
@@ -273,17 +293,78 @@ class AiEditService {
                 srcBitmap.recycle()
                 return null
             }
-            val cropped = Bitmap.createBitmap(
+            var cropped = Bitmap.createBitmap(
                 srcBitmap,
                 pixelRect.left, pixelRect.top,
                 pixelRect.width(), pixelRect.height()
             )
             srcBitmap.recycle()
 
+            // Upscale to at least 200px on each side
+            val MIN_SIDE = 200
+            var inputW = cropped.width
+            var inputH = cropped.height
+            if (inputW < MIN_SIDE || inputH < MIN_SIDE) {
+                val scale = MIN_SIDE.toFloat() / minOf(inputW, inputH)
+                val newW = (inputW * scale).toInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
+                val newH = (inputH * scale).toInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
+                val scaled = Bitmap.createScaledBitmap(cropped, newW, newH, true)
+                cropped.recycle()
+                cropped = scaled
+                inputW = newW
+                inputH = newH
+            }
+
             val bytes = java.io.ByteArrayOutputStream()
             cropped.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
             cropped.recycle()
-            Base64.getEncoder().encodeToString(bytes.toByteArray())
+            CroppedImageData(
+                base64 = Base64.getEncoder().encodeToString(bytes.toByteArray()),
+                width = inputW,
+                height = inputH
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Load an entire image file, encode it as base64, and return its pixel
+     * dimensions. Also upscales if either side is < 200px, applying the same
+     * minimum-resolution policy as [cropAndEncode].
+     */
+    private fun loadFullImageData(sourcePath: String): CroppedImageData? {
+        return try {
+            val file = File(sourcePath)
+            if (!file.exists()) return null
+
+            val srcBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
+            var inputW = srcBitmap.width
+            var inputH = srcBitmap.height
+
+            // Upscale to at least 200px on each side
+            val MIN_SIDE = 200
+            var bitmap = srcBitmap
+            if (inputW < MIN_SIDE || inputH < MIN_SIDE) {
+                val scale = MIN_SIDE.toFloat() / minOf(inputW, inputH)
+                val newW = (inputW * scale).toInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
+                val newH = (inputH * scale).toInt().coerceIn(MIN_SIDE, Int.MAX_VALUE)
+                val scaled = Bitmap.createScaledBitmap(srcBitmap, newW, newH, true)
+                srcBitmap.recycle()
+                bitmap = scaled
+                inputW = newW
+                inputH = newH
+            }
+
+            val bytes = java.io.ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
+            bitmap.recycle()
+            CroppedImageData(
+                base64 = Base64.getEncoder().encodeToString(bytes.toByteArray()),
+                width = inputW,
+                height = inputH
+            )
         } catch (e: Exception) {
             e.printStackTrace()
             null
@@ -330,11 +411,15 @@ class AiEditService {
                 edited
             }
 
-            // Composite onto the original
+            // Composite onto the original using integer-precise Rect dst
+            // to avoid sub-pixel rendering offsets when drawing at the crop position.
             val result = original.copy(Bitmap.Config.ARGB_8888, true)
             val canvas = Canvas(result)
             val paint = Paint().apply { isFilterBitmap = true }
-            canvas.drawBitmap(scaledEdited, pixelRect.left.toFloat(), pixelRect.top.toFloat(), paint)
+            canvas.drawBitmap(scaledEdited,
+                android.graphics.Rect(0, 0, scaledEdited.width, scaledEdited.height),
+                android.graphics.Rect(pixelRect.left, pixelRect.top, pixelRect.right, pixelRect.bottom),
+                paint)
 
             // Save via MediaStore (gallery-visible)
             val fileName = "PYQAlbum_AI_Edit_${System.currentTimeMillis()}$suffix.jpg"
@@ -457,12 +542,12 @@ class AiEditService {
             val cropRect = cropRects[sourcePath]
             val hasCrop = cropRect != null && cropRect.isValid()
 
-            val sourceBase64 = if (hasCrop) {
+            val inputImageData = if (hasCrop) {
                 cropAndEncode(sourcePath, cropRect!!)
             } else {
-                encodeImageToBase64(sourcePath)
+                loadFullImageData(sourcePath)
             }
-            if (sourceBase64 == null) {
+            if (inputImageData == null) {
                 completed++
                 onProgress(completed, total)
                 continue
@@ -471,7 +556,7 @@ class AiEditService {
             val content = mutableListOf<Map<String, Any>>()
             content.add(mapOf(
                 "type" to "image_url",
-                "image_url" to mapOf("url" to "data:image/jpeg;base64,$sourceBase64")
+                "image_url" to mapOf("url" to "data:image/jpeg;base64,${inputImageData.base64}")
             ))
             if (targetImagePath != null) {
                 val tb64 = encodeImageToBase64(targetImagePath)
