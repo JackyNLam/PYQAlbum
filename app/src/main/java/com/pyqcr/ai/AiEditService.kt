@@ -130,7 +130,7 @@ class AiEditService {
                 continue
             }
 
-            onDebug("  Input image: ${inputImageData.width}x${inputImageData.height}")
+            onDebug("  Input image: ${inputImageData.width}x${inputImageData.height}, requesting output size: 1024x1024")
 
             val targetBase64 = if (targetImagePath != null) {
                 encodeImageToBase64(targetImagePath)
@@ -159,7 +159,10 @@ class AiEditService {
                     )
                 ),
                 "parameters" to mapOf(
-                    "size" to "${inputImageData.width}*${inputImageData.height}",
+                    // Use a fixed standard output size because the model may
+                    // not support arbitrary input-image dimensions. The AI
+                    // result will be scaleToFit to the target crop area.
+                    "size" to "1024*1024",
                     "watermark" to false,
                     "n" to 1
                 )
