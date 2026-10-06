@@ -5,7 +5,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.graphics.Paint
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -279,9 +281,69 @@ class AiEditService {
      * @return [CroppedImageData] with the base64 string and the actual pixel
      *         dimensions of the image sent to the AI (after any upscaling).
      */
+    /**
+     * Rotate a decoded bitmap to match its EXIF orientation so pixel coordinates
+     * align with how [coil3.compose.AsyncImage] displays the image.
+     * Returns the original bitmap if no rotation is needed, or a new rotated
+     * bitmap (the caller should recycle the original after).
+     */
+    private fun applyExifOrientation(filePath: String, bitmap: Bitmap): Bitmap {
+        return try {
+            val exif = ExifInterface(filePath)
+            val orientation = exif.getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
+            val degrees = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> return bitmap
+            }
+            val matrix = Matrix().apply { postRotate(degrees) }
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            bitmap.recycle()
+            rotated
+        } catch (e: Exception) {
+            bitmap
+        }
+    }
+
+    /**
+     * Scale [source] to [targetW]×[targetH] preserving content as much as
+     * possible. If the aspect ratios differ, the source is center-cropped to
+     * match the target aspect ratio before scaling, preventing stretching.
+     */
+    private fun scaleToFit(source: Bitmap, targetW: Int, targetH: Int): Bitmap {
+        val srcRatio = source.width.toFloat() / source.height.toFloat()
+        val dstRatio = targetW.toFloat() / targetH.toFloat()
+        if (kotlin.math.abs(srcRatio - dstRatio) > 0.001f) {
+            // Aspect ratios differ — crop the source to match target ratio first
+            val cropW: Int
+            val cropH: Int
+            if (srcRatio > dstRatio) {
+                // Source is wider — crop horizontal edges
+                cropH = source.height
+                cropW = (cropH.toFloat() * dstRatio).roundToInt()
+            } else {
+                // Source is taller — crop vertical edges
+                cropW = source.width
+                cropH = (cropW.toFloat() / dstRatio).roundToInt()
+            }
+            val offsetX = (source.width - cropW) / 2
+            val offsetY = (source.height - cropH) / 2
+            val cropped = Bitmap.createBitmap(source, offsetX, offsetY, cropW, cropH)
+            val scaled = Bitmap.createScaledBitmap(cropped, targetW, targetH, true)
+            cropped.recycle()
+            return scaled
+        }
+        return Bitmap.createScaledBitmap(source, targetW, targetH, true)
+    }
+
     private fun cropAndEncode(sourcePath: String, cropRect: CropRect): CroppedImageData? {
         return try {
-            val srcBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
+            val rawBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
+            val srcBitmap = applyExifOrientation(sourcePath, rawBitmap)
             val iw = srcBitmap.width
             val ih = srcBitmap.height
             // Use roundToInt() instead of toInt() so pixel boundaries are the
@@ -344,7 +406,8 @@ class AiEditService {
             val file = File(sourcePath)
             if (!file.exists()) return null
 
-            val srcBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
+            val rawBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
+            val srcBitmap = applyExifOrientation(sourcePath, rawBitmap)
             var inputW = srcBitmap.width
             var inputH = srcBitmap.height
 
@@ -391,9 +454,11 @@ class AiEditService {
         onDebug: (String) -> Unit
     ): String? {
         return try {
-            // Load original and edited bitmaps
-            val original = BitmapFactory.decodeFile(originalPath) ?: return null
-            val edited = BitmapFactory.decodeFile(editedAreaPath) ?: run {
+            // Load original and edited bitmaps (apply EXIF rotation to both
+            // so pixel positions align with how the dialog displayed the image)
+            val rawOriginal = BitmapFactory.decodeFile(originalPath) ?: return null
+            val original = applyExifOrientation(originalPath, rawOriginal)
+            val rawEdited = BitmapFactory.decodeFile(editedAreaPath) ?: run {
                 original.recycle(); return null
             }
 
@@ -409,10 +474,17 @@ class AiEditService {
             val cropW = pixelRect.width()
             val cropH = pixelRect.height()
 
-            // Scale the AI-edited area to match the crop dimensions
+            // Log AI result dimensions vs expected
+            val edited = applyExifOrientation(editedAreaPath, rawEdited)
+            onDebug("  AI result: ${edited.width}x${edited.height}, expected crop area: ${cropW}x${cropH}")
+
+            // Scale the AI-edited area to match the crop dimensions.
+            // If the aspect ratio differs from expected, center-crop first
+            // to avoid stretching the content.
             val scaledEdited = if (edited.width != cropW || edited.height != cropH) {
-                onDebug("  Scaling AI result from ${edited.width}x${edited.height} to ${cropW}x${cropH}")
-                Bitmap.createScaledBitmap(edited, cropW, cropH, true)
+                val scaled = scaleToFit(edited, cropW, cropH)
+                edited.recycle()
+                scaled
             } else {
                 edited
             }

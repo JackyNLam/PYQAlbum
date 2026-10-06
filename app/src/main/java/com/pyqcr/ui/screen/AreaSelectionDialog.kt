@@ -2,6 +2,7 @@ package com.pyqcr.ui.screen
 
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.media.ExifInterface
 import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -217,6 +218,9 @@ private fun dragToCropRect(
 
 /**
  * Load just the pixel dimensions of an image without decoding the full bitmap.
+ * Also accounts for EXIF orientation so the returned dimensions match how
+ * [coil3.compose.AsyncImage] displays the image (which applies EXIF rotation
+ * automatically).
  * Supports content:// URIs and file paths.
  */
 private fun loadImageDimensions(context: Context, uriStr: String): Pair<Int, Int>? {
@@ -230,9 +234,41 @@ private fun loadImageDimensions(context: Context, uriStr: String): Pair<Int, Int
         } else {
             BitmapFactory.decodeFile(uriStr, opts)
         }
-        if (opts.outWidth > 0 && opts.outHeight > 0) {
-            Pair(opts.outWidth, opts.outHeight)
-        } else null
+        if (opts.outWidth <= 0 || opts.outHeight <= 0) return null
+
+        var w = opts.outWidth
+        var h = opts.outHeight
+
+        // Check EXIF orientation — Coil applies it, so the displayed
+        // dimensions may be swapped relative to the raw header values.
+        try {
+            val exif = if (uriStr.startsWith("content://")) {
+                val uri = Uri.parse(uriStr)
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    ExifInterface(input)
+                }
+            } else {
+                ExifInterface(uriStr)
+            }
+            if (exif != null) {
+                val orientation = exif.getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+                )
+                if (orientation == ExifInterface.ORIENTATION_ROTATE_90 ||
+                    orientation == ExifInterface.ORIENTATION_ROTATE_270 ||
+                    orientation == ExifInterface.ORIENTATION_TRANSPOSE ||
+                    orientation == ExifInterface.ORIENTATION_TRANSVERSE
+                ) {
+                    w = opts.outHeight
+                    h = opts.outWidth
+                }
+            }
+        } catch (_: Exception) {
+            // EXIF not available or readable — use raw dimensions
+        }
+
+        Pair(w, h)
     } catch (e: Exception) {
         null
     }
