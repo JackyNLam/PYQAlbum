@@ -5,16 +5,35 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+// Stable signing for update-in-place installs: the keystore is injected by CI
+// from GitHub secrets (KEYSTORE_FILE / KEYSTORE_PASSWORD) so every build shares
+// the same signature. Without those env vars (e.g. a local build) the APK is
+// left with the default debug/unsigned config, matching previous behavior.
+val hasKeystore = !System.getenv("KEYSTORE_FILE").isNullOrBlank()
+
 android {
     namespace = "com.pyqcr"
     compileSdk = 35
+
+    signingConfigs {
+        if (hasKeystore) {
+            create("release") {
+                storeFile = file(System.getenv("KEYSTORE_FILE"))
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEYSTORE_KEY_ALIAS") ?: "pyqalbum"
+                keyPassword = System.getenv("KEYSTORE_PASSWORD")
+            }
+        }
+    }
 
     defaultConfig {
         applicationId = "com.pyqcr"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // Monotonic version from CI (github.run_number) so each push installs
+        // as an update over the previous APK instead of requiring uninstall.
+        versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("VERSION_NAME") ?: "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -26,6 +45,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+        debug {
+            if (hasKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

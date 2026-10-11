@@ -10,6 +10,11 @@
 local.properties
 *.apk
 *.aab
+*.p12
+*.jks
+*.keystore
+app/keystore/
+keystore.properties
 *.ap_
 *.dex
 *.class
