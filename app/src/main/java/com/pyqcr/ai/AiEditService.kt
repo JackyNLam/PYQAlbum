@@ -222,6 +222,28 @@ class AiEditService {
                     downloadImage(imageUrl, tempFile)
 
                     if (hasCrop && cropRect != null) {
+                        val ts = System.currentTimeMillis()
+                        val baseName = "PYQAlbum_AI_Edit_${ts}_ai_edit_${index}"
+
+                        // Debug 1: the exact image sent to the AI
+                        // (cropped area, resized to 1024x1024 square).
+                        val inputBytes = Base64.getDecoder().decode(inputImageData.base64)
+                        val inputUri = saveImageBytesToMediaStore(
+                            context, inputBytes, "${baseName}_input.jpg", onDebug
+                        )
+                        if (inputUri != null) {
+                            onDebug("  📥 Saved AI input debug image: $inputUri")
+                        }
+
+                        // Debug 2: the raw AI result before any correction
+                        // (downloaded as-is from the API).
+                        val resultUri = saveImageFileToMediaStore(
+                            context, tempFile, "${baseName}_result.jpg", onDebug
+                        )
+                        if (resultUri != null) {
+                            onDebug("  📤 Saved AI result debug image: $resultUri")
+                        }
+
                         // Composite the edited area back onto the original
                         val savedUri = compositeAndSaveToMediaStore(
                             context = context,
@@ -229,7 +251,8 @@ class AiEditService {
                             editedAreaPath = tempFile.absolutePath,
                             cropRect = cropRect,
                             suffix = "_ai_edit_${index}",
-                            onDebug = onDebug
+                            onDebug = onDebug,
+                            fileName = "${baseName}.jpg"
                         )
                         if (savedUri != null) {
                             outputUris.add(savedUri)
@@ -455,6 +478,8 @@ class AiEditService {
      * Composite the AI-edited area bitmap onto the original image at the crop
      * position, then save the result to the device gallery via MediaStore.
      *
+     * @param fileName Optional explicit output file name; when null a name is
+     *   generated from [suffix] and the current time.
      * @return The MediaStore content:// URI string, or null on failure.
      */
     private fun compositeAndSaveToMediaStore(
@@ -463,7 +488,8 @@ class AiEditService {
         editedAreaPath: String,
         cropRect: CropRect,
         suffix: String,
-        onDebug: (String) -> Unit
+        onDebug: (String) -> Unit,
+        fileName: String? = null
     ): String? {
         return try {
             // Load original and edited bitmaps (apply EXIF rotation to both
@@ -516,8 +542,8 @@ class AiEditService {
                 paint)
 
             // Save via MediaStore (gallery-visible)
-            val fileName = "PYQAlbum_AI_Edit_${System.currentTimeMillis()}$suffix.jpg"
-            val savedUri = saveToMediaStore(context, result, fileName, onDebug)
+            val outName = fileName ?: "PYQAlbum_AI_Edit_${System.currentTimeMillis()}$suffix.jpg"
+            val savedUri = saveToMediaStore(context, result, outName, onDebug)
 
             // Clean up
             original.recycle()
@@ -601,6 +627,118 @@ class AiEditService {
             }
         } catch (e: Exception) {
             onDebug("  ❌ MediaStore save failed: ${e::class.simpleName}: ${e.message}")
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Save arbitrary image bytes (e.g. the image sent to the AI, or the raw
+     * AI result) to the gallery for debugging. Decodes to a Bitmap first so
+     * the stored copy is a readable JPEG; if decoding fails, the raw bytes
+     * are written as-is.
+     */
+    private fun saveImageBytesToMediaStore(
+        context: Context,
+        bytes: ByteArray,
+        fileName: String,
+        onDebug: (String) -> Unit
+    ): String? {
+        return try {
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            if (bitmap != null) {
+                val uri = saveToMediaStore(context, bitmap, fileName, onDebug)
+                bitmap.recycle()
+                uri
+            } else {
+                onDebug("  ⚠️ Could not decode debug image bytes, storing raw bytes: $fileName")
+                saveRawBytesToMediaStore(context, bytes, fileName, onDebug)
+            }
+        } catch (e: Exception) {
+            onDebug("  ❌ Debug image save failed: ${e::class.simpleName}: ${e.message}")
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Convenience wrapper: save an image file to the gallery for debugging.
+     */
+    private fun saveImageFileToMediaStore(
+        context: Context,
+        file: File,
+        fileName: String,
+        onDebug: (String) -> Unit
+    ): String? {
+        return try {
+            if (!file.exists()) {
+                onDebug("  ⚠️ Debug file missing: ${file.absolutePath}")
+                return null
+            }
+            saveImageBytesToMediaStore(context, file.readBytes(), fileName, onDebug)
+        } catch (e: Exception) {
+            onDebug("  ❌ Debug file read failed: ${e::class.simpleName}: ${e.message}")
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Write raw bytes to the gallery without decoding. Used as a fallback
+     * when the image format is not decodable by BitmapFactory.
+     */
+    private fun saveRawBytesToMediaStore(
+        context: Context,
+        bytes: ByteArray,
+        fileName: String,
+        onDebug: (String) -> Unit
+    ): String? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(
+                        MediaStore.Images.Media.RELATIVE_PATH,
+                        Environment.DIRECTORY_PICTURES + "/PYQAlbum"
+                    )
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = context.contentResolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    values
+                ) ?: return null
+
+                val written = context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(bytes)
+                } ?: false
+
+                if (!written) {
+                    context.contentResolver.delete(uri, null, null)
+                    return null
+                }
+
+                val updateValues = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                context.contentResolver.update(uri, updateValues, null, null)
+                uri.toString()
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "PYQAlbum"
+                )
+                if (!dir.exists()) dir.mkdirs()
+                val file = File(dir, fileName)
+                FileOutputStream(file).use { out -> out.write(bytes) }
+                try {
+                    android.media.MediaScannerConnection.scanFile(
+                        context, arrayOf(file.absolutePath), null, null
+                    )
+                } catch (_: Exception) {}
+                file.absolutePath
+            }
+        } catch (e: Exception) {
+            onDebug("  ❌ Raw debug save failed: ${e::class.simpleName}: ${e.message}")
             e.printStackTrace()
             null
         }
