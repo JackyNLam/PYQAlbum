@@ -162,8 +162,11 @@ class AiEditService {
                 "parameters" to mapOf(
                     // Request the exact size of the image we sent. qwen-image-2.0
                     // supports freely set width/height (total pixels between
-                    // 512x512 and 2048x2048), so the AI result comes back at the
-                    // selection's aspect ratio. scaleToFit() is the safety net
+                    // 512x512 and 2048x2048), and both are snapped to multiples
+                    // of 16 — the same grid the API generates on — so the AI
+                    // result comes back at the selection's aspect ratio without
+                    // the grid mismatch that makes the model zoom out and
+                    // outpaint the borders. scaleToFit() is the safety net
                     // for any residual difference.
                     "size" to "${inputImageData.width}*${inputImageData.height}",
                     "watermark" to false,
@@ -331,12 +334,21 @@ class AiEditService {
     /**
      * Scale a bitmap to a size the qwen-image-2.0 API accepts while keeping
      * the aspect ratio (no cropping, no padding). The policy: upscale so the
-     * shorter side is at least 512px, and downscale so the longer side is at
-     * most 2048px. Returns the same bitmap when no resize is needed.
+     * shorter side is at least 512px, downscale so the longer side is at
+     * most 2048px, then snap both dimensions to the nearest multiple of 16.
+     * Returns the same bitmap when no resize is needed.
+     *
+     * The 16px grid matters: the API rounds the requested output size to the
+     * nearest multiple of 16, so an un-snapped input (e.g. 1094x1433) gets
+     * generated on a different grid (1088x1440). That mismatch makes the
+     * model reframe the scene — the subject shrinks and the borders get
+     * outpainted. Sending an already-snapped image and requesting that exact
+     * size keeps input and output on the same grid.
      */
     private fun resizeToApiSize(bitmap: Bitmap): Bitmap {
         val MIN_SIDE = 512
         val MAX_SIDE = 2048
+        val GRID = 16
         val w = bitmap.width
         val h = bitmap.height
         val minSide = minOf(w, h)
@@ -344,9 +356,9 @@ class AiEditService {
         var scale = 1f
         if (minSide < MIN_SIDE) scale = maxOf(scale, MIN_SIDE.toFloat() / minSide)
         if (maxSide > MAX_SIDE) scale = minOf(scale, MAX_SIDE.toFloat() / maxSide)
-        if (scale == 1f) return bitmap
-        val nw = (w * scale).roundToInt().coerceAtLeast(1)
-        val nh = (h * scale).roundToInt().coerceAtLeast(1)
+        val nw = (((w * scale) / GRID).roundToInt() * GRID).coerceAtLeast(GRID)
+        val nh = (((h * scale) / GRID).roundToInt() * GRID).coerceAtLeast(GRID)
+        if (nw == w && nh == h) return bitmap
         return Bitmap.createScaledBitmap(bitmap, nw, nh, true)
     }
 
@@ -386,9 +398,9 @@ class AiEditService {
      * cropped area as a base64 data URL string.
      *
      * The cropped region keeps its aspect ratio (scaled into the
-     * qwen-image-2.0 accepted range: min side 512px, max side 2048px) — no
-     * square center-crop, so the encoded image is exactly the area the user
-     * selected.
+     * qwen-image-2.0 accepted range: min side 512px, max side 2048px,
+     * snapped to multiples of 16) — no square center-crop, so the encoded
+     * image is exactly the area the user selected.
      *
      * @return [CroppedImageData] with the base64 string and the actual pixel
      *         dimensions of the image sent to the AI (after any scaling).
