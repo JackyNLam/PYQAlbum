@@ -131,7 +131,7 @@ class AiEditService {
                 continue
             }
 
-            onDebug("  Input image: ${inputImageData.width}x${inputImageData.height}, requesting output size: 1024x1024")
+            onDebug("  Input image: ${inputImageData.width}x${inputImageData.height}, requesting output size: ${inputImageData.width}x${inputImageData.height}")
 
             val targetBase64 = if (targetImagePath != null) {
                 encodeImageToBase64(targetImagePath)
@@ -160,10 +160,12 @@ class AiEditService {
                     )
                 ),
                 "parameters" to mapOf(
-                    // Use a fixed standard output size because the model may
-                    // not support arbitrary input-image dimensions. The AI
-                    // result will be scaleToFit to the target crop area.
-                    "size" to "1024*1024",
+                    // Request the exact size of the image we sent. qwen-image-2.0
+                    // supports freely set width/height (total pixels between
+                    // 512x512 and 2048x2048), so the AI result comes back at the
+                    // selection's aspect ratio. scaleToFit() is the safety net
+                    // for any residual difference.
+                    "size" to "${inputImageData.width}*${inputImageData.height}",
                     "watermark" to false,
                     "n" to 1
                 )
@@ -227,7 +229,8 @@ class AiEditService {
                         val baseName = "PYQAlbum_AI_Edit_${ts}_ai_edit_${index}"
 
                         // Debug 1: the exact image sent to the AI
-                        // (cropped area, resized to 1024x1024 square).
+                        // (cropped area, resized to the API size range while
+                        // keeping the selection's aspect ratio).
                         val inputBytes = Base64.getDecoder().decode(inputImageData.base64)
                         val inputUri = saveImageBytesToMediaStore(
                             context, inputBytes, "${baseName}_input.jpg", onDebug
@@ -298,17 +301,6 @@ class AiEditService {
     // ---- Crop & Composite helpers ----
 
     /**
-     * Crop the source image to the normalized [CropRect] and encode the
-     * cropped area as a base64 data URL string.
-     *
-     * If the cropped region is smaller than 512px on either side, it is
-     * upscaled proportionally so the minimum dimension is at least 512px,
-     * satisfying the minimum resolution requirement of some AI models.
-     *
-     * @return [CroppedImageData] with the base64 string and the actual pixel
-     *         dimensions of the image sent to the AI (after any upscaling).
-     */
-    /**
      * Rotate a decoded bitmap to match its EXIF orientation so pixel coordinates
      * align with how [coil3.compose.AsyncImage] displays the image.
      * Returns the original bitmap if no rotation is needed, or a new rotated
@@ -334,6 +326,28 @@ class AiEditService {
         } catch (e: Exception) {
             bitmap
         }
+    }
+
+    /**
+     * Scale a bitmap to a size the qwen-image-2.0 API accepts while keeping
+     * the aspect ratio (no cropping, no padding). The policy: upscale so the
+     * shorter side is at least 512px, and downscale so the longer side is at
+     * most 2048px. Returns the same bitmap when no resize is needed.
+     */
+    private fun resizeToApiSize(bitmap: Bitmap): Bitmap {
+        val MIN_SIDE = 512
+        val MAX_SIDE = 2048
+        val w = bitmap.width
+        val h = bitmap.height
+        val minSide = minOf(w, h)
+        val maxSide = maxOf(w, h)
+        var scale = 1f
+        if (minSide < MIN_SIDE) scale = maxOf(scale, MIN_SIDE.toFloat() / minSide)
+        if (maxSide > MAX_SIDE) scale = minOf(scale, MAX_SIDE.toFloat() / maxSide)
+        if (scale == 1f) return bitmap
+        val nw = (w * scale).roundToInt().coerceAtLeast(1)
+        val nh = (h * scale).roundToInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(bitmap, nw, nh, true)
     }
 
     /**
@@ -367,6 +381,18 @@ class AiEditService {
         return Bitmap.createScaledBitmap(source, targetW, targetH, true)
     }
 
+    /**
+     * Crop the source image to the normalized [CropRect] and encode the
+     * cropped area as a base64 data URL string.
+     *
+     * The cropped region keeps its aspect ratio (scaled into the
+     * qwen-image-2.0 accepted range: min side 512px, max side 2048px) — no
+     * square center-crop, so the encoded image is exactly the area the user
+     * selected.
+     *
+     * @return [CroppedImageData] with the base64 string and the actual pixel
+     *         dimensions of the image sent to the AI (after any scaling).
+     */
     private fun cropAndEncode(sourcePath: String, cropRect: CropRect): CroppedImageData? {
         return try {
             val rawBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
@@ -394,35 +420,23 @@ class AiEditService {
             )
             srcBitmap.recycle()
 
-            // Resize the crop area to a standard square so the AI model
-            // gets a square image and returns the same size predictably.
-            val SQUARE_SIZE = 1024
-            // 1. Resize proportionally so min dimension = SQUARE_SIZE
-            val minSide = minOf(cropped.width, cropped.height)
-            val scale = if (minSide < SQUARE_SIZE) {
-                SQUARE_SIZE.toFloat() / minSide.toFloat()
-            } else 1f
-            val resizedW = (cropped.width * scale).roundToInt()
-            val resizedH = (cropped.height * scale).roundToInt()
-            val resized = Bitmap.createScaledBitmap(cropped, resizedW, resizedH, true)
-            cropped.recycle()
-            // 2. Center-crop to SQUARE_SIZE x SQUARE_SIZE
-            val square = Bitmap.createBitmap(
-                resized,
-                (resizedW - SQUARE_SIZE) / 2,
-                (resizedH - SQUARE_SIZE) / 2,
-                SQUARE_SIZE,
-                SQUARE_SIZE
-            )
-            resized.recycle()
+            // Resize the crop area to a size the qwen-image-2.0 API accepts
+            // (each side within ~512..2048 px, aspect ratio preserved — no
+            // cropping, no padding) so the input sent to the AI is exactly
+            // the area the user selected. The output size is requested to
+            // match, and scaleToFit() handles any residual difference.
+            val resized = resizeToApiSize(cropped)
+            if (resized !== cropped) cropped.recycle()
+            val outW = resized.width
+            val outH = resized.height
 
             val bytes = java.io.ByteArrayOutputStream()
-            square.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
-            square.recycle()
+            resized.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
+            resized.recycle()
             CroppedImageData(
                 base64 = Base64.getEncoder().encodeToString(bytes.toByteArray()),
-                width = SQUARE_SIZE,
-                height = SQUARE_SIZE
+                width = outW,
+                height = outH
             )
         } catch (e: Exception) {
             e.printStackTrace()
@@ -432,7 +446,7 @@ class AiEditService {
 
     /**
      * Load an entire image file, encode it as base64, and return its pixel
-     * dimensions. Resizes to a standard square for predictable AI output,
+     * dimensions. Resized into the API size range keeping the aspect ratio,
      * matching the same policy as [cropAndEncode].
      */
     private fun loadFullImageData(sourcePath: String): CroppedImageData? {
@@ -443,31 +457,20 @@ class AiEditService {
             val rawBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
             val srcBitmap = applyExifOrientation(sourcePath, rawBitmap)
 
-            val SQUARE_SIZE = 1024
-            val minSide = minOf(srcBitmap.width, srcBitmap.height)
-            val scale = if (minSide < SQUARE_SIZE) {
-                SQUARE_SIZE.toFloat() / minSide.toFloat()
-            } else 1f
-            val resizedW = (srcBitmap.width * scale).roundToInt()
-            val resizedH = (srcBitmap.height * scale).roundToInt()
-            val resized = Bitmap.createScaledBitmap(srcBitmap, resizedW, resizedH, true)
-            srcBitmap.recycle()
-            val square = Bitmap.createBitmap(
-                resized,
-                (resizedW - SQUARE_SIZE) / 2,
-                (resizedH - SQUARE_SIZE) / 2,
-                SQUARE_SIZE,
-                SQUARE_SIZE
-            )
-            resized.recycle()
+            // Same API-size policy as cropAndEncode — preserve the full-image
+            // aspect ratio (no square center-crop).
+            val resized = resizeToApiSize(srcBitmap)
+            if (resized !== srcBitmap) srcBitmap.recycle()
+            val outW = resized.width
+            val outH = resized.height
 
             val bytes = java.io.ByteArrayOutputStream()
-            square.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
-            square.recycle()
+            resized.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
+            resized.recycle()
             CroppedImageData(
                 base64 = Base64.getEncoder().encodeToString(bytes.toByteArray()),
-                width = SQUARE_SIZE,
-                height = SQUARE_SIZE
+                width = outW,
+                height = outH
             )
         } catch (e: Exception) {
             e.printStackTrace()

@@ -61,7 +61,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 │           ├── PyqCrApp.kt              # Application class + Coil ImageLoaderFactory
 │           ├── MainActivity.kt           # Single Activity, edge-to-edge
 │           ├── ai/
-│           │   ├── AiEditService.kt      # qwen-image-edit-plus AI edit (DashScope)
+│           │   ├── AiEditService.kt      # qwen-image-2.0 AI edit (DashScope)
 │           │   ├── AiRatingService.kt    # DashScope API batch scoring (10 img/batch)
 │           │   └── ImageResizer.kt       # Resize to 800px max, cache in ai_rating/
 │           ├── data/
@@ -93,7 +93,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | `tag` | `TagScreen` | Tag list → images per tag *(can be discovered via drawer, or navigated separately)* |
 | `rating` | `RatingScreen` | Sort/filter by user rating or AI score *(still accessible via nav route)* |
 | `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, swipe down to go back, swipe up for controls |
-| `ai_edit` | `AiEditScreen` | **AI Image Editing**: qwen-image-edit-plus — select source image + drag to select area + optional target reference + prompt → AI edits area, composited back |
+| `ai_edit` | `AiEditScreen` | **AI Image Editing**: qwen-image-2.0 — select source image + drag to select area + optional target reference + prompt → AI edits area, composited back |
 | `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
@@ -232,7 +232,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ### AI Edit Screen
 - **API Configuration** card with:
   - DashScope API Key input (encrypted storage via separate EncryptedSharedPreferences from AI Rating)
-  - Model Name input (default `qwen-image-edit-plus`)
+  - Model Name input (default `qwen-image-2.0`)
   - **Save Config** button — persists API Key, Model name, **and** the edit prompt in one tap
 - **Edit Prompt** card: multi-line `OutlinedTextField` (3–6 lines) for the user's custom edit instruction (e.g. "replace the person with the one from the target image"); saved by the Save Config button
 - **Source Images** card:
@@ -250,9 +250,9 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - Validates API key, at least one source area, and non-empty prompt
   - Launches `AiEditService.editImages()` via OkHttp coroutine
   - **LinearProgressIndicator** with "X / Y images done" status
-- **Input pipeline** (per selected area): EXIF orientation correction → crop to the selected `CropRect` → resize proportionally so the smaller side = 1024px → **center-crop to a 1024×1024 square** → encode JPEG → send with a fixed `size=1024*1024` parameter, so AI input and output dimensions always match
+- **Input pipeline** (per selected area): EXIF orientation correction → crop to the selected `CropRect` → resize keeping the selection's aspect ratio into the API-accepted range (min side 512px, max side 2048px, no square center-crop) → encode JPEG → send with `size=<sentW>*<sentH>` matching the sent image, so the input is exactly the selected area and the AI result comes back at the same size
 - **Composite & save**: the downloaded AI result is resized back to the **exact pixel size of the original selection** (`scaleToFit`), then drawn onto the original at integer-pixel coordinates (`Rect`-based `drawBitmap`, `isFilterBitmap=false`) and saved to `Pictures/PYQAlbum/` via MediaStore
-- **Debug images**: for every cropped edit, three gallery images are saved with a shared base name for side-by-side debugging — `<base>.jpg` (final composite), `<base>_input.jpg` (the exact 1024×1024 image sent to the AI), `<base>_result.jpg` (raw AI result before any correction). Used to diagnose the edited area not aligning with the rest of the picture
+- **Debug images**: for every cropped edit, three gallery images are saved with a shared base name for side-by-side debugging — `<base>.jpg` (final composite), `<base>_input.jpg` (the exact image sent to the AI, scaled at the selection's aspect ratio), `<base>_result.jpg` (raw AI result before any correction). Used to diagnose the edited area not aligning with the rest of the picture
 - **Debug Log** panel — dark terminal-style card (Color 0xFF1E1E2E background + 0xFFCDD6F4 text, monospace font), wrapped in `SelectionContainer` so the log text is **selectable/copyable**:
   - Per-image progress: crop → encode → API send → retry tracking → download → save
   - Full HTTP response status and body preview (up to 2000 chars)
@@ -261,7 +261,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - Retry logic: up to 3 attempts per image
   - "Clear Debug Log" button
 - **Results section**: list of saved file paths for successfully edited images
-- Uses **qwen-image-edit-plus** (DashScope `multimodal-generation/generation` endpoint) with fallback to chat-compatible endpoint
+- Uses **qwen-image-2.0** (DashScope `multimodal-generation/generation` endpoint) with fallback to chat-compatible endpoint
 - The service encodes source and target images to base64, composes a multimodal request with the custom prompt, downloads the edited result image, and composites it back onto the original at the selected position
 
 ### Tag/Rating Assignment
