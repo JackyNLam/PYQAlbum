@@ -61,7 +61,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 │           ├── PyqCrApp.kt              # Application class + Coil ImageLoaderFactory
 │           ├── MainActivity.kt           # Single Activity, edge-to-edge
 │           ├── ai/
-│           │   ├── AiEditService.kt      # Wan2.7 Image Edit API (DashScope)
+│           │   ├── AiEditService.kt      # qwen-image-edit-plus AI edit (DashScope)
 │           │   ├── AiRatingService.kt    # DashScope API batch scoring (10 img/batch)
 │           │   └── ImageResizer.kt       # Resize to 800px max, cache in ai_rating/
 │           ├── data/
@@ -93,7 +93,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | `tag` | `TagScreen` | Tag list → images per tag *(can be discovered via drawer, or navigated separately)* |
 | `rating` | `RatingScreen` | Sort/filter by user rating or AI score *(still accessible via nav route)* |
 | `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, swipe down to go back, swipe up for controls |
-| `ai_edit` | `AiEditScreen` | **AI Image Editing**: Wan2.7-powered source image + target reference → prompt → swap/edit |
+| `ai_edit` | `AiEditScreen` | **AI Image Editing**: qwen-image-edit-plus — select source image + drag to select area + optional target reference + prompt → AI edits area, composited back |
 | `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
@@ -232,32 +232,37 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ### AI Edit Screen
 - **API Configuration** card with:
   - DashScope API Key input (encrypted storage via separate EncryptedSharedPreferences from AI Rating)
-  - Model Name input (e.g. `wan2.7-image-pro`)
-  - **Save Config** button — persists both API Key and Model name
-- **Edit Prompt** card: multi-line `OutlinedTextField` (3–6 lines) for the user's custom edit instruction (e.g. "replace the person with the one from the target image")
+  - Model Name input (default `qwen-image-edit-plus`)
+  - **Save Config** button — persists API Key, Model name, **and** the edit prompt in one tap
+- **Edit Prompt** card: multi-line `OutlinedTextField` (3–6 lines) for the user's custom edit instruction (e.g. "replace the person with the one from the target image"); saved by the Save Config button
 - **Source Images** card:
   - Tap to open a **4-column LazyVerticalGrid** gallery picker to select source images
-  - Multi-select with ✓ green overlay badge and green border
-  - Red ✕ remove button per thumbnail
-  - At least one source image required to run
+  - Tap an **unselected** thumbnail → opens a drag-to-select **area dialog** (`AreaSelectionDialog`): drag a rectangle over the image to choose the exact region to edit (coordinates mapped through `ContentScale.Fit` letterboxing)
+  - Selected thumbnails show a **green border + white crop-rectangle overlay** (`ThumbnailCropOverlay`, letterboxing-corrected) labelled with the selection size in % (e.g. `60×40%`), and a red ✕ to remove
+  - Tap an already-selected thumbnail in the picker to deselect it
+  - At least one source image with a selected area required to run
 - **Target Image** card:
   - Tap to open a **4-column LazyVerticalGrid** gallery picker for single reference/target image
   - Orange border (Color 0xFFFF9800) on the selected target thumbnail
   - Close button (✕) to deselect target
   - Optional — if omitted, the edit operates on source image content alone
 - **Run AI Edit** button:
-  - Validates API key, at least one source image, and non-empty prompt
+  - Validates API key, at least one source area, and non-empty prompt
   - Launches `AiEditService.editImages()` via OkHttp coroutine
   - **LinearProgressIndicator** with "X / Y images done" status
-- **Debug Log** panel — dark terminal-style card (Color 0xFF1E1E2E background + 0xFFCDD6F4 text, monospace font):
-  - Per-image progress: encoding → API send → retry tracking → download → save
+- **Input pipeline** (per selected area): EXIF orientation correction → crop to the selected `CropRect` → resize proportionally so the smaller side = 1024px → **center-crop to a 1024×1024 square** → encode JPEG → send with a fixed `size=1024*1024` parameter, so AI input and output dimensions always match
+- **Composite & save**: the downloaded AI result is resized back to the **exact pixel size of the original selection** (`scaleToFit`), then drawn onto the original at integer-pixel coordinates (`Rect`-based `drawBitmap`, `isFilterBitmap=false`) and saved to `Pictures/PYQAlbum/` via MediaStore
+- **Debug images**: for every cropped edit, three gallery images are saved with a shared base name for side-by-side debugging — `<base>.jpg` (final composite), `<base>_input.jpg` (the exact 1024×1024 image sent to the AI), `<base>_result.jpg` (raw AI result before any correction). Used to diagnose the edited area not aligning with the rest of the picture
+- **Debug Log** panel — dark terminal-style card (Color 0xFF1E1E2E background + 0xFFCDD6F4 text, monospace font), wrapped in `SelectionContainer` so the log text is **selectable/copyable**:
+  - Per-image progress: crop → encode → API send → retry tracking → download → save
   - Full HTTP response status and body preview (up to 2000 chars)
+  - AI result dimensions vs expected crop area, plus saved debug image URIs
   - Error classification: quota exhausted, invalid API key, access denied, account arrears
-  - Retry logic: up to 3 attempts per image with exponential backoff
+  - Retry logic: up to 3 attempts per image
   - "Clear Debug Log" button
 - **Results section**: list of saved file paths for successfully edited images
-- Uses **Wan2.7 Image Edit API** (DashScope `multimodal-generation/generation` endpoint) with fallback to chat-compatible endpoint
-- The service encodes source and target images to base64, composes a multimodal request with the custom prompt, downloads the edited result image, and saves it to the app's output directory
+- Uses **qwen-image-edit-plus** (DashScope `multimodal-generation/generation` endpoint) with fallback to chat-compatible endpoint
+- The service encodes source and target images to base64, composes a multimodal request with the custom prompt, downloads the edited result image, and composites it back onto the original at the selected position
 
 ### Tag/Rating Assignment
 - **Long-press dialog** shows existing tags as selectable buttons before offering a "create new" option
