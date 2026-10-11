@@ -61,12 +61,13 @@ data class CroppedImageData(
 )
 
 /**
- * AI Edit Service that calls the Wan2.7 Image Edit API via DashScope.
+ * AI Edit Service that calls the Qwen Image Edit API via DashScope.
  *
  * This service sends cropped area(s) of source image(s) + an optional reference
- * target image + a custom prompt to the Wan2.7-image-pro multimodal model,
- * then composites the AI-edited area back onto the original source at the
- * same position and saves the result to a gallery-visible location.
+ * target image + a custom prompt to the qwen-image-2.0 / qwen-image-edit family
+ * multimodal model, then composites the AI-edited area back onto the original
+ * source at the same position and saves the result to a gallery-visible
+ * location.
  */
 class AiEditService {
 

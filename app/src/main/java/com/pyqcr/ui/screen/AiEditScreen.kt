@@ -183,7 +183,7 @@ fun AiEditScreen(
                             value = modelName,
                             onValueChange = { modelName = it },
                             label = { Text("Model Name") },
-                            placeholder = { Text("wan2.7-image-pro") },
+                            placeholder = { Text("qwen-image-2.0") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -191,7 +191,7 @@ fun AiEditScreen(
                         Spacer(Modifier.height(4.dp))
 
                         Text(
-                            text = "e.g. wan2.7-image-pro, wan2.7-image",
+                            text = "e.g. qwen-image-2.0-pro, qwen-image-2.0",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -883,7 +883,7 @@ private const val AI_EDIT_PREFS = "pyqcr_ai_edit_prefs"
 private const val KEY_API_KEY = "ai_edit_api_key"
 private const val KEY_MODEL_NAME = "ai_edit_model_name"
 private const val KEY_SAVED_PROMPT = "ai_edit_saved_prompt"
-private const val DEFAULT_EDIT_MODEL = "qwen-image-edit-plus"
+private const val DEFAULT_EDIT_MODEL = "qwen-image-2.0"
 
 private fun getEditEncryptedPrefs(context: Context): android.content.SharedPreferences? {
     return try {
