@@ -711,6 +711,7 @@ class AiEditService {
 
                 val written = context.contentResolver.openOutputStream(uri)?.use { out ->
                     out.write(bytes)
+                    true
                 } ?: false
 
                 if (!written) {
