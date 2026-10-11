@@ -137,16 +137,18 @@ class AiEditService {
                 encodeImageToBase64(targetImagePath)
             } else null
 
-            // Build content array: source image, optional target reference, prompt
+            // Build content array: target reference image first, source image to edit
+            // second, then the prompt. Swapped on user request: with the source first,
+            // the model based its output on the target image instead of the source.
             val content = mutableListOf<Map<String, Any>>()
-            content.add(mapOf(
-                "image" to "data:image/jpeg;base64,${inputImageData.base64}"
-            ))
             if (targetBase64 != null) {
                 content.add(mapOf(
                     "image" to "data:image/jpeg;base64,$targetBase64"
                 ))
             }
+            content.add(mapOf(
+                "image" to "data:image/jpeg;base64,${inputImageData.base64}"
+            ))
             content.add(mapOf("text" to prompt))
 
             val requestBody = mapOf(
@@ -802,11 +804,9 @@ class AiEditService {
                 continue
             }
 
+            // Same image ordering as editImages(): target reference image first,
+            // source image to edit second, then the prompt.
             val content = mutableListOf<Map<String, Any>>()
-            content.add(mapOf(
-                "type" to "image_url",
-                "image_url" to mapOf("url" to "data:image/jpeg;base64,${inputImageData.base64}")
-            ))
             if (targetImagePath != null) {
                 val tb64 = encodeImageToBase64(targetImagePath)
                 if (tb64 != null) {
@@ -816,6 +816,10 @@ class AiEditService {
                     ))
                 }
             }
+            content.add(mapOf(
+                "type" to "image_url",
+                "image_url" to mapOf("url" to "data:image/jpeg;base64,${inputImageData.base64}")
+            ))
             content.add(mapOf("type" to "text", "text" to prompt))
 
             val messages = listOf(
