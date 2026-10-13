@@ -249,20 +249,29 @@ fun AreaSelectionDialog(
                         // don't compound ("layering" effect) and eraser strokes
                         // punch real holes (PorterDuff CLEAR). The Bitmap is
                         // composited into the Compose Canvas at uniform alpha.
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val w = size.width.toInt().coerceAtLeast(1)
-                            val h = size.height.toInt().coerceAtLeast(1)
-                            val reference = minOf(size.width, size.height)
-
-                            val bitmap = remember(w, h) {
+                        var canvasW by remember { mutableStateOf(0) }
+                        var canvasH by remember { mutableStateOf(0) }
+                        val bitmap = remember(canvasW, canvasH) {
+                            if (canvasW > 0 && canvasH > 0)
                                 android.graphics.Bitmap.createBitmap(
-                                    w, h, android.graphics.Bitmap.Config.ARGB_8888
+                                    canvasW, canvasH,
+                                    android.graphics.Bitmap.Config.ARGB_8888
                                 )
-                            }
-                            val nativeCanvas = remember(bitmap) {
-                                android.graphics.Canvas(bitmap)
-                            }
-                            bitmap.eraseColor(0) // transparent
+                            else null
+                        }
+                        val nativeCanvas = remember(bitmap) {
+                            bitmap?.let { android.graphics.Canvas(it) }
+                        }
+
+                        Canvas(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .onSizeChanged { canvasW = it.width; canvasH = it.height }
+                        ) {
+                            val bmp = bitmap ?: return@Canvas
+                            val nc = nativeCanvas ?: return@Canvas
+                            bmp.eraseColor(0) // transparent
+                            val reference = minOf(size.width, size.height)
 
                             // Paint strokes (non-eraser) — full-opacity white
                             val paint = android.graphics.Paint().apply {
@@ -279,14 +288,14 @@ fun AreaSelectionDialog(
                                 paint.strokeWidth = strokePx
                                 if (stroke.points.size == 1) {
                                     val c = containerPoint(stroke.points[0])
-                                    nativeCanvas.drawCircle(c.x, c.y, strokePx / 2f, paint)
+                                    nc.drawCircle(c.x, c.y, strokePx / 2f, paint)
                                 } else {
                                     val p = android.graphics.Path()
                                     stroke.points.forEachIndexed { i, pt ->
                                         val o = containerPoint(pt)
                                         if (i == 0) p.moveTo(o.x, o.y) else p.lineTo(o.x, o.y)
                                     }
-                                    nativeCanvas.drawPath(p, paint)
+                                    nc.drawPath(p, paint)
                                 }
                             }
 
@@ -307,21 +316,21 @@ fun AreaSelectionDialog(
                                 erase.strokeWidth = strokePx
                                 if (stroke.points.size == 1) {
                                     val c = containerPoint(stroke.points[0])
-                                    nativeCanvas.drawCircle(c.x, c.y, strokePx / 2f, erase)
+                                    nc.drawCircle(c.x, c.y, strokePx / 2f, erase)
                                 } else {
                                     val p = android.graphics.Path()
                                     stroke.points.forEachIndexed { i, pt ->
                                         val o = containerPoint(pt)
                                         if (i == 0) p.moveTo(o.x, o.y) else p.lineTo(o.x, o.y)
                                     }
-                                    nativeCanvas.drawPath(p, erase)
+                                    nc.drawPath(p, erase)
                                 }
                             }
 
                             // Composite at uniform alpha — all painted areas
                             // share the same transparency.
                             drawImage(
-                                image = bitmap.asImageBitmap(),
+                                image = bmp.asImageBitmap(),
                                 alpha = 0.4f
                             )
                         }
