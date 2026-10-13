@@ -686,13 +686,6 @@ class AiEditService {
             val cropRect = selection.cropRect?.takeIf { it.isValid() }
             val mask = selection.mask?.takeIf { !it.isEmpty() }
 
-            // When no explicit crop rect was set but there's a brush mask,
-            // derive a crop rect from the bounding box of the painted strokes.
-            // The AI input was already cropped to this bounding box in
-            // prepareSourceData, so the AI result is brush-area-sized.
-            val effectiveCropRect = cropRect
-                ?: mask?.let { brushBoundingBox(it, original.width, original.height).takeIf { bb -> bb.isValid() } }
-
             // Load original and edited bitmaps (apply EXIF rotation to both
             // so pixel positions align with how the dialog displayed the image)
             val rawOriginal = BitmapFactory.decodeFile(originalPath) ?: return null
@@ -700,6 +693,13 @@ class AiEditService {
             val rawEdited = BitmapFactory.decodeFile(editedAreaPath) ?: run {
                 original.recycle(); return null
             }
+
+            // When no explicit crop rect was set but there's a brush mask,
+            // derive a crop rect from the bounding box of the painted strokes.
+            // The AI input was already cropped to this bounding box in
+            // prepareSourceData, so the AI result is brush-area-sized.
+            val effectiveCropRect = cropRect
+                ?: mask?.let { brushBoundingBox(it, original.width, original.height).takeIf { bb -> bb.isValid() } }
 
             val iw = original.width
             val ih = original.height
