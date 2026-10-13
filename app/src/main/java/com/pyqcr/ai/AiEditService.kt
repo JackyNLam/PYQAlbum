@@ -602,6 +602,32 @@ class AiEditService {
     }
 
     /**
+     * Compute the axis-aligned bounding box of all painted strokes in a
+     * [BrushMask]. Coordinates are normalized 0f..1f relative to the image,
+     * with a 1% padding so the box isn't too tight on the edges.
+     * Returns a [CropRect] that covers the painted area.
+     */
+    private fun brushBoundingBox(mask: BrushMask): CropRect {
+        val allPoints = mask.strokes.flatMap { it.points }
+        if (allPoints.isEmpty()) return CropRect(0f, 0f, 1f, 1f)
+        var minX = 1f; var minY = 1f
+        var maxX = 0f; var maxY = 0f
+        for (p in allPoints) {
+            if (p.x < minX) minX = p.x
+            if (p.y < minY) minY = p.y
+            if (p.x > maxX) maxX = p.x
+            if (p.y > maxY) maxY = p.y
+        }
+        val margin = 0.01f
+        return CropRect(
+            (minX - margin).coerceIn(0f, 1f),
+            (minY - margin).coerceIn(0f, 1f),
+            (maxX + margin).coerceIn(0f, 1f),
+            (maxY + margin).coerceIn(0f, 1f)
+        )
+    }
+
+    /**
      * Composite the AI-edited area bitmap onto the original image at the crop
      * position, then save the result to the device gallery via MediaStore.
      *
@@ -622,6 +648,15 @@ class AiEditService {
             val cropRect = selection.cropRect?.takeIf { it.isValid() }
             val mask = selection.mask?.takeIf { !it.isEmpty() }
 
+            // When no explicit crop rect was set but there's a brush mask,
+            // derive a crop rect from the bounding box of the painted strokes.
+            // The AI was given the full image (with transparency outside the
+            // strokes) and returned a full-image result — we need to crop the
+            // result down to the brush area before compositing it back.
+            val effectiveCropRect = cropRect
+                ?: mask?.let { brushBoundingBox(it).takeIf { bb -> bb.isValid() } }
+            val cropFromMask = cropRect == null && effectiveCropRect != null
+
             // Load original and edited bitmaps (apply EXIF rotation to both
             // so pixel positions align with how the dialog displayed the image)
             val rawOriginal = BitmapFactory.decodeFile(originalPath) ?: return null
@@ -633,42 +668,66 @@ class AiEditService {
             val iw = original.width
             val ih = original.height
 
-            val edited = applyExifOrientation(editedAreaPath, rawEdited)
+            var edited = applyExifOrientation(editedAreaPath, rawEdited)
 
             // Where the edited result lands on the original:
-            //  - crop rect: the selected rectangle
-            //  - mask only: the whole image (mask confines the visible edit)
+            //  - explicit crop rect: the user-selected rectangle
+            //  - mask bounding box: the extent of the brush strokes
+            //  - neither: the whole image
             val dstRect: android.graphics.Rect
             val expectedW: Int
             val expectedH: Int
-            if (cropRect != null) {
+            var editedAfterCrop = edited
+
+            if (effectiveCropRect != null) {
                 // roundToInt() instead of toInt() — must match prepareSourceData
                 dstRect = android.graphics.Rect(
-                    (cropRect.left * iw).roundToInt().coerceIn(0, iw),
-                    (cropRect.top * ih).roundToInt().coerceIn(0, ih),
-                    (cropRect.right * iw).roundToInt().coerceIn(0, iw),
-                    (cropRect.bottom * ih).roundToInt().coerceIn(0, ih)
+                    (effectiveCropRect.left * iw).roundToInt().coerceIn(0, iw),
+                    (effectiveCropRect.top * ih).roundToInt().coerceIn(0, ih),
+                    (effectiveCropRect.right * iw).roundToInt().coerceIn(0, iw),
+                    (effectiveCropRect.bottom * ih).roundToInt().coerceIn(0, ih)
                 )
                 expectedW = dstRect.width()
                 expectedH = dstRect.height()
+
+                // When the crop rect comes from the brush mask (not a
+                // user-drawn rectangle), the AI result is full-image-sized
+                // and must be cropped to the same proportional area first.
+                if (cropFromMask && expectedW > 0 && expectedH > 0) {
+                    val editCrop = android.graphics.Rect(
+                        (effectiveCropRect.left * edited.width).roundToInt().coerceIn(0, edited.width),
+                        (effectiveCropRect.top * edited.height).roundToInt().coerceIn(0, edited.height),
+                        (effectiveCropRect.right * edited.width).roundToInt().coerceIn(0, edited.width),
+                        (effectiveCropRect.bottom * edited.height).roundToInt().coerceIn(0, edited.height)
+                    )
+                    if (editCrop.width() > 0 && editCrop.height() > 0 &&
+                        (editCrop.width() != edited.width || editCrop.height() != edited.height)
+                    ) {
+                        val croppedEdited = Bitmap.createBitmap(
+                            edited, editCrop.left, editCrop.top,
+                            editCrop.width(), editCrop.height()
+                        )
+                        edited.recycle()
+                        editedAfterCrop = croppedEdited
+                    }
+                }
             } else {
                 dstRect = android.graphics.Rect(0, 0, iw, ih)
                 expectedW = iw
                 expectedH = ih
             }
 
-            onDebug("  AI result: ${edited.width}x${edited.height}, expected area: ${expectedW}x${expectedH}")
+            onDebug("  AI result: ${editedAfterCrop.width}x${editedAfterCrop.height}, expected area: ${expectedW}x${expectedH}")
 
-            // Scale the AI-edited area to match the expected dimensions.
+            // Scale the (possibly cropped) AI result to fit the destination.
             // If the aspect ratio differs, center-crop first to avoid stretching.
-            var scaledEdited = if (edited.width != expectedW || edited.height != expectedH) {
-                val scaled = scaleToFit(edited, expectedW, expectedH)
-                edited.recycle()
+            var scaledEdited = if (editedAfterCrop.width != expectedW || editedAfterCrop.height != expectedH) {
+                val scaled = scaleToFit(editedAfterCrop, expectedW, expectedH)
+                editedAfterCrop.recycle()
                 scaled
             } else {
-                edited
+                editedAfterCrop
             }
-            val requiredEdited = scaledEdited !== edited
 
             // Confine the visible edit to the brush mask (if any): mask bitmap
             // rendered at original resolution, cropped/scaled to the edited
@@ -676,7 +735,7 @@ class AiEditService {
             // outside the painted strokes keeps the original pixels.
             if (mask != null) {
                 var maskBitmap = renderMaskBitmap(iw, ih, mask)
-                if (cropRect != null) {
+                if (effectiveCropRect != null) {
                     val croppedMask = Bitmap.createBitmap(
                         maskBitmap,
                         dstRect.left, dstRect.top,
@@ -700,7 +759,7 @@ class AiEditService {
                 }
                 mCanvas.drawBitmap(maskBitmap, 0f, 0f, dstIn)
                 maskBitmap.recycle()
-                if (requiredEdited) scaledEdited.recycle()
+                scaledEdited.recycle()
                 scaledEdited = maskedEdited
             }
 
@@ -722,10 +781,11 @@ class AiEditService {
             val outName = fileName ?: "PYQAlbum_AI_Edit_${System.currentTimeMillis()}$suffix.jpg"
             val savedUri = saveToMediaStore(context, result, outName, onDebug)
 
-            // Clean up
+            // Clean up — recycle() is idempotent on Android, so double-free is harmless
             original.recycle()
             edited.recycle()
-            if (scaledEdited !== edited) scaledEdited.recycle()
+            editedAfterCrop.recycle()
+            scaledEdited.recycle()
             result.recycle()
 
             savedUri
