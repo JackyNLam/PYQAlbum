@@ -19,6 +19,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -243,32 +244,83 @@ fun AreaSelectionDialog(
                             drawLine(Color.White, Offset(cx, cy - cs), Offset(cx, cy + cs), strokeWidth = 1f)
                         }
                     } else {
-                        // Painted strokes overlay — color matches service mask render
-                        // (radius × shorter displayed side), eraser strokes shown red.
+                        // Painted strokes overlay — all paint strokes are rendered
+                        // into an offscreen layer at full opacity and then composited
+                        // with uniform alpha so overlapping strokes don't compound
+                        // their transparency ("layering" effect). Eraser strokes
+                        // punch real holes (CLEAR blend mode) instead of drawing red.
                         Canvas(modifier = Modifier.fillMaxSize()) {
                             val reference = minOf(size.width, size.height)
-                            for (stroke in strokes) {
-                                val strokePx = stroke.radius * reference
-                                if (stroke.points.isEmpty()) continue
-                                val color = if (stroke.eraser) Color(0xAAFF5252) else Color(0x66FFFFFF)
-                                if (stroke.points.size == 1) {
-                                    drawCircle(
-                                        color = color,
-                                        radius = strokePx / 2f,
-                                        center = containerPoint(stroke.points[0])
-                                    )
-                                } else {
-                                    val path = Path()
-                                    stroke.points.forEachIndexed { i, p ->
-                                        val o = containerPoint(p)
-                                        if (i == 0) path.moveTo(o.x, o.y) else path.lineTo(o.x, o.y)
+                            drawIntoCanvas { canvas ->
+                                val layerRect = android.graphics.Rect(
+                                    0, 0, size.width.toInt(), size.height.toInt()
+                                )
+                                // Save a layer that will be composited with uniform
+                                // alpha — all paint strokes inside render at full
+                                // opacity and share the same final transparency.
+                                val layerPaint = android.graphics.Paint().apply {
+                                    alpha = 102 // ~0.4 * 255
+                                }
+                                canvas.saveLayer(layerRect, layerPaint)
+
+                                // Paint strokes (non-eraser) — full-opacity white
+                                val paint = android.graphics.Paint().apply {
+                                    color = android.graphics.Color.WHITE
+                                    isAntiAlias = true
+                                    style = android.graphics.Paint.Style.STROKE
+                                    strokeCap = android.graphics.Paint.Cap.ROUND
+                                    strokeJoin = android.graphics.Paint.Join.ROUND
+                                }
+                                for (stroke in strokes) {
+                                    if (stroke.eraser) continue
+                                    val strokePx = stroke.radius * reference
+                                    if (stroke.points.isEmpty()) continue
+                                    paint.strokeWidth = strokePx
+                                    if (stroke.points.size == 1) {
+                                        val center = containerPoint(stroke.points[0])
+                                        canvas.drawCircle(center.x, center.y, strokePx / 2f, paint)
+                                    } else {
+                                        val path = android.graphics.Path()
+                                        stroke.points.forEachIndexed { i, p ->
+                                            val o = containerPoint(p)
+                                            if (i == 0) path.moveTo(o.x, o.y) else path.lineTo(o.x, o.y)
+                                        }
+                                        canvas.drawPath(path, paint)
                                     }
-                                    drawPath(
-                                        path = path,
-                                        color = color,
-                                        style = Stroke(width = strokePx)
+                                }
+
+                                // Eraser strokes — punch transparent holes through
+                                // the painted areas so the user sees real-time erasure.
+                                val erase = android.graphics.Paint().apply {
+                                    isAntiAlias = true
+                                    style = android.graphics.Paint.Style.STROKE
+                                    strokeCap = android.graphics.Paint.Cap.ROUND
+                                    strokeJoin = android.graphics.Paint.Join.ROUND
+                                    xfermode = android.graphics.PorterDuffXfermode(
+                                        android.graphics.PorterDuff.Mode.CLEAR
                                     )
                                 }
+                                for (stroke in strokes) {
+                                    if (!stroke.eraser) continue
+                                    val strokePx = stroke.radius * reference
+                                    if (stroke.points.isEmpty()) continue
+                                    erase.strokeWidth = strokePx
+                                    if (stroke.points.size == 1) {
+                                        val center = containerPoint(stroke.points[0])
+                                        canvas.drawCircle(center.x, center.y, strokePx / 2f, erase)
+                                    } else {
+                                        val path = android.graphics.Path()
+                                        stroke.points.forEachIndexed { i, p ->
+                                            val o = containerPoint(p)
+                                            if (i == 0) path.moveTo(o.x, o.y) else path.lineTo(o.x, o.y)
+                                        }
+                                        canvas.drawPath(path, erase)
+                                    }
+                                }
+
+                                // Composite the layer — all painted areas share
+                                // the same uniform alpha.
+                                canvas.restore()
                             }
                         }
                     }

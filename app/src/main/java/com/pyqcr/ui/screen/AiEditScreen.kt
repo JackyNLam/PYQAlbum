@@ -124,12 +124,10 @@ fun AiEditScreen(
             selectedSourceAreas = sources.associateWith {
                 EditSelection(cropRect = CropRect(0f, 0f, 1f, 1f))
             }
-            saveAiEditSourceUris(context, emptySet())
         }
         val target = loadAiEditTargetUris(context).firstOrNull()
         if (target != null) {
             selectedTargetUri = target
-            saveAiEditTargetUris(context, emptySet())
         }
     }
 
@@ -169,6 +167,8 @@ fun AiEditScreen(
                             selectedTargetUri = null
                             outputPaths = emptyList()
                             bgDebugLog = emptyList()
+                            saveAiEditSourceUris(context, emptySet())
+                            saveAiEditTargetUris(context, emptySet())
                             clearAiEditSelections(context)
                         }) {
                             Text("Clear All", color = MaterialTheme.colorScheme.error)
@@ -465,6 +465,7 @@ fun AiEditScreen(
                                                 .padding(2.dp)
                                                 .clickable {
                                                     selectedSourceAreas = selectedSourceAreas - image.uri
+                                                    saveAiEditSourceUris(context, selectedSourceAreas.keys)
                                                 }
                                         ) {
                                             Text("✕", color = Color.White, fontSize = MaterialTheme.typography.labelSmall.fontSize)
@@ -544,6 +545,7 @@ fun AiEditScreen(
                                             .aspectRatio(1f)
                                             .clickable {
                                                 selectedTargetUri = image.uri
+                                                saveAiEditTargetUris(context, setOf(image.uri))
                                                 showTargetPicker = false
                                             }
                                     ) {
@@ -589,6 +591,7 @@ fun AiEditScreen(
                                     IconButton(
                                         onClick = {
                                             selectedTargetUri = null
+                                            saveAiEditTargetUris(context, emptySet())
                                             showTargetPicker = true
                                         },
                                         modifier = Modifier
@@ -819,6 +822,7 @@ fun AiEditScreen(
             initialSelection = selectedSourceAreas[uri],
             onConfirm = { selection ->
                 selectedSourceAreas = selectedSourceAreas + (uri to selection)
+                saveAiEditSourceUris(context, selectedSourceAreas.keys)
                 areaDialogUri = null
             },
             onDismiss = {

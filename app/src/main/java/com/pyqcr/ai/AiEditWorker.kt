@@ -1,6 +1,7 @@
 package com.pyqcr.ai
 
 import android.content.Context
+import android.os.PowerManager
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
@@ -99,6 +100,29 @@ class AiEditWorker(
 
         if (items.isEmpty()) return Result.success()
 
+        // Acquire a partial wake lock so the CPU stays awake during the
+        // edit — network I/O through OkHttp can stall or fail when the
+        // device enters Doze mode shortly after the screen turns off.
+        val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "pyqcr:ai_edit_worker"
+        )
+        wakeLock.acquire(10 * 60 * 1000L) // 10-minute timeout
+        try {
+            return runEditImpl(apiKey, modelName, prompt, targetUri, items)
+        } finally {
+            if (wakeLock.isHeld) wakeLock.release()
+        }
+    }
+
+    private suspend fun runEditImpl(
+        apiKey: String,
+        modelName: String,
+        prompt: String,
+        targetUri: String?,
+        items: List<AiEditJobItem>
+    ): Result {
         // Fresh debug log + progress state for this session
         AiEditBackgroundDebugLog.clear()
         AiEditBackgroundProgress.reset()
