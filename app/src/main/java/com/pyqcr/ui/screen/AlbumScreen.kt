@@ -421,6 +421,7 @@ fun AlbumScreen(
     var collageBgColor by remember { mutableIntStateOf(android.graphics.Color.WHITE) }
     var collageImageOrder by remember { mutableStateOf<List<String>>(emptyList()) }
     var showResizeDialog by remember { mutableStateOf(false) }
+    var showAiEditRoleDialog by remember { mutableStateOf(false) }
 
     /** Open the collage options dialog (background color / columns / image order). */
     val openCollageDialog: () -> Unit = {
@@ -1138,6 +1139,9 @@ fun AlbumScreen(
                         },
                         onResize = {
                             showResizeDialog = true
+                        },
+                        onAiEdit = {
+                            showAiEditRoleDialog = true
                         }
                     )
                 }
@@ -1789,6 +1793,34 @@ fun AlbumScreen(
                     }
                 )
             }
+            // AI Edit role selection dialog — batch menu marks images as source or target
+            if (showAiEditRoleDialog) {
+                AlertDialog(
+                    onDismissRequest = { showAiEditRoleDialog = false },
+                    title = { Text("AI Edit selection") },
+                    text = { Text("Add ${selectedImageUris.size} image(s) as…") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            val sources = loadAiEditSourceUris(context) + selectedImageUris - loadAiEditTargetUris(context)
+                            saveAiEditSourceUris(context, sources)
+                            val targets = loadAiEditTargetUris(context) - selectedImageUris
+                            saveAiEditTargetUris(context, targets)
+                            showAiEditRoleDialog = false
+                            scope.launch { snackbarHostState.showSnackbar("${selectedImageUris.size} added as AI Edit source") }
+                        }) { Text("Source") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            val targets = loadAiEditTargetUris(context) + selectedImageUris - loadAiEditSourceUris(context)
+                            saveAiEditTargetUris(context, targets)
+                            val sources = loadAiEditSourceUris(context) - selectedImageUris
+                            saveAiEditSourceUris(context, sources)
+                            showAiEditRoleDialog = false
+                            scope.launch { snackbarHostState.showSnackbar("${selectedImageUris.size} added as AI Edit target") }
+                        }) { Text("Target") }
+                    }
+                )
+            }
             // Delete confirmation dialog (Android 9 and below — no system delete dialog)
             if (showDeleteDialog) {
                 AlertDialog(
@@ -1842,6 +1874,7 @@ private fun BatchMultiSelectBar(
     onSelectForAi: () -> Unit,
     onRemoveAiInfo: () -> Unit,
     onResize: () -> Unit,
+    onAiEdit: () -> Unit,
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit,
     onDelete: () -> Unit
@@ -1898,6 +1931,11 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onSelectForAi() },
                         text = { Text("AI Ranking") },
                         leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onAiEdit() },
+                        text = { Text("AI Edit") },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     DropdownMenuItem(
                         onClick = { showMenu = false; onRemoveAiInfo() },
@@ -2439,6 +2477,28 @@ private fun loadAiSelectedUris(context: Context): Set<String> {
 private fun saveAiSelectedUris(context: Context, uris: Set<String>) {
     val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
     prefs.edit().putStringSet("ai_selected_uris", uris).apply()
+}
+
+// ---------- SharedPreferences helpers for AI Edit selection (batch menu marks source/target) ----------
+private const val AI_EDIT_SELECT_PREFS = "pyqcr_ai_edit_select"
+private const val KEY_SOURCE_URIS = "ai_edit_source_uris"
+private const val KEY_TARGET_URIS = "ai_edit_target_uris"
+
+private fun loadAiEditSourceUris(context: Context): Set<String> {
+    val prefs = context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
+    return prefs.getStringSet(KEY_SOURCE_URIS, emptySet()) ?: emptySet()
+}
+private fun saveAiEditSourceUris(context: Context, uris: Set<String>) {
+    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
+        .edit().putStringSet(KEY_SOURCE_URIS, uris).apply()
+}
+private fun loadAiEditTargetUris(context: Context): Set<String> {
+    val prefs = context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
+    return prefs.getStringSet(KEY_TARGET_URIS, emptySet()) ?: emptySet()
+}
+private fun saveAiEditTargetUris(context: Context, uris: Set<String>) {
+    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
+        .edit().putStringSet(KEY_TARGET_URIS, uris).apply()
 }
 
 // ---------- SAF tree URI to path resolution ----------

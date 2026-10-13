@@ -10,13 +10,18 @@ import androidx.core.app.NotificationCompat
 import com.pyqcr.MainActivity
 
 /**
- * Manages the notification channel and foreground notification for background AI rating.
+ * Manages the notification channels and foreground notifications for the
+ * background AI rating and AI edit jobs.
  */
 object NotificationHelper {
 
     private const val CHANNEL_ID = "pyqcr_ai_rating"
     private const val CHANNEL_NAME = "AI Rating"
     private const val NOTIFICATION_ID = 1001
+
+    private const val CHANNEL_ID_EDIT = "pyqcr_ai_edit"
+    private const val CHANNEL_NAME_EDIT = "AI Edit"
+    private const val NOTIFICATION_ID_EDIT = 1002
 
     fun createChannel(context: Context) {
         val channel = NotificationChannel(
@@ -25,6 +30,23 @@ object NotificationHelper {
             NotificationManager.IMPORTANCE_LOW // low importance — no sound
         ).apply {
             description = "Shows progress of background AI rating tasks"
+            setShowBadge(false)
+        }
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(channel)
+    }
+
+    /**
+     * Create the AI Edit notification channel (idempotent — safe to call from
+     * the worker so the channel exists even if the process was restarted).
+     */
+    fun createAiEditChannel(context: Context) {
+        val channel = NotificationChannel(
+            CHANNEL_ID_EDIT,
+            CHANNEL_NAME_EDIT,
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Shows progress of background AI edit tasks"
             setShowBadge(false)
         }
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -100,6 +122,84 @@ object NotificationHelper {
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("AI Rating Complete")
             .setContentText("$succeeded / $total images rated successfully")
+            .setSmallIcon(android.R.drawable.ic_menu_gallery)
+            .setContentIntent(pendingIntent)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .build()
+    }
+
+    // ---- AI Edit notifications ----
+
+    /**
+     * Build a foreground notification for a running AI edit job.
+     */
+    fun buildAiEditNotification(
+        context: Context,
+        title: String,
+        progress: Int,
+        total: Int
+    ): Notification {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(context, CHANNEL_ID_EDIT)
+            .setContentTitle(title)
+            .setContentText("$progress / $total images edited")
+            .setSmallIcon(android.R.drawable.ic_menu_gallery)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setProgress(total, progress, false)
+            .build()
+    }
+
+    /**
+     * Build a notification shown when the AI edit fails (quota, bad key, ...).
+     */
+    fun buildAiEditErrorNotification(context: Context, message: String): Notification {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(context, CHANNEL_ID_EDIT)
+            .setContentTitle("AI Edit Failed")
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentIntent(pendingIntent)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .build()
+    }
+
+    /**
+     * Build a final "finished" notification after editing completes.
+     */
+    fun buildAiEditFinishedNotification(
+        context: Context,
+        succeeded: Int,
+        total: Int
+    ): Notification {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(context, CHANNEL_ID_EDIT)
+            .setContentTitle("AI Edit Complete")
+            .setContentText("$succeeded / $total images edited successfully")
             .setSmallIcon(android.R.drawable.ic_menu_gallery)
             .setContentIntent(pendingIntent)
             .setOngoing(false)

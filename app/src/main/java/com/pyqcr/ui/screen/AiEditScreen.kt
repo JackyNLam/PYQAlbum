@@ -46,11 +46,13 @@ import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.pyqcr.ai.AiEditBackgroundDebugLog
+import com.pyqcr.ai.AiEditBackgroundProgress
+import com.pyqcr.ai.AiEditJobItem
 import com.pyqcr.ai.AiEditService
+import com.pyqcr.ai.AiEditWorkManager
 import com.pyqcr.ai.CropRect
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.pyqcr.ai.EditSelection
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -62,10 +64,15 @@ import java.util.Locale
  * Layout mirrors AI Rating screen:
  *   - API Configuration card (API Key, Model Name, Save Config)
  *   - Custom prompt input
- *   - Source images grid (multi-select from device gallery)
+ *   - Source images grid (multi-select from device gallery, per-image
+ *     rectangle or brush selection)
  *   - Target image (single-select from device gallery)
- *   - Run AI Edit button with progress
- *   - Results display
+ *   - Run AI Edit in Background button (WorkManager) with progress and a
+ *     Stop button while it runs
+ *   - Results display (polled from the worker's results file)
+ *
+ * Source/target images marked in the album's batch select menu are imported
+ * once when the screen opens.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,7 +82,6 @@ fun AiEditScreen(
     val context = LocalContext.current
     val app = context.applicationContext as PyqCrApp
     val repository = remember { AlbumRepository(context, app.database) }
-    val scope = rememberCoroutineScope()
 
     // API key & model (persisted with EncryptedSharedPreferences)
     var apiKey by remember { mutableStateOf(loadAiEditApiKey(context)) }
@@ -87,18 +93,19 @@ fun AiEditScreen(
 
     // Image data
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
-    var selectedSourceAreas by remember { mutableStateOf<Map<String, CropRect>>(emptyMap()) }
+    var selectedSourceAreas by remember { mutableStateOf<Map<String, EditSelection>>(emptyMap()) }
     var selectedTargetUri by remember { mutableStateOf<String?>(null) }
 
     // Area selection dialog state
     var areaDialogUri by remember { mutableStateOf<String?>(null) }
 
-    // Operation state
-    var isRunning by remember { mutableStateOf(false) }
-    var currentProgress by remember { mutableIntStateOf(0) }
-    var totalProgress by remember { mutableIntStateOf(0) }
-    var currentStatus by remember { mutableStateOf("") }
-    var debugLog by remember { mutableStateOf<List<String>>(emptyList()) }
+    // Background job state (WorkManager) — mirrors AiRatingScreen's polling
+    var bgRunning by remember { mutableStateOf(false) }
+    var bgPhase by remember { mutableStateOf(AiEditBackgroundProgress.PHASE_IDLE) }
+    var bgCurrent by remember { mutableIntStateOf(0) }
+    var bgTotal by remember { mutableIntStateOf(0) }
+    var bgLabel by remember { mutableStateOf("") }
+    var bgDebugLog by remember { mutableStateOf<List<String>>(emptyList()) }
     var outputPaths by remember { mutableStateOf<List<String>>(emptyList()) }
 
     // Load all images
@@ -108,14 +115,42 @@ fun AiEditScreen(
         }
     }
 
-    // Output directory for edited images
-    val outputDir = remember {
-        File(context.getExternalFilesDir(null), "ai_edit").also { it.mkdirs() }
+    // One-shot import of source/target images marked in the album's batch
+    // select menu (pyqcr_ai_edit_select prefs). Sources start with a
+    // full-image selection; tap one to refine the area/brush.
+    LaunchedEffect(Unit) {
+        val sources = loadAiEditSourceUris(context)
+        if (sources.isNotEmpty()) {
+            selectedSourceAreas = sources.associateWith {
+                EditSelection(cropRect = CropRect(0f, 0f, 1f, 1f))
+            }
+            saveAiEditSourceUris(context, emptySet())
+        }
+        val target = loadAiEditTargetUris(context).firstOrNull()
+        if (target != null) {
+            selectedTargetUri = target
+            saveAiEditTargetUris(context, emptySet())
+        }
     }
 
-    fun addDebug(msg: String) {
-        val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-        debugLog = debugLog + "[$timestamp] $msg"
+    // Poll the background job status / progress / log / saved results.
+    LaunchedEffect(Unit) {
+        while (true) {
+            bgRunning = AiEditWorkManager.isRunning(context)
+            bgDebugLog = AiEditBackgroundDebugLog.lines
+            bgPhase = AiEditBackgroundProgress.phase
+            bgCurrent = AiEditBackgroundProgress.current
+            bgTotal = AiEditBackgroundProgress.total
+            bgLabel = AiEditBackgroundProgress.label
+            outputPaths = try {
+                File(context.cacheDir, "ai_edit_results.txt")
+                    .readLines()
+                    .filter { it.isNotBlank() }
+            } catch (e: Exception) {
+                emptyList()
+            }
+            kotlinx.coroutines.delay(2000)
+        }
     }
 
     Scaffold(
@@ -133,7 +168,8 @@ fun AiEditScreen(
                             selectedSourceAreas = emptyMap()
                             selectedTargetUri = null
                             outputPaths = emptyList()
-                            debugLog = emptyList()
+                            bgDebugLog = emptyList()
+                            clearAiEditSelections(context)
                         }) {
                             Text("Clear All", color = MaterialTheme.colorScheme.error)
                         }
@@ -321,13 +357,8 @@ fun AiEditScreen(
                                         modifier = Modifier
                                             .aspectRatio(1f)
                                             .clickable {
-                                                if (isSelected) {
-                                                    // Remove selection
-                                                    selectedSourceAreas = selectedSourceAreas - image.uri
-                                                } else {
-                                                    // Open area selection dialog
-                                                    areaDialogUri = image.uri
-                                                }
+                                                // Open the area selection dialog to set or refine the area
+                                                areaDialogUri = image.uri
                                             }
                                     ) {
                                         ImageThumbnail(
@@ -384,12 +415,13 @@ fun AiEditScreen(
                                     .heightIn(max = 200.dp)
                             ) {
                                 gridItems(selSrc, key = { it.uri }) { image ->
-                                    val rect = selectedSourceAreas[image.uri]
+                                    val sel = selectedSourceAreas[image.uri]
                                     Box(
                                         modifier = Modifier
                                             .aspectRatio(1f)
                                             .clickable {
-                                                selectedSourceAreas = selectedSourceAreas - image.uri
+                                                // Refine the selection (re-open area dialog)
+                                                areaDialogUri = image.uri
                                             }
                                     ) {
                                         ImageThumbnail(
@@ -404,31 +436,50 @@ fun AiEditScreen(
                                         )
                                         // Crop area overlay — correctly maps normalized
                                         // coords through ContentScale.Fit letterboxing
-                                        if (rect != null) {
+                                        if (sel?.hasCrop == true) {
                                             ThumbnailCropOverlay(
                                                 imageUri = image.uri,
-                                                cropRect = rect
+                                                cropRect = sel.cropRect!!
                                             )
                                         }
-                                        // Remove button
-                                        Box(
-                                            modifier = Modifier
-                                                .align(Alignment.TopEnd)
-                                                .background(Color.Red, RoundedCornerShape(50))
-                                                .padding(2.dp)
-                                        ) {
-                                            Text("✕", color = Color.White, fontSize = MaterialTheme.typography.labelSmall.fontSize)
-                                        }
-                                        // Area label
-                                        if (rect != null) {
+                                        // Brush mask badge
+                                        if (sel?.hasMask == true) {
                                             Box(
                                                 modifier = Modifier
                                                     .align(Alignment.BottomStart)
                                                     .background(Color(0xCC000000), RoundedCornerShape(2.dp))
                                                     .padding(horizontal = 3.dp, vertical = 1.dp)
                                             ) {
-                                                val pctH = ((rect.bottom - rect.top) * 100).toInt()
-                                                val pctW = ((rect.right - rect.left) * 100).toInt()
+                                                Text(
+                                                    "🖌 brush",
+                                                    color = Color(0xFF90EE90),
+                                                    fontSize = MaterialTheme.typography.labelSmall.fontSize
+                                                )
+                                            }
+                                        }
+                                        // Remove button — clickable, propagates before tile
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .background(Color.Red, RoundedCornerShape(50))
+                                                .padding(2.dp)
+                                                .clickable {
+                                                    selectedSourceAreas = selectedSourceAreas - image.uri
+                                                }
+                                        ) {
+                                            Text("✕", color = Color.White, fontSize = MaterialTheme.typography.labelSmall.fontSize)
+                                        }
+                                        // Rect area label
+                                        if (sel?.hasCrop == true) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomStart)
+                                                    .background(Color(0xCC000000), RoundedCornerShape(2.dp))
+                                                    .padding(horizontal = 3.dp, vertical = 1.dp)
+                                            ) {
+                                                val cr = sel.cropRect!!
+                                                val pctH = ((cr.bottom - cr.top) * 100).toInt()
+                                                val pctW = ((cr.right - cr.left) * 100).toInt()
                                                 Text(
                                                     "${pctW}×${pctH}%",
                                                     color = Color(0xFF90EE90),
@@ -580,111 +631,30 @@ fun AiEditScreen(
                         saveAiEditApiKey(context, apiKey)
                         saveAiEditModelName(context, modelName)
 
-                        isRunning = true
-                        currentProgress = 0
-                        totalProgress = selectedSourceAreas.size
-                        debugLog = emptyList()
-                        outputPaths = emptyList()
-                        currentStatus = "Starting AI Edit..."
-
-                        scope.launch {
-                            val service = AiEditService()
-                            // Resolve all source URIs to file paths and build cropRects map
-                            val sourcePaths = mutableListOf<String>()
-                            val cropRectsMap = mutableMapOf<String, CropRect>()
-                            for ((uri, cropRect) in selectedSourceAreas) {
-                                val path = resolveContentUriToPath(context, uri)
-                                if (path != null) {
-                                    sourcePaths.add(path)
-                                    cropRectsMap[path] = cropRect
-                                }
-                            }
-                            val targetPath = if (selectedTargetUri != null) {
-                                resolveContentUriToPath(context, selectedTargetUri!!)
-                            } else null
-
-                            addDebug("Source images: ${sourcePaths.size}")
-                            if (targetPath != null) addDebug("Target image: $targetPath")
-                            addDebug("Model: $modelName")
-                            addDebug("Prompt: $customPrompt")
-
-                            try {
-                                val results = service.editImages(
-                                    apiKey = apiKey,
-                                    modelName = modelName,
-                                    sourceImagePaths = sourcePaths,
-                                    cropRects = cropRectsMap,
-                                    targetImagePath = targetPath,
-                                    prompt = customPrompt,
-                                    outputDir = outputDir,
-                                    context = context,
-                                    onProgress = { cur, total ->
-                                        currentProgress = cur
-                                        totalProgress = total
-                                        currentStatus = "${cur}/${total} images done"
-                                    },
-                                    onDebug = { msg -> addDebug(msg) },
-                                    onFatalError = { err ->
-                                        addDebug("🛑 $err")
-                                        currentStatus = "Error: $err"
-                                    }
-                                )
-
-                                // If the primary endpoint returned no results, try the chat-compatible fallback
-                                if (results.isEmpty() && !customPrompt.isNullOrBlank()) {
-                                    addDebug("Primary endpoint returned no results, trying chat-compatible fallback...")
-                                    currentStatus = "Trying fallback endpoint..."
-                                    val fallbackResults = service.editImagesChatCompatible(
-                                        apiKey = apiKey,
-                                        modelName = modelName,
-                                        sourceImagePaths = sourcePaths,
-                                        cropRects = cropRectsMap,
-                                        targetImagePath = targetPath,
-                                        prompt = customPrompt,
-                                        outputDir = outputDir,
-                                        context = context,
-                                        onProgress = { cur, total ->
-                                            currentProgress = cur
-                                            totalProgress = total
-                                        },
-                                        onDebug = { msg -> addDebug(msg) },
-                                        onFatalError = { err ->
-                                            addDebug("🛑 $err")
-                                            currentStatus = "Error: $err"
-                                        }
-                                    )
-                                    outputPaths = fallbackResults
-                                } else {
-                                    outputPaths = results
-                                }
-
-                                if (outputPaths.isNotEmpty()) {
-                                    currentStatus = "✅ ${outputPaths.size} images edited and saved to gallery"
-                                    addDebug("✅ Completed: ${outputPaths.size} images saved to Pictures/PYQAlbum/")
-                                } else {
-                                    currentStatus = "No results generated"
-                                    addDebug("❌ No images were generated")
-                                }
-
-                            } catch (e: Exception) {
-                                addDebug("❌ Exception: ${e::class.simpleName}: ${e.message}")
-                                currentStatus = "Error: ${e.message}"
-                            } finally {
-                                isRunning = false
-                            }
+                        val items = selectedSourceAreas.map { (uri, sel) ->
+                            AiEditJobItem(uri = uri, selection = sel)
                         }
+                        AiEditWorkManager.enqueue(
+                            context = context,
+                            apiKey = apiKey,
+                            modelName = modelName,
+                            prompt = customPrompt,
+                            targetUri = selectedTargetUri,
+                            items = items
+                        )
+                        Toast.makeText(context, "✅ AI edit started in background", Toast.LENGTH_SHORT).show()
                     },
-                    enabled = !isRunning && apiKey.isNotBlank() && selectedSourceAreas.isNotEmpty() && customPrompt.isNotBlank(),
+                    enabled = !bgRunning && apiKey.isNotBlank() && selectedSourceAreas.isNotEmpty() && customPrompt.isNotBlank(),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    if (isRunning) {
+                    if (bgRunning) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
                             color = MaterialTheme.colorScheme.onPrimary
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Editing in progress...")
+                        Text("Background edit running...")
                     } else {
                         Icon(
                             imageVector = Icons.Default.AutoAwesome,
@@ -692,31 +662,75 @@ fun AiEditScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text("Run AI Edit")
+                        Text("Run AI Edit in Background")
                     }
                 }
 
-                // Progress bar
-                if (isRunning && totalProgress > 0) {
+                // Progress bar while the background job runs
+                if (bgRunning) {
                     Spacer(Modifier.height(8.dp))
-                    LinearProgressIndicator(
-                        progress = { currentProgress.toFloat() / totalProgress.coerceAtLeast(1) },
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        val bgProgressActive = bgPhase != AiEditBackgroundProgress.PHASE_IDLE
+                        if (bgProgressActive && bgTotal > 0) {
+                            LinearProgressIndicator(
+                                progress = { bgCurrent.toFloat() / bgTotal.coerceAtLeast(1) },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "$bgCurrent / $bgTotal images done",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "${bgCurrent * 100 / bgTotal.coerceAtLeast(1)}%",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = bgLabel.ifBlank { "Background edit running..." },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                // Stop button — cancels the background WorkManager run
+                if (bgRunning) {
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            AiEditWorkManager.cancel(context)
+                            Toast.makeText(context, "🛑 Stopping background AI edit...", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = currentStatus,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Stop Background Edit")
+                    }
                 }
             }
 
             // ======== Debug log ========
-            if (debugLog.isNotEmpty()) {
+            if (bgDebugLog.isNotEmpty()) {
                 item {
-                    TextButton(onClick = { debugLog = emptyList() }) {
-                        Text("Clear Debug Log", color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = { AiEditBackgroundDebugLog.clear() }) {
+                        Text("Clear Background Debug Log", color = MaterialTheme.colorScheme.error)
                     }
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -725,7 +739,7 @@ fun AiEditScreen(
                         )
                     ) {
                         Column(modifier = Modifier.padding(8.dp)) {
-                            debugLog.forEach { line ->
+                            bgDebugLog.forEach { line ->
                                 SelectionContainer {
                                     Text(
                                         text = line,
@@ -802,8 +816,9 @@ fun AiEditScreen(
     areaDialogUri?.let { uri ->
         AreaSelectionDialog(
             imageUri = uri,
-            onConfirm = { cropRect ->
-                selectedSourceAreas = selectedSourceAreas + (uri to cropRect)
+            initialSelection = selectedSourceAreas[uri],
+            onConfirm = { selection ->
+                selectedSourceAreas = selectedSourceAreas + (uri to selection)
                 areaDialogUri = null
             },
             onDismiss = {
@@ -933,32 +948,6 @@ private fun saveAiEditPrompt(context: Context, prompt: String) {
 }
 
 /**
- * Resolve a content:// URI to a local file path for processing.
- * Tries to copy the file to a temp location if direct path resolution fails.
- */
-private fun resolveContentUriToPath(context: Context, uriStr: String): String? {
-    return try {
-        val uri = Uri.parse(uriStr)
-        // Try to get the path directly
-        if (uri.scheme == "file") {
-            return uri.path
-        }
-
-        // Copy content:// URI to a temp file
-        val inputStream = context.contentResolver.openInputStream(uri) ?: return null
-        val tempFile = File(context.cacheDir, "ai_edit_src_${uri.hashCode()}.jpg")
-        tempFile.outputStream().use { output ->
-            inputStream.copyTo(output)
-        }
-        inputStream.close()
-        tempFile.absolutePath
-    } catch (e: Exception) {
-        e.printStackTrace()
-        null
-    }
-}
-
-/**
  * Load just the pixel dimensions of an image without decoding the full bitmap.
  * Also accounts for EXIF orientation so the returned dimensions match how
  * [coil3.compose.AsyncImage] displays the image (which applies EXIF rotation
@@ -1014,4 +1003,35 @@ private fun loadBitmapDimensions(context: Context, uriStr: String): Pair<Int, In
     } catch (e: Exception) {
         null
     }
+}
+
+// ---------- AI Edit batch-selection prefs (imported once on screen entry) ----------
+
+private const val AI_EDIT_SELECT_PREFS = "pyqcr_ai_edit_select"
+private const val KEY_SOURCE_URIS = "ai_edit_source_uris"
+private const val KEY_TARGET_URIS = "ai_edit_target_uris"
+
+private fun loadAiEditSourceUris(context: Context): Set<String> {
+    val prefs = context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
+    return prefs.getStringSet(KEY_SOURCE_URIS, emptySet()) ?: emptySet()
+}
+
+private fun saveAiEditSourceUris(context: Context, uris: Set<String>) {
+    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
+        .edit().putStringSet(KEY_SOURCE_URIS, uris).apply()
+}
+
+private fun loadAiEditTargetUris(context: Context): Set<String> {
+    val prefs = context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
+    return prefs.getStringSet(KEY_TARGET_URIS, emptySet()) ?: emptySet()
+}
+
+private fun saveAiEditTargetUris(context: Context, uris: Set<String>) {
+    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
+        .edit().putStringSet(KEY_TARGET_URIS, uris).apply()
+}
+
+private fun clearAiEditSelections(context: Context) {
+    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
+        .edit().remove(KEY_SOURCE_URIS).remove(KEY_TARGET_URIS).apply()
 }

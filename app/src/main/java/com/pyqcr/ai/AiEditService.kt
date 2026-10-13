@@ -7,6 +7,9 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
@@ -50,14 +53,70 @@ data class CropRect(
 }
 
 /**
+ * A single point of a brush stroke, normalized to 0f..1f relative to the
+ * displayed image dimensions.
+ */
+data class BrushStrokePoint(val x: Float, val y: Float)
+
+/**
+ * One continuous brush stroke. [points] are in normalized image space;
+ * [radius] is the stroke width as a fraction of the image's shorter side;
+ * [eraser] strokes remove previously painted area instead of adding to it.
+ */
+data class BrushStroke(
+    val points: List<BrushStrokePoint>,
+    val radius: Float,
+    val eraser: Boolean = false
+)
+
+/**
+ * The union of brush strokes that selects an edit region. When passed to the
+ * AI, everything OUTSIDE the painted strokes is made transparent.
+ */
+data class BrushMask(val strokes: List<BrushStroke>) {
+    fun isEmpty(): Boolean = strokes.isEmpty()
+}
+
+/**
+ * How one source image should be edited:
+ *  - [cropRect]: rectangle selection (normalized); null = whole image.
+ *  - [mask]: brush selection; when present the input image is sent as a
+ *    transparent-background PNG with everything outside the strokes
+ *    transparent, and the composite confines the edit to the painted area.
+ *
+ * Rect and brush are alternative selection modes in the UI, but the service
+ * supports any combination.
+ */
+data class EditSelection(
+    val cropRect: CropRect? = null,
+    val mask: BrushMask? = null
+) {
+    val hasCrop: Boolean get() = cropRect != null && cropRect.isValid()
+    val hasMask: Boolean get() = mask != null && !mask!!.isEmpty()
+}
+
+/**
+ * One source image queued for a background AI edit job: the content URI plus
+ * how to edit it. Serialized to JSON (Gson) so the WorkManager worker can
+ * read it back on another process lifetime.
+ */
+data class AiEditJobItem(
+    val uri: String,
+    val selection: EditSelection
+)
+
+/**
  * Image data prepared for the AI API: base64-encoded bytes with the pixel
  * dimensions of the image being sent (after optional upscaling to meet the
- * minimum 512px resolution requirement).
+ * minimum 512px resolution requirement), plus the MIME type used in the
+ * data URL ("image/jpeg" normally, "image/png" when a brush mask is applied
+ * because JPEG cannot carry the alpha channel).
  */
 data class CroppedImageData(
     val base64: String,
     val width: Int,
-    val height: Int
+    val height: Int,
+    val mimeType: String = "image/jpeg"
 )
 
 /**
@@ -83,7 +142,7 @@ class AiEditService {
     /**
      * Edit images using the Wan2.7 Image Edit API.
      *
-     * When [cropRects] contains an entry for a source path, only the cropped
+     * When [selections] contains an entry for a source path, only the cropped/
      * area is sent to the AI; the result is composited back onto the original
      * image at the crop position and saved to the device gallery (MediaStore).
      * Without crop rects, the full image is sent and saved in the output dir
@@ -95,7 +154,7 @@ class AiEditService {
         apiKey: String,
         modelName: String,
         sourceImagePaths: List<String>,
-        cropRects: Map<String, CropRect> = emptyMap(),
+        selections: Map<String, EditSelection> = emptyMap(),
         targetImagePath: String?,
         prompt: String,
         outputDir: File,
@@ -113,16 +172,16 @@ class AiEditService {
 
             onDebug("▶️ Editing image ${index + 1}/$total: ${File(sourcePath).name}")
 
-            val cropRect = cropRects[sourcePath]
-            val inputImageData: CroppedImageData?
-            val hasCrop = cropRect != null && cropRect.isValid()
+            val selection = selections[sourcePath] ?: EditSelection()
 
-            if (hasCrop) {
-                onDebug("  Cropping area (${"%.2f".format(cropRect!!.left)},${"%.2f".format(cropRect.top)})-(${"%.2f".format(cropRect.right)},${"%.2f".format(cropRect.bottom)})...")
-                inputImageData = cropAndEncode(sourcePath, cropRect)
-            } else {
-                inputImageData = loadFullImageData(sourcePath)
+            if (selection.hasCrop) {
+                val cr = selection.cropRect!!
+                onDebug("  Cropping area (${"%.2f".format(cr.left)},${"%.2f".format(cr.top)})-(${"%.2f".format(cr.right)},${"%.2f".format(cr.bottom)})...")
             }
+            if (selection.hasMask) {
+                onDebug("  Applying brush mask: ${selection.mask!!.strokes.size} stroke(s), outside area transparent")
+            }
+            val inputImageData = prepareSourceData(sourcePath, selection)
 
             if (inputImageData == null) {
                 onDebug("❌ Failed to process source image: $sourcePath")
@@ -131,7 +190,7 @@ class AiEditService {
                 continue
             }
 
-            onDebug("  Input image: ${inputImageData.width}x${inputImageData.height}, requesting output size: ${inputImageData.width}x${inputImageData.height}")
+            onDebug("  Input image: ${inputImageData.width}x${inputImageData.height} (${inputImageData.mimeType}), requesting output size: ${inputImageData.width}x${inputImageData.height}")
 
             val targetBase64 = if (targetImagePath != null) {
                 encodeImageToBase64(targetImagePath)
@@ -147,7 +206,7 @@ class AiEditService {
                 ))
             }
             content.add(mapOf(
-                "image" to "data:image/jpeg;base64,${inputImageData.base64}"
+                "image" to "data:${inputImageData.mimeType};base64,${inputImageData.base64}"
             ))
             content.add(mapOf("text" to prompt))
 
@@ -185,7 +244,7 @@ class AiEditService {
                 .post(jsonBody.toRequestBody(jsonMediaType))
                 .build()
 
-            val maxRetries = 3
+            val maxRetries = 1
             var retryCount = 0
             var imageSaved = false
 
@@ -193,7 +252,7 @@ class AiEditService {
                 coroutineContext.ensureActive()
                 retryCount++
                 try {
-                    onDebug("  Sending API request (attempt $retryCount/$maxRetries)...")
+                    onDebug("  Sending API request (attempt $retryCount)...")
                     val response = executeCancellable(request)
                     val responseCode = response.code
                     val rawBody = response.body?.string() ?: "<NULL BODY>"
@@ -212,14 +271,14 @@ class AiEditService {
                             onFatalError(fatal)
                             return@withContext outputUris
                         }
-                        onDebug("❌ HTTP $responseCode, retrying...")
+                        onDebug("❌ HTTP $responseCode — skipping image (no retry)")
                         continue
                     }
 
                     // Parse the response to extract image URLs
                     val imageUrl = extractImageUrl(rawBody)
                     if (imageUrl == null) {
-                        onDebug("❌ No image URL found in response — retrying (attempt $retryCount/$maxRetries)")
+                        onDebug("❌ No image URL found in response — skipping image (no retry)")
                         continue
                     }
 
@@ -229,13 +288,13 @@ class AiEditService {
                     val tempFile = File(outputDir, ".ai_edit_temp_${index}_${System.currentTimeMillis()}.jpg")
                     downloadImage(imageUrl, tempFile)
 
-                    if (hasCrop && cropRect != null) {
+                    if (selection.hasCrop || selection.hasMask) {
                         val ts = System.currentTimeMillis()
                         val baseName = "PYQAlbum_AI_Edit_${ts}_ai_edit_${index}"
 
                         // Debug 1: the exact image sent to the AI
-                        // (cropped area, resized to the API size range while
-                        // keeping the selection's aspect ratio).
+                        // (cropped area / masked image, resized to the API size
+                        // range while keeping the selection's aspect ratio).
                         val inputBytes = Base64.getDecoder().decode(inputImageData.base64)
                         val inputUri = saveImageBytesToMediaStore(
                             context, inputBytes, "${baseName}_input.jpg", onDebug
@@ -258,7 +317,7 @@ class AiEditService {
                             context = context,
                             originalPath = sourcePath,
                             editedAreaPath = tempFile.absolutePath,
-                            cropRect = cropRect,
+                            selection = selection,
                             suffix = "_ai_edit_${index}",
                             onDebug = onDebug,
                             fileName = "${baseName}.jpg"
@@ -268,12 +327,12 @@ class AiEditService {
                             imageSaved = true
                             onDebug("✅ Saved to gallery: $savedUri")
                         } else {
-                            onDebug("❌ Failed to composite and save — retrying...")
+                            onDebug("❌ Failed to composite and save — skipping image")
                         }
                         // Clean up temp file
                         tempFile.delete()
                     } else {
-                        // No crop: save the raw AI result directly
+                        // No crop/mask: save the raw AI result directly
                         val outputFileName = "ai_edit_${System.currentTimeMillis()}_${index}.jpg"
                         val outputFile = File(outputDir, outputFileName)
                         tempFile.renameTo(outputFile)
@@ -285,10 +344,7 @@ class AiEditService {
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    onDebug("❌ Exception (attempt $retryCount/$maxRetries): ${e::class.simpleName}: ${e.message}")
-                    if (retryCount >= maxRetries) {
-                        onDebug("❌ Gave up on image ${index + 1} after $maxRetries attempts")
-                    }
+                    onDebug("❌ Exception: ${e::class.simpleName}: ${e.message} — skipping image (no retry)")
                 }
             }
 
@@ -396,61 +452,87 @@ class AiEditService {
     }
 
     /**
-     * Crop the source image to the normalized [CropRect] and encode the
-     * cropped area as a base64 data URL string.
+     * Prepare the source image for the AI request according to [selection]:
      *
-     * The cropped region keeps its aspect ratio (scaled into the
-     * qwen-image-2.0 accepted range: min side 512px, max side 2048px,
-     * snapped to multiples of 16) — no square center-crop, so the encoded
-     * image is exactly the area the user selected.
+     *  - Decodes the image and applies EXIF rotation so pixel coordinates
+     *    match how the user saw it in the dialog.
+     *  - If a brush [BrushMask] is present, renders it at full resolution and
+     *    applies it via DST_IN — everything outside the painted strokes
+     *    becomes transparent (PNG preserves this; JPEG cannot).
+     *  - If a crop rect is present, crops to that area; otherwise the whole
+     *    (masked) image is used.
+     *  - Resizes into the qwen-image-2.0 accepted range (min side 512px, max
+     *    side 2048px, snapped to multiples of 16) keeping the aspect ratio.
+     *  - Encodes as PNG (masked) or JPEG (no mask).
      *
-     * @return [CroppedImageData] with the base64 string and the actual pixel
-     *         dimensions of the image sent to the AI (after any scaling).
+     * @return [CroppedImageData] with the base64 string, the pixel dimensions
+     *         sent to the AI, and the MIME type for the data URL.
      */
-    private fun cropAndEncode(sourcePath: String, cropRect: CropRect): CroppedImageData? {
+    private fun prepareSourceData(sourcePath: String, selection: EditSelection): CroppedImageData? {
         return try {
             val rawBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
-            val srcBitmap = applyExifOrientation(sourcePath, rawBitmap)
-            val iw = srcBitmap.width
-            val ih = srcBitmap.height
-            // Use roundToInt() instead of toInt() so pixel boundaries are the
-            // nearest integer, avoiding the systematic truncation bias that
-            // makes the cropped area slightly larger when left and right have
-            // different fractional parts.
-            val pixelRect = android.graphics.Rect(
-                (cropRect.left * iw).roundToInt().coerceIn(0, iw),
-                (cropRect.top * ih).roundToInt().coerceIn(0, ih),
-                (cropRect.right * iw).roundToInt().coerceIn(0, iw),
-                (cropRect.bottom * ih).roundToInt().coerceIn(0, ih)
-            )
-            if (pixelRect.width() <= 0 || pixelRect.height() <= 0) {
-                srcBitmap.recycle()
-                return null
-            }
-            val cropped = Bitmap.createBitmap(
-                srcBitmap,
-                pixelRect.left, pixelRect.top,
-                pixelRect.width(), pixelRect.height()
-            )
-            srcBitmap.recycle()
+            var bitmap = applyExifOrientation(sourcePath, rawBitmap)
 
-            // Resize the crop area to a size the qwen-image-2.0 API accepts
-            // (each side within ~512..2048 px, aspect ratio preserved — no
-            // cropping, no padding) so the input sent to the AI is exactly
-            // the area the user selected. The output size is requested to
-            // match, and scaleToFit() handles any residual difference.
-            val resized = resizeToApiSize(cropped)
-            if (resized !== cropped) cropped.recycle()
+            // Brush mask: make everything outside the strokes transparent.
+            if (selection.hasMask) {
+                val masked = applyMaskToBitmap(bitmap, selection.mask!!)
+                if (masked !== bitmap) bitmap.recycle()
+                bitmap = masked
+            }
+
+            // Crop to the selected rect (if any).
+            if (selection.hasCrop) {
+                val cropRect = selection.cropRect!!
+                val iw = bitmap.width
+                val ih = bitmap.height
+                // roundToInt() instead of toInt() so pixel boundaries are the
+                // nearest integer, avoiding the systematic truncation bias that
+                // makes the cropped area slightly larger when left and right have
+                // different fractional parts.
+                val pixelRect = android.graphics.Rect(
+                    (cropRect.left * iw).roundToInt().coerceIn(0, iw),
+                    (cropRect.top * ih).roundToInt().coerceIn(0, ih),
+                    (cropRect.right * iw).roundToInt().coerceIn(0, iw),
+                    (cropRect.bottom * ih).roundToInt().coerceIn(0, ih)
+                )
+                if (pixelRect.width() <= 0 || pixelRect.height() <= 0) {
+                    bitmap.recycle()
+                    return null
+                }
+                val cropped = Bitmap.createBitmap(
+                    bitmap,
+                    pixelRect.left, pixelRect.top,
+                    pixelRect.width(), pixelRect.height()
+                )
+                if (cropped !== bitmap) bitmap.recycle()
+                bitmap = cropped
+            }
+
+            // Resize to a size the qwen-image-2.0 API accepts (each side within
+            // ~512..2048 px, aspect ratio preserved — no cropping, no padding)
+            // so the input sent to the AI is exactly the area the user selected.
+            // The output size is requested to match, and scaleToFit() handles
+            // any residual difference.
+            val resized = resizeToApiSize(bitmap)
+            if (resized !== bitmap) bitmap.recycle()
+
+            val hasMask = selection.hasMask
+            val mimeType = if (hasMask) "image/png" else "image/jpeg"
             val outW = resized.width
             val outH = resized.height
 
             val bytes = java.io.ByteArrayOutputStream()
-            resized.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
+            resized.compress(
+                if (hasMask) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG,
+                85,
+                bytes
+            )
             resized.recycle()
             CroppedImageData(
                 base64 = Base64.getEncoder().encodeToString(bytes.toByteArray()),
                 width = outW,
-                height = outH
+                height = outH,
+                mimeType = mimeType
             )
         } catch (e: Exception) {
             e.printStackTrace()
@@ -459,37 +541,64 @@ class AiEditService {
     }
 
     /**
-     * Load an entire image file, encode it as base64, and return its pixel
-     * dimensions. Resized into the API size range keeping the aspect ratio,
-     * matching the same policy as [cropAndEncode].
+     * Render a [BrushMask] into an opaque-white/transparent mask bitmap of
+     * size [w]×[h]. Non-eraser strokes paint opaque white; eraser strokes
+     * punch holes back to transparent (PorterDuff CLEAR). Stroke width is
+     * [BrushStroke.radius] × the shorter side, matching the overlay preview.
      */
-    private fun loadFullImageData(sourcePath: String): CroppedImageData? {
-        return try {
-            val file = File(sourcePath)
-            if (!file.exists()) return null
-
-            val rawBitmap = BitmapFactory.decodeFile(sourcePath) ?: return null
-            val srcBitmap = applyExifOrientation(sourcePath, rawBitmap)
-
-            // Same API-size policy as cropAndEncode — preserve the full-image
-            // aspect ratio (no square center-crop).
-            val resized = resizeToApiSize(srcBitmap)
-            if (resized !== srcBitmap) srcBitmap.recycle()
-            val outW = resized.width
-            val outH = resized.height
-
-            val bytes = java.io.ByteArrayOutputStream()
-            resized.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
-            resized.recycle()
-            CroppedImageData(
-                base64 = Base64.getEncoder().encodeToString(bytes.toByteArray()),
-                width = outW,
-                height = outH
-            )
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
+    private fun renderMaskBitmap(w: Int, h: Int, mask: BrushMask): Bitmap {
+        val maskBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(maskBitmap)
+        val reference = minOf(w, h).toFloat()
+        val paint = Paint().apply {
+            isAntiAlias = true
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            color = android.graphics.Color.WHITE
         }
+        val eraserPaint = Paint(paint).apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+        }
+        for (stroke in mask.strokes) {
+            val pts = stroke.points
+            if (pts.isEmpty()) continue
+            val p = if (stroke.eraser) eraserPaint else paint
+            p.strokeWidth = stroke.radius * reference
+            if (pts.size == 1) {
+                canvas.drawPoint(pts[0].x * w, pts[0].y * h, p)
+            } else {
+                val path = Path()
+                path.moveTo(pts[0].x * w, pts[0].y * h)
+                for (i in 1 until pts.size) {
+                    path.lineTo(pts[i].x * w, pts[i].y * h)
+                }
+                canvas.drawPath(path, p)
+            }
+        }
+        return maskBitmap
+    }
+
+    /**
+     * Apply a [BrushMask] to [src]: everything outside the painted strokes
+     * becomes fully transparent. Returns a new ARGB bitmap; the caller
+     * recycles [src] separately.
+     */
+    private fun applyMaskToBitmap(src: Bitmap, mask: BrushMask): Bitmap {
+        val w = src.width
+        val h = src.height
+        val maskBitmap = renderMaskBitmap(w, h, mask)
+        val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(result)
+        // Copy the source first, then AND the mask into its alpha channel so
+        // the final bitmap keeps the source pixels only where the mask painted.
+        canvas.drawBitmap(src, 0f, 0f, null)
+        val dstIn = Paint().apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        }
+        canvas.drawBitmap(maskBitmap, 0f, 0f, dstIn)
+        maskBitmap.recycle()
+        return result
     }
 
     /**
@@ -504,12 +613,15 @@ class AiEditService {
         context: Context,
         originalPath: String,
         editedAreaPath: String,
-        cropRect: CropRect,
+        selection: EditSelection,
         suffix: String,
         onDebug: (String) -> Unit,
         fileName: String? = null
     ): String? {
         return try {
+            val cropRect = selection.cropRect?.takeIf { it.isValid() }
+            val mask = selection.mask?.takeIf { !it.isEmpty() }
+
             // Load original and edited bitmaps (apply EXIF rotation to both
             // so pixel positions align with how the dialog displayed the image)
             val rawOriginal = BitmapFactory.decodeFile(originalPath) ?: return null
@@ -520,29 +632,76 @@ class AiEditService {
 
             val iw = original.width
             val ih = original.height
-            // roundToInt() instead of toInt() — must match cropAndEncode
-            val pixelRect = android.graphics.Rect(
-                (cropRect.left * iw).roundToInt().coerceIn(0, iw),
-                (cropRect.top * ih).roundToInt().coerceIn(0, ih),
-                (cropRect.right * iw).roundToInt().coerceIn(0, iw),
-                (cropRect.bottom * ih).roundToInt().coerceIn(0, ih)
-            )
-            val cropW = pixelRect.width()
-            val cropH = pixelRect.height()
 
-            // Log AI result dimensions vs expected
             val edited = applyExifOrientation(editedAreaPath, rawEdited)
-            onDebug("  AI result: ${edited.width}x${edited.height}, expected crop area: ${cropW}x${cropH}")
 
-            // Scale the AI-edited area to match the crop dimensions.
-            // If the aspect ratio differs from expected, center-crop first
-            // to avoid stretching the content.
-            val scaledEdited = if (edited.width != cropW || edited.height != cropH) {
-                val scaled = scaleToFit(edited, cropW, cropH)
+            // Where the edited result lands on the original:
+            //  - crop rect: the selected rectangle
+            //  - mask only: the whole image (mask confines the visible edit)
+            val dstRect: android.graphics.Rect
+            val expectedW: Int
+            val expectedH: Int
+            if (cropRect != null) {
+                // roundToInt() instead of toInt() — must match prepareSourceData
+                dstRect = android.graphics.Rect(
+                    (cropRect.left * iw).roundToInt().coerceIn(0, iw),
+                    (cropRect.top * ih).roundToInt().coerceIn(0, ih),
+                    (cropRect.right * iw).roundToInt().coerceIn(0, iw),
+                    (cropRect.bottom * ih).roundToInt().coerceIn(0, ih)
+                )
+                expectedW = dstRect.width()
+                expectedH = dstRect.height()
+            } else {
+                dstRect = android.graphics.Rect(0, 0, iw, ih)
+                expectedW = iw
+                expectedH = ih
+            }
+
+            onDebug("  AI result: ${edited.width}x${edited.height}, expected area: ${expectedW}x${expectedH}")
+
+            // Scale the AI-edited area to match the expected dimensions.
+            // If the aspect ratio differs, center-crop first to avoid stretching.
+            var scaledEdited = if (edited.width != expectedW || edited.height != expectedH) {
+                val scaled = scaleToFit(edited, expectedW, expectedH)
                 edited.recycle()
                 scaled
             } else {
                 edited
+            }
+            val requiredEdited = scaledEdited !== edited
+
+            // Confine the visible edit to the brush mask (if any): mask bitmap
+            // rendered at original resolution, cropped/scaled to the edited
+            // bitmap size, then ANDed into its alpha channel. Everything
+            // outside the painted strokes keeps the original pixels.
+            if (mask != null) {
+                var maskBitmap = renderMaskBitmap(iw, ih, mask)
+                if (cropRect != null) {
+                    val croppedMask = Bitmap.createBitmap(
+                        maskBitmap,
+                        dstRect.left, dstRect.top,
+                        dstRect.width(), dstRect.height()
+                    )
+                    if (croppedMask !== maskBitmap) maskBitmap.recycle()
+                    maskBitmap = croppedMask
+                }
+                if (maskBitmap.width != scaledEdited.width || maskBitmap.height != scaledEdited.height) {
+                    val scaledMask = scaleToFit(maskBitmap, scaledEdited.width, scaledEdited.height)
+                    if (scaledMask !== maskBitmap) maskBitmap.recycle()
+                    maskBitmap = scaledMask
+                }
+                val maskedEdited = Bitmap.createBitmap(
+                    scaledEdited.width, scaledEdited.height, Bitmap.Config.ARGB_8888
+                )
+                val mCanvas = Canvas(maskedEdited)
+                mCanvas.drawBitmap(scaledEdited, 0f, 0f, null)
+                val dstIn = Paint().apply {
+                    xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                }
+                mCanvas.drawBitmap(maskBitmap, 0f, 0f, dstIn)
+                maskBitmap.recycle()
+                if (requiredEdited) scaledEdited.recycle()
+                scaledEdited = maskedEdited
             }
 
             // Composite onto the original using integer-precise Rect dst
@@ -550,13 +709,13 @@ class AiEditService {
             val result = original.copy(Bitmap.Config.ARGB_8888, true)
             val canvas = Canvas(result)
             // isFilterBitmap=false since the AI result is already pre-scaled to
-            // cropW×cropH — no filtering needed for a 1:1 pixel copy, and it
-            // prevents bilinear edge bleed that could make the composite seem
+            // the expected size — no filtering needed for a 1:1 pixel copy, and
+            // it prevents bilinear edge bleed that could make the composite seem
             // slightly larger than the selection.
             val paint = Paint().apply { isFilterBitmap = false }
             canvas.drawBitmap(scaledEdited,
                 android.graphics.Rect(0, 0, scaledEdited.width, scaledEdited.height),
-                android.graphics.Rect(pixelRect.left, pixelRect.top, pixelRect.right, pixelRect.bottom),
+                dstRect,
                 paint)
 
             // Save via MediaStore (gallery-visible)
@@ -767,13 +926,13 @@ class AiEditService {
 
     /**
      * Try the chat-completions compatible endpoint as a fallback.
-     * When [cropRects] is provided, applies the same crop→composite flow.
+     * When [selections] is provided, applies the same crop/mask→composite flow.
      */
     suspend fun editImagesChatCompatible(
         apiKey: String,
         modelName: String,
         sourceImagePaths: List<String>,
-        cropRects: Map<String, CropRect> = emptyMap(),
+        selections: Map<String, EditSelection> = emptyMap(),
         targetImagePath: String?,
         prompt: String,
         outputDir: File,
@@ -790,14 +949,9 @@ class AiEditService {
             coroutineContext.ensureActive()
             onDebug("▶️ Editing image ${index + 1}/$total (chat-compatible): ${File(sourcePath).name}")
 
-            val cropRect = cropRects[sourcePath]
-            val hasCrop = cropRect != null && cropRect.isValid()
+            val selection = selections[sourcePath] ?: EditSelection()
 
-            val inputImageData = if (hasCrop) {
-                cropAndEncode(sourcePath, cropRect!!)
-            } else {
-                loadFullImageData(sourcePath)
-            }
+            val inputImageData = prepareSourceData(sourcePath, selection)
             if (inputImageData == null) {
                 completed++
                 onProgress(completed, total)
@@ -818,7 +972,7 @@ class AiEditService {
             }
             content.add(mapOf(
                 "type" to "image_url",
-                "image_url" to mapOf("url" to "data:image/jpeg;base64,${inputImageData.base64}")
+                "image_url" to mapOf("url" to "data:${inputImageData.mimeType};base64,${inputImageData.base64}")
             ))
             content.add(mapOf("type" to "text", "text" to prompt))
 
@@ -859,9 +1013,9 @@ class AiEditService {
                             val tempFile = File(outputDir, ".ai_edit_temp_fb_${index}_${System.currentTimeMillis()}.jpg")
                             downloadImage(imageUrl, tempFile)
 
-                            if (hasCrop && cropRect != null) {
+                            if (selection.hasCrop || selection.hasMask) {
                                 val savedUri = compositeAndSaveToMediaStore(
-                                    context, sourcePath, tempFile.absolutePath, cropRect,
+                                    context, sourcePath, tempFile.absolutePath, selection,
                                     "_ai_edit_fb_$index", onDebug
                                 )
                                 if (savedUri != null) {
