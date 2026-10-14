@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
@@ -12,6 +13,8 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
@@ -625,14 +628,14 @@ class AiEditService {
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
 
-        // Surrounding pattern: the source shrunk to ~1/24 and scaled back up
-        // in doubling steps, so bilinear filtering smears it into a smooth,
-        // heavy blur, then desaturated so it no longer reads as the original
-        // photo — it reads as masked background. Large-scale color blocks and
-        // layout survive to anchor the subject's position/scale for the model,
-        // but fine detail is gone and the surroundings clearly aren't content.
-        var blurW = maxOf(1, w / 24)
-        var blurH = maxOf(1, h / 24)
+        // Surrounding pattern: the source shrunk to ~1/64 and scaled back up
+        // in doubling steps, so bilinear filtering smears it into a very heavy
+        // blur, then desaturated so it no longer reads as the original photo —
+        // it reads as masked background. Large-scale color blocks and layout
+        // survive to anchor the subject's position/scale for the model, but
+        // fine detail is gone and the surroundings clearly aren't content.
+        var blurW = maxOf(1, w / 64)
+        var blurH = maxOf(1, h / 64)
         var blurred = Bitmap.createScaledBitmap(src, blurW, blurH, true)
         while (blurW < w || blurH < h) {
             val nw = minOf(blurW * 2, w)
@@ -651,6 +654,36 @@ class AiEditService {
             colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0.4f) })
         }
         canvas.drawBitmap(blurred, 0f, 0f, bgPaint)
+
+        // On top of the heavy blur, scatter a random field of soft color blobs
+        // sampled from the blurred tones. The surroundings then read as an
+        // intentional mosaic-like texture instead of a single flat color:
+        // random position, size and brightness with soft radial falloff, so
+        // they look "meaningfully patterned" to the model but never like real
+        // photo content.
+        val blobPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        val rnd = java.util.Random(System.nanoTime())
+        val blobCount = (24 + w * h / 40_000).coerceAtMost(140)
+        val maxDim = maxOf(w, h)
+        repeat(blobCount) {
+            val cx = rnd.nextInt(w).toFloat()
+            val cy = rnd.nextInt(h).toFloat()
+            val radius = maxDim / 90f + rnd.nextFloat() * maxDim / 8f
+            val base = blurred.getPixel(cx.toInt(), cy.toInt())
+            val r = ((base shr 16 and 0xFF) + (rnd.nextInt(41) - 20)).coerceIn(0, 255)
+            val g = ((base shr 8 and 0xFF) + (rnd.nextInt(41) - 20)).coerceIn(0, 255)
+            val b = ((base and 0xFF) + (rnd.nextInt(41) - 20)).coerceIn(0, 255)
+            val center = Color.argb(230 + rnd.nextInt(26), r, g, b)
+            blobPaint.shader = RadialGradient(
+                cx, cy, radius,
+                intArrayOf(center, center and 0x00FFFFFF),
+                floatArrayOf(0f, 1f),
+                Shader.TileMode.CLAMP
+            )
+            canvas.drawCircle(cx, cy, radius, blobPaint)
+        }
+        blobPaint.shader = null
+
         blurred.recycle()
 
         // Masked foreground: source pixels inside the painted strokes only,
