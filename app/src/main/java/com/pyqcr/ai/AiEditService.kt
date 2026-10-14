@@ -5,6 +5,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
@@ -605,13 +607,15 @@ class AiEditService {
 
     /**
      * Apply a [BrushMask] to [src]: everything outside the painted strokes is
-     * replaced with a blurred copy of the source so the AI input keeps real
-     * scene context around the edit region. A fully transparent background is
+     * replaced with a heavily blurred, desaturated copy of the source so the
+     * AI input clearly reads as masked background around the edit region — not
+     * the recognizable original photo. A fully transparent background is
      * flattened to solid black when the API converts the PNG to RGB, and the
      * model treats that void as ignorable — reframing/enlarging the masked
-     * content to fill the canvas. The blurred pattern anchors the subject's
-     * position and scale while the sharp masked area reads as the edit target.
-     * Returns a new ARGB bitmap; the caller recycles [src] separately.
+     * content to fill the canvas; likewise it reuses recognizable surroundings
+     * as if they were real content. The blurred color blocks keep the scene's
+     * layout as spatial anchors while the sharp masked area reads as the edit
+     * target. Returns a new ARGB bitmap; the caller recycles [src] separately.
      */
     private fun applyMaskToBitmap(src: Bitmap, mask: BrushMask): Bitmap {
         val w = src.width
@@ -621,13 +625,33 @@ class AiEditService {
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
 
-        // Surrounding pattern: the source scaled down to 1/8 and stretched
-        // back with bilinear filtering — a heavy blur that keeps the scene's
-        // color layout while clearly reading as unfocused background.
-        val small = Bitmap.createScaledBitmap(src, maxOf(1, w / 8), maxOf(1, h / 8), true)
-        val bgPaint = Paint().apply { isFilterBitmap = true }
-        canvas.drawBitmap(small, null, android.graphics.Rect(0, 0, w, h), bgPaint)
-        small.recycle()
+        // Surrounding pattern: the source shrunk to ~1/24 and scaled back up
+        // in doubling steps, so bilinear filtering smears it into a smooth,
+        // heavy blur, then desaturated so it no longer reads as the original
+        // photo — it reads as masked background. Large-scale color blocks and
+        // layout survive to anchor the subject's position/scale for the model,
+        // but fine detail is gone and the surroundings clearly aren't content.
+        var blurW = maxOf(1, w / 24)
+        var blurH = maxOf(1, h / 24)
+        var blurred = Bitmap.createScaledBitmap(src, blurW, blurH, true)
+        while (blurW < w || blurH < h) {
+            val nw = minOf(blurW * 2, w)
+            val nh = minOf(blurH * 2, h)
+            val next = Bitmap.createScaledBitmap(blurred, nw, nh, true)
+            blurred.recycle()
+            blurred = next
+            blurW = nw
+            blurH = nh
+        }
+        val bgPaint = Paint().apply {
+            isFilterBitmap = true
+            // "Background treatment": cut chroma to ~40% so the surrounding is
+            // visually distinct from the sharp masked foreground, while the
+            // remaining blurred colors still anchor the scene layout.
+            colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0.4f) })
+        }
+        canvas.drawBitmap(blurred, 0f, 0f, null, bgPaint)
+        blurred.recycle()
 
         // Masked foreground: source pixels inside the painted strokes only,
         // composited on top of the pattern background.
