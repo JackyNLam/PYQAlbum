@@ -650,7 +650,7 @@ class AiEditService {
             // remaining blurred colors still anchor the scene layout.
             colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0.4f) })
         }
-        canvas.drawBitmap(blurred, 0f, 0f, null, bgPaint)
+        canvas.drawBitmap(blurred, 0f, 0f, bgPaint)
         blurred.recycle()
 
         // Masked foreground: source pixels inside the painted strokes only,
