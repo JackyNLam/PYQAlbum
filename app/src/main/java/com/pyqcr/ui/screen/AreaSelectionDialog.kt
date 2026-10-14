@@ -58,6 +58,7 @@ fun AreaSelectionDialog(
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
     var strokes by remember { mutableStateOf<List<BrushStroke>>(emptyList()) }
+    var activeStroke by remember { mutableStateOf<BrushStroke?>(null) }
     var brushSize by remember { mutableFloatStateOf(0.04f) }
     var eraser by remember { mutableStateOf(false) }
     var containerSize by remember { mutableStateOf(Size.Zero) }
@@ -142,7 +143,7 @@ fun AreaSelectionDialog(
                 ) {
                     SegmentedButton(
                         selected = mode == SelectionMode.RECT,
-                        onClick = { mode = SelectionMode.RECT; dragStart = null; dragEnd = null },
+                        onClick = { mode = SelectionMode.RECT; dragStart = null; dragEnd = null; activeStroke = null },
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
                     ) {
                         Text("Rectangle")
@@ -174,6 +175,7 @@ fun AreaSelectionDialog(
                                         dragEnd = change.position
                                     }
                                 } else {
+                                    activeStroke = null
                                     val pts = mutableListOf<BrushStrokePoint>()
                                     fun addPoint(pos: Offset) {
                                         val n = normalizedPoint(pos)
@@ -185,6 +187,13 @@ fun AreaSelectionDialog(
                                             val dy = n.y - last.y
                                             if (dx * dx + dy * dy > 0.000009f) pts.add(n)
                                         }
+                                        // Refresh the overlay on every point so the
+                                        // stroke shows while the finger is still down.
+                                        activeStroke = BrushStroke(
+                                            points = pts.toList(),
+                                            radius = brushSize,
+                                            eraser = eraser
+                                        )
                                     }
                                     addPoint(down.position)
                                     drag(down.id) { change ->
@@ -197,6 +206,7 @@ fun AreaSelectionDialog(
                                             radius = brushSize,
                                             eraser = eraser
                                         )
+                                        activeStroke = null
                                     }
                                 }
                             }
@@ -273,7 +283,16 @@ fun AreaSelectionDialog(
                             bmp.eraseColor(0) // transparent
                             val reference = minOf(size.width, size.height)
 
-                            // Paint strokes (non-eraser) — full-opacity white
+                            // Strokes render in temporal order: paint strokes add
+                            // opaque white, eraser strokes punch holes (CLEAR)
+                            // through only what was painted before them, so a new
+                            // stroke can repaint an earlier-erased area. The
+                            // in-progress stroke (activeStroke) is appended last
+                            // so brush/eraser feedback shows in real time.
+                            val allStrokes =
+                                if (activeStroke != null) strokes + activeStroke!! else strokes
+
+                            // Paint strokes — full-opacity white
                             val paint = android.graphics.Paint().apply {
                                 color = android.graphics.Color.WHITE
                                 isAntiAlias = true
@@ -281,24 +300,6 @@ fun AreaSelectionDialog(
                                 strokeCap = android.graphics.Paint.Cap.ROUND
                                 strokeJoin = android.graphics.Paint.Join.ROUND
                             }
-                            for (stroke in strokes) {
-                                if (stroke.eraser) continue
-                                val strokePx = stroke.radius * reference
-                                if (stroke.points.isEmpty()) continue
-                                paint.strokeWidth = strokePx
-                                if (stroke.points.size == 1) {
-                                    val c = containerPoint(stroke.points[0])
-                                    nc.drawCircle(c.x, c.y, strokePx / 2f, paint)
-                                } else {
-                                    val p = android.graphics.Path()
-                                    stroke.points.forEachIndexed { i, pt ->
-                                        val o = containerPoint(pt)
-                                        if (i == 0) p.moveTo(o.x, o.y) else p.lineTo(o.x, o.y)
-                                    }
-                                    nc.drawPath(p, paint)
-                                }
-                            }
-
                             // Eraser strokes — punch transparent holes
                             val erase = android.graphics.Paint().apply {
                                 isAntiAlias = true
@@ -309,21 +310,21 @@ fun AreaSelectionDialog(
                                     android.graphics.PorterDuff.Mode.CLEAR
                                 )
                             }
-                            for (stroke in strokes) {
-                                if (!stroke.eraser) continue
+                            for (stroke in allStrokes) {
                                 val strokePx = stroke.radius * reference
                                 if (stroke.points.isEmpty()) continue
-                                erase.strokeWidth = strokePx
+                                val p = if (stroke.eraser) erase else paint
+                                p.strokeWidth = strokePx
                                 if (stroke.points.size == 1) {
                                     val c = containerPoint(stroke.points[0])
-                                    nc.drawCircle(c.x, c.y, strokePx / 2f, erase)
+                                    nc.drawCircle(c.x, c.y, strokePx / 2f, p)
                                 } else {
-                                    val p = android.graphics.Path()
+                                    val path = android.graphics.Path()
                                     stroke.points.forEachIndexed { i, pt ->
                                         val o = containerPoint(pt)
-                                        if (i == 0) p.moveTo(o.x, o.y) else p.lineTo(o.x, o.y)
+                                        if (i == 0) path.moveTo(o.x, o.y) else path.lineTo(o.x, o.y)
                                     }
-                                    nc.drawPath(p, erase)
+                                    nc.drawPath(path, p)
                                 }
                             }
 
@@ -388,7 +389,7 @@ fun AreaSelectionDialog(
                         )
                         Spacer(Modifier.width(4.dp))
                         TextButton(
-                            onClick = { strokes = emptyList() },
+                            onClick = { strokes = emptyList(); activeStroke = null },
                             enabled = strokes.isNotEmpty()
                         ) {
                             Text("Clear")

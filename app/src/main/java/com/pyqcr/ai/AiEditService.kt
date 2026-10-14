@@ -80,9 +80,9 @@ data class BrushMask(val strokes: List<BrushStroke>) {
 /**
  * How one source image should be edited:
  *  - [cropRect]: rectangle selection (normalized); null = whole image.
- *  - [mask]: brush selection; when present the input image is sent as a
- *    transparent-background PNG with everything outside the strokes
- *    transparent, and the composite confines the edit to the painted area.
+ *  - [mask]: brush selection; everything outside the painted strokes is
+ *    replaced with a blurred context pattern in the input image, and the
+ *    composite confines the edit to the painted area.
  *
  * Rect and brush are alternative selection modes in the UI, but the service
  * supports any combination.
@@ -109,8 +109,8 @@ data class AiEditJobItem(
  * Image data prepared for the AI API: base64-encoded bytes with the pixel
  * dimensions of the image being sent (after optional upscaling to meet the
  * minimum 512px resolution requirement), plus the MIME type used in the
- * data URL ("image/jpeg" normally, "image/png" when a brush mask is applied
- * because JPEG cannot carry the alpha channel).
+ * data URL ("image/jpeg"; the brush-mask surrounding pattern is opaque so
+ * no alpha channel is needed).
  */
 data class CroppedImageData(
     val base64: String,
@@ -456,14 +456,16 @@ class AiEditService {
      *
      *  - Decodes the image and applies EXIF rotation so pixel coordinates
      *    match how the user saw it in the dialog.
-     *  - If a brush [BrushMask] is present, renders it at full resolution and
-     *    applies it via DST_IN — everything outside the painted strokes
-     *    becomes transparent (PNG preserves this; JPEG cannot).
+     *  - If a brush [BrushMask] is present, fills everything outside the
+     *    painted strokes with a blurred context pattern (see
+     *    [applyMaskToBitmap]) so the API doesn't see a black void around the
+     *    subject and reframe it.
      *  - If a crop rect is present, crops to that area; otherwise the whole
      *    (masked) image is used.
      *  - Resizes into the qwen-image-2.0 accepted range (min side 512px, max
      *    side 2048px, snapped to multiples of 16) keeping the aspect ratio.
-     *  - Encodes as PNG (masked) or JPEG (no mask).
+     *  - Encodes as JPEG (the masked input is fully opaque, so no alpha is
+     *    lost).
      *
      * @return [CroppedImageData] with the base64 string, the pixel dimensions
      *         sent to the AI, and the MIME type for the data URL.
@@ -544,23 +546,17 @@ class AiEditService {
             val resized = resizeToApiSize(bitmap)
             if (resized !== bitmap) bitmap.recycle()
 
-            val hasMask = selection.hasMask
-            val mimeType = if (hasMask) "image/png" else "image/jpeg"
             val outW = resized.width
             val outH = resized.height
 
             val bytes = java.io.ByteArrayOutputStream()
-            resized.compress(
-                if (hasMask) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG,
-                85,
-                bytes
-            )
+            resized.compress(Bitmap.CompressFormat.JPEG, 85, bytes)
             resized.recycle()
             CroppedImageData(
                 base64 = Base64.getEncoder().encodeToString(bytes.toByteArray()),
                 width = outW,
                 height = outH,
-                mimeType = mimeType
+                mimeType = "image/jpeg"
             )
         } catch (e: Exception) {
             e.printStackTrace()
@@ -608,23 +604,42 @@ class AiEditService {
     }
 
     /**
-     * Apply a [BrushMask] to [src]: everything outside the painted strokes
-     * becomes fully transparent. Returns a new ARGB bitmap; the caller
-     * recycles [src] separately.
+     * Apply a [BrushMask] to [src]: everything outside the painted strokes is
+     * replaced with a blurred copy of the source so the AI input keeps real
+     * scene context around the edit region. A fully transparent background is
+     * flattened to solid black when the API converts the PNG to RGB, and the
+     * model treats that void as ignorable — reframing/enlarging the masked
+     * content to fill the canvas. The blurred pattern anchors the subject's
+     * position and scale while the sharp masked area reads as the edit target.
+     * Returns a new ARGB bitmap; the caller recycles [src] separately.
      */
     private fun applyMaskToBitmap(src: Bitmap, mask: BrushMask): Bitmap {
         val w = src.width
         val h = src.height
         val maskBitmap = renderMaskBitmap(w, h, mask)
+
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
-        // Copy the source first, then AND the mask into its alpha channel so
-        // the final bitmap keeps the source pixels only where the mask painted.
-        canvas.drawBitmap(src, 0f, 0f, null)
+
+        // Surrounding pattern: the source scaled down to 1/8 and stretched
+        // back with bilinear filtering — a heavy blur that keeps the scene's
+        // color layout while clearly reading as unfocused background.
+        val small = Bitmap.createScaledBitmap(src, maxOf(1, w / 8), maxOf(1, h / 8), true)
+        val bgPaint = Paint().apply { isFilterBitmap = true }
+        canvas.drawBitmap(small, null, android.graphics.Rect(0, 0, w, h), bgPaint)
+        small.recycle()
+
+        // Masked foreground: source pixels inside the painted strokes only,
+        // composited on top of the pattern background.
+        val masked = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val mCanvas = Canvas(masked)
+        mCanvas.drawBitmap(src, 0f, 0f, null)
         val dstIn = Paint().apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
         }
-        canvas.drawBitmap(maskBitmap, 0f, 0f, dstIn)
+        mCanvas.drawBitmap(maskBitmap, 0f, 0f, dstIn)
+        canvas.drawBitmap(masked, 0f, 0f, null)
+        masked.recycle()
         maskBitmap.recycle()
         return result
     }
@@ -632,7 +647,9 @@ class AiEditService {
     /**
      * Compute the axis-aligned bounding box of all painted strokes in a
      * [BrushMask]. Coordinates are normalized 0f..1f relative to the image,
-     * with a 1% padding so the box isn't too tight on the edges.
+     * with a 5% padding so the AI input carries visible surrounding context
+     * (the blurred pattern placed there by [applyMaskToBitmap]) instead of a
+     * razor-thin border that leaves the subject subject to reframing.
      * Returns a [CropRect] that covers the painted area.
      */
     private fun brushBoundingBox(mask: BrushMask, w: Int, h: Int): CropRect {
@@ -656,7 +673,7 @@ class AiEditService {
                 if (y1 > maxY) maxY = y1
             }
         }
-        val margin = 0.01f
+        val margin = 0.05f
         return CropRect(
             (minX - margin).coerceIn(0f, 1f),
             (minY - margin).coerceIn(0f, 1f),
