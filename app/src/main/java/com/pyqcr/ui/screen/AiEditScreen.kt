@@ -270,56 +270,60 @@ fun AiEditScreen(
                                     .matchParentSize()
                                     .clickable { promptMenuExpanded = true }
                             )
-                        }
-                        DropdownMenu(
-                            expanded = promptMenuExpanded,
-                            onDismissRequest = { promptMenuExpanded = false }
-                        ) {
-                            if (savedPrompts.isEmpty()) {
-                                DropdownMenuItem(
-                                    text = { Text("No saved prompts yet") },
-                                    onClick = { promptMenuExpanded = false }
-                                )
-                            }
-                            savedPrompts.forEachIndexed { index, prompt ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Text(
-                                                text = "Prompt ${index + 1}",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                            Text(
-                                                text = prompt.replace("\n", " "),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
+                            // DropdownMenu must sit INSIDE the same Box as the
+                            // trigger: its popup anchors to the parent of this
+                            // layout node, so as a sibling it would pop out at
+                            // the card position instead of at the field.
+                            DropdownMenu(
+                                expanded = promptMenuExpanded,
+                                onDismissRequest = { promptMenuExpanded = false }
+                            ) {
+                                if (savedPrompts.isEmpty()) {
+                                    DropdownMenuItem(
+                                        text = { Text("No saved prompts yet") },
+                                        onClick = { promptMenuExpanded = false }
+                                    )
+                                }
+                                savedPrompts.forEachIndexed { index, prompt ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Column {
+                                                Text(
+                                                    text = "Prompt ${index + 1}",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                                Text(
+                                                    text = prompt.replace("\n", " "),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        },
+                                        leadingIcon = if (selectedSavedPromptIdx == index) {
+                                            { Icon(Icons.Default.Check, contentDescription = "Selected") }
+                                        } else null,
+                                        onClick = {
+                                            customPrompt = prompt
+                                            selectedSavedPromptIdx = index
+                                            promptMenuExpanded = false
+                                        },
+                                        trailingIcon = {
+                                            IconButton(onClick = {
+                                                savedPrompts = savedPrompts.filterIndexed { i, _ -> i != index }
+                                                saveAiEditSavedPrompts(context, savedPrompts)
+                                                if (selectedSavedPromptIdx == index) selectedSavedPromptIdx = -1
+                                                else if (selectedSavedPromptIdx > index) selectedSavedPromptIdx--
+                                            }) {
+                                                Icon(
+                                                    Icons.Default.Delete,
+                                                    contentDescription = "Delete saved prompt",
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
                                         }
-                                    },
-                                    leadingIcon = if (selectedSavedPromptIdx == index) {
-                                        { Icon(Icons.Default.Check, contentDescription = "Selected") }
-                                    } else null,
-                                    onClick = {
-                                        customPrompt = prompt
-                                        selectedSavedPromptIdx = index
-                                        promptMenuExpanded = false
-                                    },
-                                    trailingIcon = {
-                                        IconButton(onClick = {
-                                            savedPrompts = savedPrompts.filterIndexed { i, _ -> i != index }
-                                            saveAiEditSavedPrompts(context, savedPrompts)
-                                            if (selectedSavedPromptIdx == index) selectedSavedPromptIdx = -1
-                                            else if (selectedSavedPromptIdx > index) selectedSavedPromptIdx--
-                                        }) {
-                                            Icon(
-                                                Icons.Default.Delete,
-                                                contentDescription = "Delete saved prompt",
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
-                                    }
-                                )
+                                    )
+                                }
                             }
                         }
 

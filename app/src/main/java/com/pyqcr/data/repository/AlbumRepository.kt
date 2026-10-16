@@ -35,6 +35,12 @@ class AlbumRepository(
         }
     }
 
+    fun getImagesByFolderDateAsc(folderName: String): Flow<List<ImageItem>> {
+        return imageDao.getImagesByFolderDateAsc(folderName).map { entities ->
+            entities.map { it.toImageItem() }
+        }
+    }
+
     fun getImagesByTag(tagName: String): Flow<List<ImageItem>> {
         return imageDao.getImagesByTag(tagName).map { entities ->
             entities.map { it.toImageItem() }
@@ -59,6 +65,18 @@ class AlbumRepository(
         }
     }
 
+    fun getImagesSortedByUserRatingAsc(): Flow<List<ImageItem>> {
+        return imageDao.getImagesSortedByUserRatingAsc().map { entities ->
+            entities.map { it.toImageItem() }
+        }
+    }
+
+    fun getImagesSortedByAiScoreAsc(): Flow<List<ImageItem>> {
+        return imageDao.getImagesSortedByAiScoreAsc().map { entities ->
+            entities.map { it.toImageItem() }
+        }
+    }
+
     fun getAllFoldersWithInfo(): Flow<List<FolderInfo>> {
         return imageDao.getAllFoldersWithInfo()
     }
@@ -71,12 +89,30 @@ class AlbumRepository(
         return imageDao.getAllFoldersWithInfoByCount()
     }
 
+    fun getAllFoldersWithInfoByOldest(): Flow<List<FolderInfo>> {
+        return imageDao.getAllFoldersWithInfoByOldest()
+    }
+
+    fun getAllFoldersWithInfoByCountAsc(): Flow<List<FolderInfo>> {
+        return imageDao.getAllFoldersWithInfoByCountAsc()
+    }
+
+    fun getAllFoldersWithInfoByNameDesc(): Flow<List<FolderInfo>> {
+        return imageDao.getAllFoldersWithInfoByNameDesc()
+    }
+
     fun getAllFolders(): Flow<List<String>> {
         return imageDao.getAllFolders()
     }
 
     fun getAllImagesByNameAsc(): Flow<List<ImageItem>> {
         return imageDao.getAllImagesByNameAsc().map { entities ->
+            entities.map { it.toImageItem() }
+        }
+    }
+
+    fun getAllImagesByNameDesc(): Flow<List<ImageItem>> {
+        return imageDao.getAllImagesByNameDesc().map { entities ->
             entities.map { it.toImageItem() }
         }
     }

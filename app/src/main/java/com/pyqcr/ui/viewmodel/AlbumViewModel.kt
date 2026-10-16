@@ -83,16 +83,26 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
         }.launchIn(viewModelScope)
     }
 
-    fun loadImagesByFolderSorted(folderName: String, sortByUserRating: Boolean, sortByAiScore: Boolean, sortByName: Boolean = false) {
+    fun loadImagesByFolderSorted(folderName: String, mode: FolderSortMode) {
         imagesJob?.cancel()
-        val flow = when {
-            sortByName -> repository.getAllImagesByNameAsc()
-            sortByUserRating -> repository.getImagesSortedByUserRatingDesc()
-            sortByAiScore -> repository.getImagesSortedByAiScoreDesc()
-            else -> repository.getImagesByFolder(folderName)
+        val flow = when (mode) {
+            FolderSortMode.MODIFIED_DATE_DESC -> repository.getImagesByFolder(folderName)
+            FolderSortMode.MODIFIED_DATE_ASC -> repository.getImagesByFolderDateAsc(folderName)
+            FolderSortMode.NAME_ASC -> repository.getAllImagesByNameAsc()
+            FolderSortMode.NAME_DESC -> repository.getAllImagesByNameDesc()
+            FolderSortMode.USER_RATING_DESC -> repository.getImagesSortedByUserRatingDesc()
+            FolderSortMode.USER_RATING_ASC -> repository.getImagesSortedByUserRatingAsc()
+            FolderSortMode.AI_SCORE_DESC -> repository.getImagesSortedByAiScoreDesc()
+            FolderSortMode.AI_SCORE_ASC -> repository.getImagesSortedByAiScoreAsc()
         }
+        val needsFolderFilter = mode == FolderSortMode.NAME_ASC ||
+            mode == FolderSortMode.NAME_DESC ||
+            mode == FolderSortMode.USER_RATING_DESC ||
+            mode == FolderSortMode.USER_RATING_ASC ||
+            mode == FolderSortMode.AI_SCORE_DESC ||
+            mode == FolderSortMode.AI_SCORE_ASC
         imagesJob = flow.onEach { allImages ->
-            _images.value = if (sortByUserRating || sortByAiScore || sortByName)
+            _images.value = if (needsFolderFilter)
                 allImages.filter { it.folderName == folderName }
             else
                 allImages
@@ -126,8 +136,11 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
         foldersJob?.cancel()
         val flow = when (mode) {
             FolderListSortMode.LAST_MODIFIED_DESC -> repository.getAllFoldersWithInfo()
+            FolderListSortMode.LAST_MODIFIED_ASC -> repository.getAllFoldersWithInfoByOldest()
             FolderListSortMode.COUNT_DESC -> repository.getAllFoldersWithInfoByCount()
+            FolderListSortMode.COUNT_ASC -> repository.getAllFoldersWithInfoByCountAsc()
             FolderListSortMode.NAME_ASC -> repository.getAllFoldersWithInfoByName()
+            FolderListSortMode.NAME_DESC -> repository.getAllFoldersWithInfoByNameDesc()
         }
         foldersJob = flow.onEach { folderList ->
             _folderInfos.value = folderList
@@ -250,15 +263,22 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
 
 enum class FolderSortMode {
     MODIFIED_DATE_DESC,
+    MODIFIED_DATE_ASC,
     NAME_ASC,
+    NAME_DESC,
     USER_RATING_DESC,
-    AI_SCORE_DESC
+    USER_RATING_ASC,
+    AI_SCORE_DESC,
+    AI_SCORE_ASC
 }
 
 enum class FolderListSortMode {
     LAST_MODIFIED_DESC,
+    LAST_MODIFIED_ASC,
     COUNT_DESC,
-    NAME_ASC
+    COUNT_ASC,
+    NAME_ASC,
+    NAME_DESC
 }
 
 enum class GroupByMode {

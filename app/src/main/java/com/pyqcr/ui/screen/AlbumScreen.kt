@@ -672,9 +672,7 @@ fun AlbumScreen(
         if (selectedFolder != null) {
             viewModel.loadImagesByFolderSorted(
                 folderName = selectedFolder!!,
-                sortByUserRating = folderSortMode == FolderSortMode.USER_RATING_DESC,
-                sortByAiScore = folderSortMode == FolderSortMode.AI_SCORE_DESC,
-                sortByName = folderSortMode == FolderSortMode.NAME_ASC
+                mode = folderSortMode
             )
         }
         viewModel.persistFolderSortMode(folderSortMode)
@@ -835,6 +833,20 @@ fun AlbumScreen(
                                     DropdownMenuItem(
                                         text = {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("↑Modified date", modifier = Modifier.weight(1f))
+                                                if (viewModel.folderSortMode == FolderListSortMode.LAST_MODIFIED_ASC) {
+                                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            viewModel.updateFolderSortMode(FolderListSortMode.LAST_MODIFIED_ASC)
+                                            showFolderSortMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Text("↓Count", modifier = Modifier.weight(1f))
                                                 if (viewModel.folderSortMode == FolderListSortMode.COUNT_DESC) {
                                                     Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -849,6 +861,20 @@ fun AlbumScreen(
                                     DropdownMenuItem(
                                         text = {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("↑Count", modifier = Modifier.weight(1f))
+                                                if (viewModel.folderSortMode == FolderListSortMode.COUNT_ASC) {
+                                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            viewModel.updateFolderSortMode(FolderListSortMode.COUNT_ASC)
+                                            showFolderSortMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Text("↑Name", modifier = Modifier.weight(1f))
                                                 if (viewModel.folderSortMode == FolderListSortMode.NAME_ASC) {
                                                     Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -857,6 +883,20 @@ fun AlbumScreen(
                                         },
                                         onClick = {
                                             viewModel.updateFolderSortMode(FolderListSortMode.NAME_ASC)
+                                            showFolderSortMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("↓Name", modifier = Modifier.weight(1f))
+                                                if (viewModel.folderSortMode == FolderListSortMode.NAME_DESC) {
+                                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            viewModel.updateFolderSortMode(FolderListSortMode.NAME_DESC)
                                             showFolderSortMenu = false
                                         }
                                     )
@@ -931,7 +971,7 @@ fun AlbumScreen(
                                     }
                                 ) {
                                     if (!showGroupSubmenu) {
-                                        // Sort options
+                                        // Sort options — each criterion offers both directions
                                         DropdownMenuItem(
                                             text = {
                                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -943,6 +983,20 @@ fun AlbumScreen(
                                             },
                                             onClick = {
                                                 folderSortMode = FolderSortMode.MODIFIED_DATE_DESC
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("↑Modified date", modifier = Modifier.weight(1f))
+                                                    if (folderSortMode == FolderSortMode.MODIFIED_DATE_ASC) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                folderSortMode = FolderSortMode.MODIFIED_DATE_ASC
                                                 showSortMenu = false
                                             }
                                         )
@@ -963,6 +1017,20 @@ fun AlbumScreen(
                                         DropdownMenuItem(
                                             text = {
                                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("↓Name", modifier = Modifier.weight(1f))
+                                                    if (folderSortMode == FolderSortMode.NAME_DESC) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                folderSortMode = FolderSortMode.NAME_DESC
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
                                                     Text("Rating ↓", modifier = Modifier.weight(1f))
                                                     if (folderSortMode == FolderSortMode.USER_RATING_DESC) {
                                                         Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -977,6 +1045,20 @@ fun AlbumScreen(
                                         DropdownMenuItem(
                                             text = {
                                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("Rating ↑", modifier = Modifier.weight(1f))
+                                                    if (folderSortMode == FolderSortMode.USER_RATING_ASC) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                folderSortMode = FolderSortMode.USER_RATING_ASC
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
                                                     Text("AI Score ↓", modifier = Modifier.weight(1f))
                                                     if (folderSortMode == FolderSortMode.AI_SCORE_DESC) {
                                                         Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -985,6 +1067,20 @@ fun AlbumScreen(
                                             },
                                             onClick = {
                                                 folderSortMode = FolderSortMode.AI_SCORE_DESC
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("AI Score ↑", modifier = Modifier.weight(1f))
+                                                    if (folderSortMode == FolderSortMode.AI_SCORE_ASC) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                folderSortMode = FolderSortMode.AI_SCORE_ASC
                                                 showSortMenu = false
                                             }
                                         )
