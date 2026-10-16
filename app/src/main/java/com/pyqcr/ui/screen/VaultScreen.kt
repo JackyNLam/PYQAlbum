@@ -34,6 +34,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import coil3.request.crossfade
 import com.google.gson.Gson
 import com.pyqcr.PyqCrApp
 import com.pyqcr.data.model.ImageItem

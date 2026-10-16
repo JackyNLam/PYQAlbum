@@ -64,8 +64,9 @@ object AiEditSelectionStore {
      * image-detail screen's "AI Edit" button.
      */
     fun addSource(context: Context, uri: String) {
-        val sources = loadSourceUris(context) + uri
-            - loadTargetUris(context) - loadThirdUris(context)
+        val sources = (loadSourceUris(context) + uri)
+            .minus(loadTargetUris(context))
+            .minus(loadThirdUris(context))
         saveSourceUris(context, sources)
         saveTargetUris(context, loadTargetUris(context) - uri)
         saveThirdUris(context, loadThirdUris(context) - uri)

@@ -1944,8 +1944,8 @@ fun AlbumScreen(
                     text = { Text("Add ${selectedImageUris.size} image(s) as…") },
                     confirmButton = {
                         TextButton(onClick = {
-                            val sources = com.pyqcr.ai.AiEditSelectionStore.loadSourceUris(context) + selectedImageUris
-                                - com.pyqcr.ai.AiEditSelectionStore.loadTargetUris(context)
+                            val sources = (com.pyqcr.ai.AiEditSelectionStore.loadSourceUris(context) + selectedImageUris)
+                                .minus(com.pyqcr.ai.AiEditSelectionStore.loadTargetUris(context))
                             com.pyqcr.ai.AiEditSelectionStore.saveSourceUris(context, sources)
                             val targets = com.pyqcr.ai.AiEditSelectionStore.loadTargetUris(context) - selectedImageUris
                             com.pyqcr.ai.AiEditSelectionStore.saveTargetUris(context, targets)
@@ -1955,8 +1955,8 @@ fun AlbumScreen(
                     },
                     dismissButton = {
                         TextButton(onClick = {
-                            val targets = com.pyqcr.ai.AiEditSelectionStore.loadTargetUris(context) + selectedImageUris
-                                - com.pyqcr.ai.AiEditSelectionStore.loadSourceUris(context)
+                            val targets = (com.pyqcr.ai.AiEditSelectionStore.loadTargetUris(context) + selectedImageUris)
+                                .minus(com.pyqcr.ai.AiEditSelectionStore.loadSourceUris(context))
                             com.pyqcr.ai.AiEditSelectionStore.saveTargetUris(context, targets)
                             val sources = com.pyqcr.ai.AiEditSelectionStore.loadSourceUris(context) - selectedImageUris
                             com.pyqcr.ai.AiEditSelectionStore.saveSourceUris(context, sources)
