@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
@@ -242,23 +243,34 @@ fun AiEditScreen(
                         Spacer(Modifier.height(12.dp))
 
                         // Saved prompt selector — dropdown above the prompt box.
-                        // Selecting a saved prompt loads it into the box.
-                        OutlinedTextField(
-                            value = if (selectedSavedPromptIdx in savedPrompts.indices)
-                                savedPrompts[selectedSavedPromptIdx].replace("\n", " ")
-                            else "",
-                            onValueChange = {},
-                            readOnly = true,
-                            singleLine = true,
-                            label = { Text("Saved Prompt") },
-                            placeholder = { Text("Select a saved prompt (${savedPrompts.size}/10)") },
-                            trailingIcon = {
-                                Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { promptMenuExpanded = true }
-                        )
+                        // Selecting a saved prompt loads it into the box so the
+                        // user can overwrite that slot with "Save Prompt".
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = if (selectedSavedPromptIdx in savedPrompts.indices)
+                                    "Prompt ${selectedSavedPromptIdx + 1} · " +
+                                        savedPrompts[selectedSavedPromptIdx].replace("\n", " ")
+                                else "",
+                                onValueChange = {},
+                                readOnly = true,
+                                singleLine = true,
+                                label = { Text("Saved Prompt") },
+                                placeholder = { Text("Select Prompt 1-10 (${savedPrompts.size}/10 saved)") },
+                                trailingIcon = {
+                                    Icon(Icons.Default.ArrowDropDown, contentDescription = "Open saved prompts")
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            // ReadOnly text fields consume taps for cursor
+                            // placement, so the field itself cannot reliably
+                            // open the menu — intercept the tap with a
+                            // full-size overlay instead.
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .clickable { promptMenuExpanded = true }
+                            )
+                        }
                         DropdownMenu(
                             expanded = promptMenuExpanded,
                             onDismissRequest = { promptMenuExpanded = false }
@@ -272,12 +284,22 @@ fun AiEditScreen(
                             savedPrompts.forEachIndexed { index, prompt ->
                                 DropdownMenuItem(
                                     text = {
-                                        Text(
-                                            text = prompt.replace("\n", " "),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                        Column {
+                                            Text(
+                                                text = "Prompt ${index + 1}",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            Text(
+                                                text = prompt.replace("\n", " "),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                     },
+                                    leadingIcon = if (selectedSavedPromptIdx == index) {
+                                        { Icon(Icons.Default.Check, contentDescription = "Selected") }
+                                    } else null,
                                     onClick = {
                                         customPrompt = prompt
                                         selectedSavedPromptIdx = index
@@ -326,20 +348,20 @@ fun AiEditScreen(
                                         return@TextButton
                                     }
                                     if (selectedSavedPromptIdx in savedPrompts.indices) {
-                                        // Editing an existing saved prompt
+                                        // Overwrite the selected slot
                                         savedPrompts = savedPrompts.toMutableList().also { it[selectedSavedPromptIdx] = text }
                                         saveAiEditSavedPrompts(context, savedPrompts)
-                                        Toast.makeText(context, "Prompt updated", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Prompt ${selectedSavedPromptIdx + 1} overwritten", Toast.LENGTH_SHORT).show()
                                     } else if (savedPrompts.contains(text)) {
                                         selectedSavedPromptIdx = savedPrompts.indexOf(text)
-                                        Toast.makeText(context, "Prompt already saved", Toast.LENGTH_SHORT).show()
-                                    } else if (savedPrompts.size >= 10) {
-                                        Toast.makeText(context, "Up to 10 prompts can be saved", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Already saved as Prompt ${selectedSavedPromptIdx + 1}", Toast.LENGTH_SHORT).show()
+                                    } else if (savedPrompts.size >= MAX_SAVED_PROMPTS) {
+                                        Toast.makeText(context, "All 10 slots full — select a slot to overwrite", Toast.LENGTH_SHORT).show()
                                     } else {
                                         savedPrompts = savedPrompts + text
                                         selectedSavedPromptIdx = savedPrompts.lastIndex
                                         saveAiEditSavedPrompts(context, savedPrompts)
-                                        Toast.makeText(context, "Prompt saved (${savedPrompts.size}/10)", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Saved as Prompt ${selectedSavedPromptIdx + 1}", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             ) {
