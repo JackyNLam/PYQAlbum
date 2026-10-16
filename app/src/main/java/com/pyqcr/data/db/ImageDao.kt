@@ -71,6 +71,13 @@ interface ImageDao {
     @Query("SELECT uri, aiReason FROM images")
     suspend fun getAllUriAiReasons(): List<UriAiReason>
 
+    @Query("SELECT * FROM images")
+    suspend fun getAllImagesOnce(): List<ImageEntity>
+
+    /** Drop rows whose URI is no longer in [uris]. Callers must pass a non-empty list (SQLite rejects `NOT IN ()`). */
+    @Query("DELETE FROM images WHERE uri NOT IN (:uris)")
+    suspend fun deleteImagesNotIn(uris: List<String>)
+
     @Query("DELETE FROM images WHERE uri = :uri")
     suspend fun deleteImageByUri(uri: String)
 

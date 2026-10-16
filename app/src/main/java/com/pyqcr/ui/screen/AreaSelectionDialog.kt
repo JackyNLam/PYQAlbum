@@ -215,7 +215,7 @@ fun AreaSelectionDialog(
                 ) {
                     AsyncImage(
                         model = imageUri,
-                        contentDescription = "Source image for area selection",
+                        contentDescription = "First image for area selection",
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Fit
                     )

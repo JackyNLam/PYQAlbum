@@ -639,6 +639,9 @@ fun AlbumScreen(
 
     // Load all tags (needed for tag assignment dialog in any browse mode)
     LaunchedEffect(Unit) {
+        // Prune tags that no longer have images before showing the list —
+        // moves/deletes outside the app orphan tags that should not persist.
+        viewModel.deleteOrphanedTags()
         tagDao.getAllTags().collect { tagList ->
             allTags = tagList
         }

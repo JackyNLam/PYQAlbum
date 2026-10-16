@@ -21,8 +21,10 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
@@ -39,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pyqcr.PyqCrApp
 import com.pyqcr.data.model.ImageItem
@@ -59,19 +62,20 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * AI Edit screen: use Wan2.7 AI to edit/swap images with reference to a target image.
+ * AI Edit screen: use Wan2.7 AI to edit/swap images with reference to a
+ * second image.
  *
  * Layout mirrors AI Rating screen:
- *   - API Configuration card (API Key, Model Name, Save Config)
- *   - Custom prompt input
- *   - Source images grid (multi-select from device gallery, per-image
+ *   - API Configuration card (API Key, Model Name, saved-prompt dropdown,
+ *     prompt input, Save Config)
+ *   - First image grid (multi-select from device gallery, per-image
  *     rectangle or brush selection)
- *   - Target image (single-select from device gallery)
+ *   - Second image (single-select from device gallery)
  *   - Run AI Edit in Background button (WorkManager) with progress and a
  *     Stop button while it runs
  *   - Results display (polled from the worker's results file)
  *
- * Source/target images marked in the album's batch select menu are imported
+ * First/second images marked in the album's batch select menu are imported
  * once when the screen opens.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -88,8 +92,11 @@ fun AiEditScreen(
     var modelName by remember { mutableStateOf(loadAiEditModelName(context)) }
     var showApiKey by remember { mutableStateOf(false) }
 
-    // Custom prompt
+    // Custom prompt + saved prompt library (max 10)
     var customPrompt by remember { mutableStateOf(loadAiEditPrompt(context)) }
+    var savedPrompts by remember { mutableStateOf(loadAiEditSavedPrompts(context)) }
+    var selectedSavedPromptIdx by remember { mutableIntStateOf(-1) }
+    var promptMenuExpanded by remember { mutableStateOf(false) }
 
     // Image data
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
@@ -234,6 +241,126 @@ fun AiEditScreen(
 
                         Spacer(Modifier.height(12.dp))
 
+                        // Saved prompt selector — dropdown above the prompt box.
+                        // Selecting a saved prompt loads it into the box.
+                        OutlinedTextField(
+                            value = if (selectedSavedPromptIdx in savedPrompts.indices)
+                                savedPrompts[selectedSavedPromptIdx].replace("\n", " ")
+                            else "",
+                            onValueChange = {},
+                            readOnly = true,
+                            singleLine = true,
+                            label = { Text("Saved Prompt") },
+                            placeholder = { Text("Select a saved prompt (${savedPrompts.size}/10)") },
+                            trailingIcon = {
+                                Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { promptMenuExpanded = true }
+                        )
+                        DropdownMenu(
+                            expanded = promptMenuExpanded,
+                            onDismissRequest = { promptMenuExpanded = false }
+                        ) {
+                            if (savedPrompts.isEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text("No saved prompts yet") },
+                                    onClick = { promptMenuExpanded = false }
+                                )
+                            }
+                            savedPrompts.forEachIndexed { index, prompt ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = prompt.replace("\n", " "),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    },
+                                    onClick = {
+                                        customPrompt = prompt
+                                        selectedSavedPromptIdx = index
+                                        promptMenuExpanded = false
+                                    },
+                                    trailingIcon = {
+                                        IconButton(onClick = {
+                                            savedPrompts = savedPrompts.filterIndexed { i, _ -> i != index }
+                                            saveAiEditSavedPrompts(context, savedPrompts)
+                                            if (selectedSavedPromptIdx == index) selectedSavedPromptIdx = -1
+                                            else if (selectedSavedPromptIdx > index) selectedSavedPromptIdx--
+                                        }) {
+                                            Icon(
+                                                Icons.Default.Delete,
+                                                contentDescription = "Delete saved prompt",
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        // Prompt box — moved above the Save Config button
+                        OutlinedTextField(
+                            value = customPrompt,
+                            onValueChange = { customPrompt = it },
+                            label = { Text("Describe the edit") },
+                            placeholder = {
+                                Text("e.g. Apply the style from the second image to the first image")
+                            },
+                            minLines = 3,
+                            maxLines = 6,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        // Save/update the current prompt in the saved list (max 10)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = {
+                                    val text = customPrompt.trim()
+                                    if (text.isEmpty()) {
+                                        Toast.makeText(context, "Prompt cannot be empty", Toast.LENGTH_SHORT).show()
+                                        return@TextButton
+                                    }
+                                    if (selectedSavedPromptIdx in savedPrompts.indices) {
+                                        // Editing an existing saved prompt
+                                        savedPrompts = savedPrompts.toMutableList().also { it[selectedSavedPromptIdx] = text }
+                                        saveAiEditSavedPrompts(context, savedPrompts)
+                                        Toast.makeText(context, "Prompt updated", Toast.LENGTH_SHORT).show()
+                                    } else if (savedPrompts.contains(text)) {
+                                        selectedSavedPromptIdx = savedPrompts.indexOf(text)
+                                        Toast.makeText(context, "Prompt already saved", Toast.LENGTH_SHORT).show()
+                                    } else if (savedPrompts.size >= 10) {
+                                        Toast.makeText(context, "Up to 10 prompts can be saved", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        savedPrompts = savedPrompts + text
+                                        selectedSavedPromptIdx = savedPrompts.lastIndex
+                                        saveAiEditSavedPrompts(context, savedPrompts)
+                                        Toast.makeText(context, "Prompt saved (${savedPrompts.size}/10)", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    Icons.Default.Save,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("Save Prompt")
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "${savedPrompts.size}/10 saved",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Spacer(Modifier.height(12.dp))
+
                         // Save Config button (saves API key, model name, AND prompt)
                         var configSaved by remember { mutableStateOf(false) }
                         Button(
@@ -271,34 +398,7 @@ fun AiEditScreen(
                 }
             }
 
-            // ======== Custom Prompt section ========
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "Edit Prompt",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        Spacer(Modifier.height(8.dp))
-
-                        OutlinedTextField(
-                            value = customPrompt,
-                            onValueChange = { customPrompt = it },
-                            label = { Text("Describe the edit") },
-                            placeholder = {
-                                Text("e.g. Apply the style from the reference image to the source image")
-                            },
-                            minLines = 3,
-                            maxLines = 6,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                }
-            }
-
-            // ======== Source images section ========
+            // ======== First image section ========
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
@@ -308,7 +408,7 @@ fun AiEditScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Source Images (tap to set area)",
+                                text = "First Image (tap to set area)",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
@@ -334,7 +434,7 @@ fun AiEditScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(Modifier.width(6.dp))
-                                Text("Select Source Images")
+                                Text("Select First Image")
                             }
                         }
 
@@ -391,7 +491,7 @@ fun AiEditScreen(
 
                             Spacer(Modifier.height(4.dp))
                             TextButton(onClick = { showSourcePicker = false }) {
-                                Text("Done selecting sources")
+                                Text("Done selecting first images")
                             }
                         }
 
@@ -496,12 +596,12 @@ fun AiEditScreen(
                 }
             }
 
-            // ======== Target image section ========
+            // ======== Second image section ========
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "Target Image (Reference)",
+                            text = "Second Image (Reference)",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -522,7 +622,7 @@ fun AiEditScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(Modifier.width(6.dp))
-                                Text("Select Target Image")
+                                Text("Select Second Image")
                             }
                         }
 
@@ -601,7 +701,7 @@ fun AiEditScreen(
                                     ) {
                                         Icon(
                                             Icons.Default.Close,
-                                            contentDescription = "Remove target",
+                                            contentDescription = "Remove second image",
                                             tint = Color.White,
                                             modifier = Modifier.size(16.dp)
                                         )
@@ -622,7 +722,7 @@ fun AiEditScreen(
                             return@Button
                         }
                         if (selectedSourceAreas.isEmpty()) {
-                            Toast.makeText(context, "Please select at least one source image", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Please select at least one first image", Toast.LENGTH_SHORT).show()
                             return@Button
                         }
                         if (customPrompt.isBlank()) {
@@ -949,6 +1049,25 @@ private fun loadAiEditPrompt(context: Context): String {
 private fun saveAiEditPrompt(context: Context, prompt: String) {
     val prefs = context.getSharedPreferences("pyqcr_ai_edit_config", Context.MODE_PRIVATE)
     prefs.edit().putString(KEY_SAVED_PROMPT, prompt).apply()
+}
+
+private const val KEY_SAVED_PROMPTS = "ai_edit_saved_prompts"
+private const val MAX_SAVED_PROMPTS = 10
+
+/** Load the saved prompt library (max 10), oldest first. */
+private fun loadAiEditSavedPrompts(context: Context): List<String> {
+    val prefs = context.getSharedPreferences("pyqcr_ai_edit_config", Context.MODE_PRIVATE)
+    val raw = prefs.getString(KEY_SAVED_PROMPTS, null) ?: return emptyList()
+    return try {
+        com.google.gson.Gson().fromJson(raw, Array<String>::class.java)?.toList() ?: emptyList()
+    } catch (e: Exception) { emptyList() }
+}
+
+/** Persist the saved prompt library, capped at [MAX_SAVED_PROMPTS]. */
+private fun saveAiEditSavedPrompts(context: Context, prompts: List<String>) {
+    val limited = prompts.take(MAX_SAVED_PROMPTS)
+    val prefs = context.getSharedPreferences("pyqcr_ai_edit_config", Context.MODE_PRIVATE)
+    prefs.edit().putString(KEY_SAVED_PROMPTS, com.google.gson.Gson().toJson(limited)).apply()
 }
 
 /**

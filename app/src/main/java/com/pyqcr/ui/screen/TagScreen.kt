@@ -40,6 +40,9 @@ fun TagScreen(
     var tagImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
 
     LaunchedEffect(Unit) {
+        // Prune tags that no longer have images before showing the list —
+        // moves/deletes outside the app orphan tags that should not persist.
+        tagDao.deleteOrphanedTagsGuarded()
         tagDao.getAllTags().collect { tagList ->
             tags = tagList
         }

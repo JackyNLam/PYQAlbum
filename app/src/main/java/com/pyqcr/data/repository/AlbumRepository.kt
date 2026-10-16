@@ -109,29 +109,64 @@ class AlbumRepository(
     }
 
     suspend fun refreshImagesFromMediaStore() = withContext(ioDispatcher) {
-        // Preserve existing ratings and AI scores so they aren't wiped by re-insert
-        val existingRatings = imageDao.getAllUriRatings().associate { it.uri to it.rating }
-        val existingAiScores = imageDao.getAllUriAiScores().associate { it.uri to it.aiScore }
-        val existingAiReasons = imageDao.getAllUriAiReasons().associate { it.uri to it.aiReason }
+        try {
+            val images = loadImagesFromMediaStore()
+            val liveUris = images.map { it.uri }
 
-        val images = loadImagesFromMediaStore().map { entity ->
-            entity.copy(
-                rating = existingRatings[entity.uri] ?: entity.rating,
-                aiScore = existingAiScores[entity.uri] ?: entity.aiScore,
-                aiReason = existingAiReasons[entity.uri] ?: entity.aiReason
-            )
-        }
-        imageDao.deleteAll()
-        imageDao.insertImages(images)
+            // MediaStore unavailable (no permission / storage error): keep the
+            // previously cached library untouched — never wipe it on a hiccup.
+            if (liveUris.isEmpty()) return@withContext
 
-        // Keep tag cross-refs consistent with the library: drop any row whose URI
-        // no longer exists in MediaStore (image moved/deleted outside the app).
-        // Left in place, such a row can silently match an unrelated image when
-        // MediaStore recycles the numeric ID. Skipped when the library is empty
-        // (e.g. MediaStore briefly unavailable) so tags are never wiped wholesale.
-        val liveUris = images.map { it.uri }
-        if (liveUris.isNotEmpty()) {
-            tagDao.deleteCrossRefsNotIn(liveUris)
+            // Diff against the cached rows instead of deleteAll+reinsert: insert
+            // new rows, update only rows whose metadata changed, and delete rows
+            // whose file disappeared. Unchanged rows are never rewritten, so
+            // opening the album screen no longer blanks the folder grid for
+            // seconds while the whole table is wiped and rebuilt.
+            val existingByUri = imageDao.getAllImagesOnce().associateBy { it.uri }
+            val toInsert = mutableListOf<ImageEntity>()
+            val toUpdate = mutableListOf<ImageEntity>()
+            for (entity in images) {
+                val old = existingByUri[entity.uri]
+                if (old == null) {
+                    toInsert.add(entity)
+                } else if (old.displayName != entity.displayName ||
+                    old.folderName != entity.folderName ||
+                    old.width != entity.width || old.height != entity.height ||
+                    old.sizeBytes != entity.sizeBytes || old.dateAdded != entity.dateAdded
+                ) {
+                    // Metadata changed — preserve the user's rating / AI info.
+                    toUpdate.add(entity.copy(
+                        rating = old.rating,
+                        aiScore = old.aiScore,
+                        aiReason = old.aiReason
+                    ))
+                }
+            }
+            if (toInsert.isNotEmpty()) imageDao.insertImages(toInsert)
+            if (toUpdate.isNotEmpty()) imageDao.insertImages(toUpdate) // REPLACE upsert
+
+            if (liveUris.isNotEmpty()) {
+                imageDao.deleteImagesNotIn(liveUris)
+            }
+
+            // Keep tag cross-refs consistent with the library: drop any row whose URI
+            // no longer exists in MediaStore (image moved/deleted outside the app).
+            // Left in place, such a row can silently match an unrelated image when
+            // MediaStore recycles the numeric ID. Skipped when the library is empty
+            // (e.g. MediaStore briefly unavailable) so tags are never wiped wholesale.
+            if (liveUris.isNotEmpty()) {
+                tagDao.deleteCrossRefsNotIn(liveUris)
+            }
+            // Tags whose images are gone (moved/deleted outside the app) are now
+            // orphaned — drop them so the tag list does not show tags with no images.
+            // Guarded: only runs while the images table is non-empty, so a brief
+            // MediaStore hiccup can never wipe the whole tag list.
+            tagDao.deleteOrphanedTagsGuarded()
+        } catch (e: Exception) {
+            // A failed MediaStore scan must never crash the refresh (which would
+            // leave the album screen blank until the app is reopened) — keep the
+            // previously cached library as-is.
+            android.util.Log.e("AlbumRepository", "refreshImagesFromMediaStore failed", e)
         }
     }
 

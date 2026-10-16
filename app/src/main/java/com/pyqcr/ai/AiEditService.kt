@@ -127,11 +127,11 @@ data class CroppedImageData(
 /**
  * AI Edit Service that calls the Qwen Image Edit API via DashScope.
  *
- * This service sends cropped area(s) of source image(s) + an optional reference
- * target image + a custom prompt to the qwen-image-2.0 / qwen-image-edit family
- * multimodal model, then composites the AI-edited area back onto the original
- * source at the same position and saves the result to a gallery-visible
- * location.
+ * This service sends cropped area(s) of first image(s) + an optional second
+ * reference image + a custom prompt to the qwen-image-2.0 / qwen-image-edit
+ * family multimodal model, then composites the AI-edited area back onto the
+ * original first image at the same position and saves the result to a
+ * gallery-visible location.
  */
 class AiEditService {
 
@@ -189,7 +189,7 @@ class AiEditService {
             val inputImageData = prepareSourceData(sourcePath, selection)
 
             if (inputImageData == null) {
-                onDebug("❌ Failed to process source image: $sourcePath")
+                onDebug("❌ Failed to process first image: $sourcePath")
                 completed++
                 onProgress(completed, total)
                 continue
@@ -201,18 +201,18 @@ class AiEditService {
                 encodeImageToBase64(targetImagePath)
             } else null
 
-            // Build content array: target reference image first, source image to edit
-            // second, then the prompt. Swapped on user request: with the source first,
-            // the model based its output on the target image instead of the source.
+            // Build content array: first image (the one being edited) first, then
+            // the second image (reference, optional), then the prompt — ordered on
+            // user request (2026-10-16): first image first, second image second.
             val content = mutableListOf<Map<String, Any>>()
+            content.add(mapOf(
+                "image" to "data:${inputImageData.mimeType};base64,${inputImageData.base64}"
+            ))
             if (targetBase64 != null) {
                 content.add(mapOf(
                     "image" to "data:image/jpeg;base64,$targetBase64"
                 ))
             }
-            content.add(mapOf(
-                "image" to "data:${inputImageData.mimeType};base64,${inputImageData.base64}"
-            ))
             content.add(mapOf("text" to prompt))
 
             val requestBody = mapOf(
@@ -1104,9 +1104,13 @@ class AiEditService {
                 continue
             }
 
-            // Same image ordering as editImages(): target reference image first,
-            // source image to edit second, then the prompt.
+            // Same ordering as editImages(): first image first, then the
+            // optional second image (reference), then the prompt.
             val content = mutableListOf<Map<String, Any>>()
+            content.add(mapOf(
+                "type" to "image_url",
+                "image_url" to mapOf("url" to "data:${inputImageData.mimeType};base64,${inputImageData.base64}")
+            ))
             if (targetImagePath != null) {
                 val tb64 = encodeImageToBase64(targetImagePath)
                 if (tb64 != null) {
@@ -1116,10 +1120,6 @@ class AiEditService {
                     ))
                 }
             }
-            content.add(mapOf(
-                "type" to "image_url",
-                "image_url" to mapOf("url" to "data:${inputImageData.mimeType};base64,${inputImageData.base64}")
-            ))
             content.add(mapOf("type" to "text", "text" to prompt))
 
             val messages = listOf(

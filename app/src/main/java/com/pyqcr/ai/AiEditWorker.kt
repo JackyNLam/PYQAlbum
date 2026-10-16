@@ -19,7 +19,7 @@ import java.io.File
  *  - "apiKey" : the DashScope API key
  *  - "modelName" : model name (e.g. qwen-image-2.0)
  *  - "prompt" : the edit prompt
- *  - "targetUri" : optional reference target image URI (empty when none)
+ *  - "targetUri" : optional second (reference) image URI (empty when none)
  *  - "selectionsFile" : absolute path of a cache JSON file with the list of
  *    [AiEditJobItem]s (URI + crop/mask selection) — written by
  *    [AiEditWorkManager] and read (then deleted) here. Kept out of the
@@ -137,7 +137,7 @@ class AiEditWorker(
 
         log("=== Background AI Edit Started ===")
         log("Model: $modelName, Images: ${items.size}")
-        if (targetUri != null) log("Target: $targetUri")
+        if (targetUri != null) log("Second image: $targetUri")
 
         // Ensure the notification channel exists even if the app process was
         // killed and restarted for the worker (createChannel is idempotent).

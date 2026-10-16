@@ -80,4 +80,16 @@ interface TagDao {
 
     @Query("SELECT COUNT(*) FROM image_tag_cross_ref WHERE imageUri = :imageUri AND tagId = :tagId")
     suspend fun hasTag(imageUri: String, tagId: Long): Int
+
+    /**
+     * Drop tags that no longer have any associated image. Guarded: only runs
+     * while the images table is non-empty, so a temporarily unreadable
+     * MediaStore (which yields an empty library scan) never wipes the tag list.
+     */
+    @Query("""
+        DELETE FROM tags
+        WHERE EXISTS (SELECT 1 FROM images)
+          AND id NOT IN (SELECT DISTINCT tagId FROM image_tag_cross_ref)
+    """)
+    suspend fun deleteOrphanedTagsGuarded()
 }

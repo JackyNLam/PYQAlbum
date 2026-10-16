@@ -68,8 +68,11 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshImages() {
         viewModelScope.launch {
             _isLoading.value = true
-            repository.refreshImagesFromMediaStore()
-            _isLoading.value = false
+            try {
+                repository.refreshImagesFromMediaStore()
+            } finally {
+                _isLoading.value = false
+            }
         }
     }
 
@@ -210,14 +213,7 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteOrphanedTags() {
         viewModelScope.launch {
             val app = getApplication<PyqCrApp>()
-            val tagDao = app.database.tagDao()
-            val allTags = tagDao.getAllTagsOnce()
-            for (tag in allTags) {
-                val imageUris = tagDao.getImageUrisForTag(tag.id)
-                if (imageUris.isEmpty()) {
-                    tagDao.deleteTag(tag)
-                }
-            }
+            app.database.tagDao().deleteOrphanedTagsGuarded()
         }
     }
 
