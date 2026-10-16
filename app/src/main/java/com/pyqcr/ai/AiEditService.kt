@@ -161,6 +161,7 @@ class AiEditService {
         sourceImagePaths: List<String>,
         selections: Map<String, EditSelection> = emptyMap(),
         targetImagePath: String?,
+        thirdImagePath: String? = null,
         prompt: String,
         outputDir: File,
         context: Context,
@@ -200,10 +201,14 @@ class AiEditService {
             val targetBase64 = if (targetImagePath != null) {
                 encodeImageToBase64(targetImagePath)
             } else null
+            val thirdBase64 = if (thirdImagePath != null) {
+                encodeImageToBase64(thirdImagePath)
+            } else null
 
             // Build content array: first image (the one being edited) first, then
-            // the second image (reference, optional), then the prompt — ordered on
-            // user request (2026-10-16): first image first, second image second.
+            // the second image (reference, optional), then the third image
+            // (reference, optional), then the prompt — ordered on user request
+            // (2026-10-16): first image first, reference images after.
             val content = mutableListOf<Map<String, Any>>()
             content.add(mapOf(
                 "image" to "data:${inputImageData.mimeType};base64,${inputImageData.base64}"
@@ -211,6 +216,11 @@ class AiEditService {
             if (targetBase64 != null) {
                 content.add(mapOf(
                     "image" to "data:image/jpeg;base64,$targetBase64"
+                ))
+            }
+            if (thirdBase64 != null) {
+                content.add(mapOf(
+                    "image" to "data:image/jpeg;base64,$thirdBase64"
                 ))
             }
             content.add(mapOf("text" to prompt))
@@ -1080,6 +1090,7 @@ class AiEditService {
         sourceImagePaths: List<String>,
         selections: Map<String, EditSelection> = emptyMap(),
         targetImagePath: String?,
+        thirdImagePath: String? = null,
         prompt: String,
         outputDir: File,
         context: Context,
@@ -1105,7 +1116,8 @@ class AiEditService {
             }
 
             // Same ordering as editImages(): first image first, then the
-            // optional second image (reference), then the prompt.
+            // optional second image (reference), then the optional third
+            // image (reference), then the prompt.
             val content = mutableListOf<Map<String, Any>>()
             content.add(mapOf(
                 "type" to "image_url",
@@ -1117,6 +1129,15 @@ class AiEditService {
                     content.add(mapOf(
                         "type" to "image_url",
                         "image_url" to mapOf("url" to "data:image/jpeg;base64,$tb64")
+                    ))
+                }
+            }
+            if (thirdImagePath != null) {
+                val th64 = encodeImageToBase64(thirdImagePath)
+                if (th64 != null) {
+                    content.add(mapOf(
+                        "type" to "image_url",
+                        "image_url" to mapOf("url" to "data:image/jpeg;base64,$th64")
                     ))
                 }
             }

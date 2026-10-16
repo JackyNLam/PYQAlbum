@@ -4,11 +4,13 @@ import android.net.Uri
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.pyqcr.ai.AiEditSelectionStore
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.ui.screen.*
 
@@ -17,16 +19,20 @@ object Routes {
     const val TAG = "tag"
     const val RATING = "rating"
     const val IMAGE_DETAIL = "image_detail/{imageUri}"
-    const val AI_RATING = "ai_rating"
+    const val AI_RATING = "ai_rating?imageUri={imageUri}"
     const val AI_EDIT = "ai_edit"
     const val AI_SELECT = "ai_select"
     const val BATCH_EDIT = "batch_edit/{mode}"
+    const val VAULT = "vault"
 
     /**
      * URL-encode the imageUri so that Navigation Compose doesn't break
      * on URI path separators (e.g., "content://media/...").
      */
     fun imageDetail(imageUri: String) = "image_detail/${Uri.encode(imageUri)}"
+
+    /** AI Rating route with an optional pre-selected image ("" = no preselect). */
+    fun aiRating(imageUri: String) = "ai_rating?imageUri=${Uri.encode(imageUri)}"
 
     fun batchEdit(mode: String) = "batch_edit/$mode"
 }
@@ -71,6 +77,9 @@ fun AppNavGraph() {
                 },
                 onNavigateToAiEdit = {
                     navController.navigate(Routes.AI_EDIT)
+                },
+                onNavigateToVault = {
+                    navController.navigate(Routes.VAULT)
                 }
             )
         }
@@ -99,6 +108,7 @@ fun AppNavGraph() {
         ) { backStackEntry ->
             val imageUriRaw = backStackEntry.arguments?.getString("imageUri") ?: return@composable
             val imageUri = Uri.decode(imageUriRaw)
+            val context = LocalContext.current
             ImageDetailScreen(
                 imageUriRaw = imageUriRaw,
                 onBack = { navController.popBackStack() },
@@ -117,13 +127,34 @@ fun AppNavGraph() {
                             launchSingleTop = true
                         }
                     }
+                },
+                onOpenAiRating = {
+                    navController.navigate(Routes.aiRating(imageUri))
+                },
+                onOpenAiEdit = {
+                    // Mark this image as an AI Edit first-image source, then open
+                    // the AI Edit screen (it imports sources from these prefs).
+                    AiEditSelectionStore.addSource(context, imageUri)
+                    navController.navigate(Routes.AI_EDIT)
                 }
             )
         }
 
-        composable(Routes.AI_RATING) {
+        composable(
+            route = Routes.AI_RATING,
+            arguments = listOf(
+                navArgument("imageUri") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                }
+            )
+        ) { backStackEntry ->
+            val preSelected = backStackEntry.arguments?.getString("imageUri")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { Uri.decode(it) }
             AiRatingScreen(
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                initialSelectedUris = if (preSelected != null) setOf(preSelected) else emptySet()
             )
         }
 
@@ -135,6 +166,12 @@ fun AppNavGraph() {
 
         composable(Routes.AI_SELECT) {
             AiSelectScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.VAULT) {
+            VaultScreen(
                 onBack = { navController.popBackStack() }
             )
         }

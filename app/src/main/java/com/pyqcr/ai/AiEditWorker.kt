@@ -20,6 +20,7 @@ import java.io.File
  *  - "modelName" : model name (e.g. qwen-image-2.0)
  *  - "prompt" : the edit prompt
  *  - "targetUri" : optional second (reference) image URI (empty when none)
+ *  - "thirdUri" : optional third (reference) image URI (empty when none)
  *  - "selectionsFile" : absolute path of a cache JSON file with the list of
  *    [AiEditJobItem]s (URI + crop/mask selection) — written by
  *    [AiEditWorkManager] and read (then deleted) here. Kept out of the
@@ -76,6 +77,7 @@ class AiEditWorker(
         val modelName = inputData.getString("modelName") ?: "qwen-image-2.0"
         val prompt = inputData.getString("prompt") ?: return Result.failure()
         val targetUri = inputData.getString("targetUri")?.takeIf { it.isNotBlank() }
+        val thirdUri = inputData.getString("thirdUri")?.takeIf { it.isNotBlank() }
         val selectionsFile = inputData.getString("selectionsFile")
 
         // Read the job items from the cache JSON file; delete it after reading.
@@ -110,7 +112,7 @@ class AiEditWorker(
         )
         wakeLock.acquire(10 * 60 * 1000L) // 10-minute timeout
         try {
-            return runEditImpl(apiKey, modelName, prompt, targetUri, items)
+            return runEditImpl(apiKey, modelName, prompt, targetUri, thirdUri, items)
         } finally {
             if (wakeLock.isHeld) wakeLock.release()
         }
@@ -121,6 +123,7 @@ class AiEditWorker(
         modelName: String,
         prompt: String,
         targetUri: String?,
+        thirdUri: String?,
         items: List<AiEditJobItem>
     ): Result {
         // Fresh debug log + progress state for this session
@@ -138,6 +141,7 @@ class AiEditWorker(
         log("=== Background AI Edit Started ===")
         log("Model: $modelName, Images: ${items.size}")
         if (targetUri != null) log("Second image: $targetUri")
+        if (thirdUri != null) log("Third image: $thirdUri")
 
         // Ensure the notification channel exists even if the app process was
         // killed and restarted for the worker (createChannel is idempotent).
@@ -161,6 +165,7 @@ class AiEditWorker(
         if (sourcePaths.isEmpty()) return Result.success()
 
         val targetPath = targetUri?.let { ContentUriResolver.resolve(applicationContext, it) }
+        val thirdPath = thirdUri?.let { ContentUriResolver.resolve(applicationContext, it) }
 
         val baseDir = applicationContext.getExternalFilesDir(null) ?: applicationContext.filesDir
         val outputDir = File(baseDir, "ai_edit").apply { mkdirs() }
@@ -183,6 +188,7 @@ class AiEditWorker(
             sourceImagePaths = sourcePaths,
             selections = selections,
             targetImagePath = targetPath,
+            thirdImagePath = thirdPath,
             prompt = prompt,
             outputDir = outputDir,
             context = applicationContext,
@@ -206,6 +212,7 @@ class AiEditWorker(
                 sourceImagePaths = sourcePaths,
                 selections = selections,
                 targetImagePath = targetPath,
+                thirdImagePath = thirdPath,
                 prompt = prompt,
                 outputDir = outputDir,
                 context = applicationContext,

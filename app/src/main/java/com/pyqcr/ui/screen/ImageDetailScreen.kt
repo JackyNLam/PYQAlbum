@@ -1,7 +1,11 @@
 package com.pyqcr.ui.screen
 
+import android.media.MediaPlayer
 import android.net.Uri
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -16,21 +20,26 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -41,8 +50,12 @@ import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.RatingBar
 import com.pyqcr.ui.component.TagChip
+import com.pyqcr.util.MotionPhotoExtractor
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Full-screen image detail view.
@@ -60,7 +73,9 @@ fun ImageDetailScreen(
     imageUriRaw: String,
     onBack: () -> Unit,
     onNextImage: () -> Unit = {},
-    onPreviousImage: () -> Unit = {}
+    onPreviousImage: () -> Unit = {},
+    onOpenAiRating: () -> Unit = {},
+    onOpenAiEdit: () -> Unit = {}
 ) {
     // URL-decode the URI — Navigation Compose encodes it to avoid path-segment issues
     val imageUri = Uri.decode(imageUriRaw)
@@ -93,10 +108,62 @@ fun ImageDetailScreen(
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
 
+    // Size of the image viewport (px) — used to clamp the pan so the zoomed
+    // image can never be dragged entirely out of view.
+    var viewSize by remember { mutableStateOf(Size.Zero) }
+
+    // Motion-photo state: [motionVideoPath] is the cache file with the embedded
+    // MP4 (null = not a motion photo); [showMotionVideo] toggles the video surface.
+    var motionVideoPath by remember(imageUri) { mutableStateOf<String?>(null) }
+    var showMotionVideo by remember { mutableStateOf(false) }
+
+    /**
+     * Clamp a pan offset so the zoomed image stays within the viewport.
+     * [candidate] is the raw accumulated translation (screen px); the bounds
+     * are derived from ContentScale.Fit geometry: at scale [s] the displayed
+     * image is `intrinsic * fit * s`, so the maximum useful translation is
+     * half the overflow per axis. When the intrinsic size is unknown (not
+     * loaded yet) the viewport size is used as a conservative bound.
+     *
+     * NOTE: declared before the pointerInput blocks below — Kotlin local
+     * functions cannot be forward-referenced.
+     */
+    fun clampPanOffset(candidate: Offset, s: Float): Offset {
+        if (s <= 1f) return Offset.Zero
+        val viewW = viewSize.width
+        val viewH = viewSize.height
+        if (viewW <= 0f || viewH <= 0f) return candidate
+        val iw = imageItem?.width?.takeIf { it > 0 }?.toFloat()
+        val ih = imageItem?.height?.takeIf { it > 0 }?.toFloat()
+        val maxX: Float
+        val maxY: Float
+        if (iw != null && ih != null) {
+            val fit = minOf(viewW / iw, viewH / ih)
+            maxX = ((iw * fit * s - viewW) / 2f).coerceAtLeast(0f)
+            maxY = ((ih * fit * s - viewH) / 2f).coerceAtLeast(0f)
+        } else {
+            maxX = ((s - 1f) * viewW / 2f).coerceAtLeast(0f)
+            maxY = ((s - 1f) * viewH / 2f).coerceAtLeast(0f)
+        }
+        return Offset(
+            candidate.x.coerceIn(-maxX, maxX),
+            candidate.y.coerceIn(-maxY, maxY)
+        )
+    }
+
     // Full file path of the current image, resolved lazily for the detail panel
     var fullPath by remember(imageUri) { mutableStateOf<String?>(null) }
     LaunchedEffect(imageUri) {
         fullPath = com.pyqcr.ui.util.FileOperationHelper.resolveFilePath(context, imageUri)
+    }
+
+    // Detect and extract the embedded video of a motion photo (JPEG + appended
+    // MP4). GIFs and animated WebP play directly through Coil, so no extraction.
+    LaunchedEffect(imageUri) {
+        motionVideoPath = withContext(Dispatchers.IO) {
+            MotionPhotoExtractor.extractToCache(context, imageUri)?.absolutePath
+        }
+        showMotionVideo = false
     }
 
     LaunchedEffect(imageUri) {
@@ -171,6 +238,9 @@ fun ImageDetailScreen(
                 modifier = imageModifier
                     .background(Color.Black)
                     .clipToBounds()
+                    .onSizeChanged {
+                        viewSize = Size(it.width.toFloat(), it.height.toFloat())
+                    }
                     .graphicsLayer {
                         scaleX = scale
                         scaleY = scale
@@ -198,10 +268,21 @@ fun ImageDetailScreen(
                                         val panChange = event.calculatePan()
                                         val newScale = (scale * zoomChange).coerceIn(1f, 5f)
                                         scale = newScale
-                                        offset = if (newScale > 1f) offset + panChange else Offset.Zero
+                                        offset = if (newScale > 1f)
+                                            clampPanOffset(offset + panChange * newScale, newScale)
+                                        else
+                                            Offset.Zero
                                     } else if (pressedCount == 1) {
                                         val change = event.changes.first { it.pressed }
-                                        offset += change.positionChange()
+                                        // Pointer coordinates arrive in the layer's LOCAL space,
+                                        // already divided by the layer's scale (the graphicsLayer
+                                        // transform is applied to this node) — multiply by the
+                                        // current scale so the image tracks the finger 1:1 at any
+                                        // zoom level, then clamp so it never leaves the viewport.
+                                        offset = clampPanOffset(
+                                            offset + change.positionChange() * scale,
+                                            scale
+                                        )
                                     }
                                     event.changes.forEach { if (it.positionChanged()) it.consume() }
                                 } else {
@@ -254,6 +335,31 @@ fun ImageDetailScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit
                 )
+
+                // Motion photo: show a play button; tapping it plays the
+                // embedded video over the still frame.
+                if (!showMotionVideo && motionVideoPath != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 16.dp)
+                            .clipToBounds()
+                            .background(Color(0x99000000), MaterialTheme.shapes.small)
+                            .clickable { showMotionVideo = true }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text("▶ Motion photo", color = Color.White)
+                    }
+                }
+
+                if (showMotionVideo) {
+                    motionVideoPath?.let { path ->
+                        MotionPhotoPlayer(
+                            videoPath = path,
+                            onClose = { showMotionVideo = false }
+                        )
+                    }
+                }
             }
 
             // ===================== DETAIL PANEL (swipe-up) =====================
@@ -323,6 +429,11 @@ fun ImageDetailScreen(
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
+                    Text(
+                        text = "Size: ${formatFileSize(imageItem?.sizeBytes ?: 0L)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
                     Spacer(Modifier.height(16.dp))
 
@@ -493,8 +604,126 @@ fun ImageDetailScreen(
                             }
                         }
                     }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    // ====== AI actions (below the tag area) ======
+                    Text(
+                        text = "AI Actions",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onOpenAiRating,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("AI Rating")
+                        }
+                        Button(
+                            onClick = onOpenAiEdit,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("AI Edit")
+                        }
+                    }
                 }
             }
+        }
+    }
+}
+
+/** Format a byte count as "1.2 MB" / "856 KB" / "123 B". */
+private fun formatFileSize(bytes: Long): String {
+    if (bytes <= 0L) return "Unknown"
+    val kb = 1024.0
+    val mb = kb * 1024
+    return when {
+        bytes >= mb -> String.format("%.1f MB", bytes / mb)
+        bytes >= kb -> String.format("%.1f KB", bytes / kb)
+        else -> "$bytes B"
+    }
+}
+
+/**
+ * Plays the motion-photo video extracted by [MotionPhotoExtractor] using
+ * [MediaPlayer] on a [SurfaceView] (AndroidView interop). The player is
+ * released when the composable leaves composition.
+ */
+@Composable
+private fun MotionPhotoPlayer(
+    videoPath: String,
+    onClose: () -> Unit
+) {
+    var player by remember { mutableStateOf<MediaPlayer?>(null) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        AndroidView(
+            factory = { ctx ->
+                SurfaceView(ctx).apply {
+                    holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            try {
+                                val mp = MediaPlayer().apply {
+                                    setDataSource(videoPath)
+                                    setDisplay(holder)
+                                    isLooping = true
+                                    setVolume(0f, 0f) // motion clips are silent
+                                    prepare()
+                                    start()
+                                }
+                                player = mp
+                            } catch (e: Exception) {
+                                // Unsupported codec or corrupt clip — the still
+                                // frame behind stays visible
+                            }
+                        }
+
+                        override fun surfaceChanged(
+                            holder: SurfaceHolder,
+                            format: Int,
+                            width: Int,
+                            height: Int
+                        ) {
+                        }
+
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            try { player?.release() } catch (e: Exception) {}
+                            player = null
+                        }
+                    })
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+            onRelease = {
+                try { player?.release() } catch (e: Exception) {}
+                player = null
+            }
+        )
+
+        // Close button over the video
+        TextButton(
+            onClick = onClose,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 8.dp)
+        ) {
+            Text("✕ Close motion", color = Color.White)
         }
     }
 }

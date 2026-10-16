@@ -95,6 +95,7 @@ fun AlbumScreen(
     onImageClick: (String, imageList: List<String>) -> Unit,
     onNavigateToAiSelection: () -> Unit,
     onNavigateToAiEdit: () -> Unit = {},
+    onNavigateToVault: () -> Unit = {},
     viewModel: AlbumViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -782,6 +783,16 @@ fun AlbumScreen(
                         onNavigateToAiSelection()
                     }
                 )
+
+                DrawerItem(
+                    icon = Icons.Default.Lock,
+                    label = "Photo Vault",
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onNavigateToVault()
+                    }
+                )
             }
         }
     ) {
@@ -1166,6 +1177,34 @@ fun AlbumScreen(
                                                 showSortMenu = false
                                             }
                                         )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("Rating Score", modifier = Modifier.weight(1f))
+                                                    if (groupByMode == GroupByMode.RATING_SCORE) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                groupByMode = GroupByMode.RATING_SCORE
+                                                showSortMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("AI Score", modifier = Modifier.weight(1f))
+                                                    if (groupByMode == GroupByMode.AI_SCORE) {
+                                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                groupByMode = GroupByMode.AI_SCORE
+                                                showSortMenu = false
+                                            }
+                                        )
                                     }
                                 }
                             }
@@ -1393,6 +1432,11 @@ fun AlbumScreen(
                                                 isMultiSelectMode = true
                                                 selectedImageUris = setOf(uri)
                                             }
+                                        },
+                                        onGroupBarLongPress = { groupImages ->
+                                            // Long-press a group bar → batch-select all of its images
+                                            isMultiSelectMode = true
+                                            selectedImageUris = selectedImageUris + groupImages.map { it.uri }
                                         }
                                     )
                                 }
@@ -1900,20 +1944,22 @@ fun AlbumScreen(
                     text = { Text("Add ${selectedImageUris.size} image(s) as…") },
                     confirmButton = {
                         TextButton(onClick = {
-                            val sources = loadAiEditSourceUris(context) + selectedImageUris - loadAiEditTargetUris(context)
-                            saveAiEditSourceUris(context, sources)
-                            val targets = loadAiEditTargetUris(context) - selectedImageUris
-                            saveAiEditTargetUris(context, targets)
+                            val sources = com.pyqcr.ai.AiEditSelectionStore.loadSourceUris(context) + selectedImageUris
+                                - com.pyqcr.ai.AiEditSelectionStore.loadTargetUris(context)
+                            com.pyqcr.ai.AiEditSelectionStore.saveSourceUris(context, sources)
+                            val targets = com.pyqcr.ai.AiEditSelectionStore.loadTargetUris(context) - selectedImageUris
+                            com.pyqcr.ai.AiEditSelectionStore.saveTargetUris(context, targets)
                             showAiEditRoleDialog = false
                             scope.launch { snackbarHostState.showSnackbar("${selectedImageUris.size} added as AI Edit source") }
                         }) { Text("Source") }
                     },
                     dismissButton = {
                         TextButton(onClick = {
-                            val targets = loadAiEditTargetUris(context) + selectedImageUris - loadAiEditSourceUris(context)
-                            saveAiEditTargetUris(context, targets)
-                            val sources = loadAiEditSourceUris(context) - selectedImageUris
-                            saveAiEditSourceUris(context, sources)
+                            val targets = com.pyqcr.ai.AiEditSelectionStore.loadTargetUris(context) + selectedImageUris
+                                - com.pyqcr.ai.AiEditSelectionStore.loadSourceUris(context)
+                            com.pyqcr.ai.AiEditSelectionStore.saveTargetUris(context, targets)
+                            val sources = com.pyqcr.ai.AiEditSelectionStore.loadSourceUris(context) - selectedImageUris
+                            com.pyqcr.ai.AiEditSelectionStore.saveSourceUris(context, sources)
                             showAiEditRoleDialog = false
                             scope.launch { snackbarHostState.showSnackbar("${selectedImageUris.size} added as AI Edit target") }
                         }) { Text("Target") }
@@ -2126,23 +2172,47 @@ private fun ImageGridView(
     justifiedState: LazyListState = rememberLazyListState(),
     onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit,
-    onMultiSelectImageToggle: ((String) -> Unit)? = null
+    onMultiSelectImageToggle: ((String) -> Unit)? = null,
+    onGroupBarLongPress: (List<ImageItem>) -> Unit = {}
 ) {
     val imageUris = remember(images) { images.map { it.uri } }
-    // Group images by date if requested
+    // Group images by the requested criterion (date / rating / AI score)
     val groups = remember(images, groupByMode) {
         if (groupByMode == GroupByMode.NONE) {
             emptyList()
         } else {
-            val dateFormat = when (groupByMode) {
-                GroupByMode.DAY -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-                GroupByMode.MONTH -> SimpleDateFormat("yyyy-MM", Locale.getDefault())
-                GroupByMode.YEAR -> SimpleDateFormat("yyyy", Locale.getDefault())
-                else -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+            val grouped = when (groupByMode) {
+                GroupByMode.DAY -> images.groupBy {
+                    SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+                        .format(Date(it.dateAdded * 1000))
+                }
+                GroupByMode.MONTH -> images.groupBy {
+                    SimpleDateFormat("yyyy-MM", Locale.getDefault())
+                        .format(Date(it.dateAdded * 1000))
+                }
+                GroupByMode.YEAR -> images.groupBy {
+                    SimpleDateFormat("yyyy", Locale.getDefault())
+                        .format(Date(it.dateAdded * 1000))
+                }
+                GroupByMode.RATING_SCORE -> images.groupBy {
+                    if (it.rating <= 0f) "Unrated"
+                    else String.format("%.1f ★", it.rating)
+                }
+                GroupByMode.AI_SCORE -> images.groupBy {
+                    val score = it.aiScore ?: 0f
+                    if (score <= 0f) "No AI score"
+                    else "AI ${score.toInt()}"
+                }
+                else -> emptyMap()
             }
-            images.groupBy { image ->
-                image.dateAdded.let { dateFormat.format(Date(it * 1000)) }
-            }.entries.sortedByDescending { it.key }
+            when (groupByMode) {
+                GroupByMode.RATING_SCORE ->
+                    grouped.entries.sortedByDescending { groupKeyRatingScore(it.key) }
+                GroupByMode.AI_SCORE ->
+                    grouped.entries.sortedByDescending { groupKeyAiScore(it.key) }
+                else ->
+                    grouped.entries.sortedByDescending { it.key }
+            }
         }
     }
 
@@ -2160,17 +2230,11 @@ private fun ImageGridView(
                         .background(Color.White)
                 ) {
                     groups.forEach { (header, groupImages) ->
-                        // Date header spanning full width
+                        // Long-press the group bar to batch-select every image in it
                         item(span = { GridItemSpan(3) }) {
-                            Text(
-                                text = header,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0xFFF5F5F5))
-                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                            GroupHeaderBar(
+                                label = header,
+                                onLongSelect = { onGroupBarLongPress(groupImages) }
                             )
                         }
                         items(groupImages, key = { it.uri }) { image ->
@@ -2248,6 +2312,51 @@ private fun ImageGridView(
         }
     }
 }
+
+/**
+ * Group bar shown above each group in a grouped grid. Long-pressing it
+ * batch-selects every image in the group (item 5 of the 2026-10-16 batch).
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun GroupHeaderBar(
+    label: String,
+    onLongSelect: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF5F5F5))
+            .combinedClickable(
+                onClick = { },
+                onLongClick = { onLongSelect() }
+            )
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "hold to select",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/** Sort key for a rating group header ("5.0 ★" → 5.0, "Unrated" → -1, sorted last). */
+private fun groupKeyRatingScore(label: String): Float =
+    label.removeSuffix(" ★").toFloatOrNull() ?: -1f
+
+/** Sort key for an AI-score group header ("AI 87" → 87, "No AI score" → -1, sorted last). */
+private fun groupKeyAiScore(label: String): Int =
+    label.removePrefix("AI ").toIntOrNull() ?: -1
 
 // Extracted grid cell composable to avoid duplication
 @OptIn(ExperimentalFoundationApi::class)
@@ -2578,27 +2687,8 @@ private fun saveAiSelectedUris(context: Context, uris: Set<String>) {
     prefs.edit().putStringSet("ai_selected_uris", uris).apply()
 }
 
-// ---------- SharedPreferences helpers for AI Edit selection (batch menu marks source/target) ----------
-private const val AI_EDIT_SELECT_PREFS = "pyqcr_ai_edit_select"
-private const val KEY_SOURCE_URIS = "ai_edit_source_uris"
-private const val KEY_TARGET_URIS = "ai_edit_target_uris"
-
-private fun loadAiEditSourceUris(context: Context): Set<String> {
-    val prefs = context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
-    return prefs.getStringSet(KEY_SOURCE_URIS, emptySet()) ?: emptySet()
-}
-private fun saveAiEditSourceUris(context: Context, uris: Set<String>) {
-    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
-        .edit().putStringSet(KEY_SOURCE_URIS, uris).apply()
-}
-private fun loadAiEditTargetUris(context: Context): Set<String> {
-    val prefs = context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
-    return prefs.getStringSet(KEY_TARGET_URIS, emptySet()) ?: emptySet()
-}
-private fun saveAiEditTargetUris(context: Context, uris: Set<String>) {
-    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
-        .edit().putStringSet(KEY_TARGET_URIS, uris).apply()
-}
+// AI Edit source/target/third selections live in com.pyqcr.ai.AiEditSelectionStore
+// (shared with AiEditScreen and the image-detail "AI Edit" button).
 
 // ---------- SAF tree URI to path resolution ----------
 

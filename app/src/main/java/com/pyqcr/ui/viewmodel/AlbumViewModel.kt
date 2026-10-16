@@ -285,5 +285,7 @@ enum class GroupByMode {
     NONE,
     DAY,
     MONTH,
-    YEAR
+    YEAR,
+    RATING_SCORE,
+    AI_SCORE
 }

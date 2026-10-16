@@ -25,7 +25,8 @@ object AiEditWorkManager {
      * @param apiKey DashScope API key
      * @param modelName model name (e.g. qwen-image-2.0)
      * @param prompt the edit prompt
-     * @param targetUri optional reference target image URI
+     * @param targetUri optional second reference image URI
+     * @param thirdUri optional third reference image URI
      * @param items source image URIs with their edit selections
      */
     fun enqueue(
@@ -34,6 +35,7 @@ object AiEditWorkManager {
         modelName: String,
         prompt: String,
         targetUri: String?,
+        thirdUri: String?,
         items: List<AiEditJobItem>
     ) {
         val jobsDir = File(context.cacheDir, "ai_edit_jobs").apply { mkdirs() }
@@ -45,6 +47,7 @@ object AiEditWorkManager {
             "modelName" to modelName,
             "prompt" to prompt,
             "targetUri" to (targetUri ?: ""),
+            "thirdUri" to (thirdUri ?: ""),
             "selectionsFile" to selectionsFile.absolutePath
         )
 

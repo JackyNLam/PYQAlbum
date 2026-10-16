@@ -14,15 +14,15 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - **Grid**: 3 columns, square thumbnails (1:1 aspect ratio)
   - **Waterfall (River)**: 3 columns, Pinterest-style staggered heights
   - **Justified Grid**: 3 images per row, fixed height (120dp), dynamic width proportional to aspect ratio
-- **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Edit, AI Rating
+- **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Edit, AI Rating, Photo Vault
 - **Click thumbnail** → full-screen detail view (safe null handling, no crash)
 - **Long-press** → enters multi-select mode directly (no intermediate dialog); bottom bar shows selected count, action menu (⋮), and Cancel
-- **Sort inside a folder**: Use the Sort (↕) button in the toolbar:
-  - **↓Modified date** (default) — newest photos first
-  - **↑Name** — alphabetical by filename
-  - **Rating ↓** — by user rating (highest first)
-  - **AI Score ↓** — by AI rating (highest first)
-  - **Group by** submenu: None / Day / Month / Year — organize thumbnails into date-based sections
+- **Sort inside a folder**: Use the Sort (↕) button in the toolbar — every criterion offers both directions:
+  - **↓ / ↑Modified date** (desc default) — newest / oldest photos first
+  - **↑ / ↓Name** — alphabetical / reverse-alphabetical by filename
+  - **Rating ↓ / ↑** — highest / lowest user rating first
+  - **AI Score ↓ / ↑** — highest / lowest AI rating first
+  - **Group by** submenu: None / Day / Month / Year / Rating Score / AI Score — organize thumbnails into sections with a bar header (long-press a bar to batch-select that whole group)
 - **AI Rating flow (streamlined)**:
   1. Long-press any image in Album → choose **Select for AI Ranking**
   2. Or tap drawer ✨ AI Rating to go directly to AI Rating view
@@ -40,6 +40,8 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Move**: real file move — same-volume moves use `File.renameTo` (instant, preserves the modified date); cross-volume / content-only URIs fall back to copy + restore the modified date + delete the source (API 30+ uses a recoverable delete request)
 - **Default destination**: `Pictures/PYQAlbum/` (fallback if external folder can't be resolved)
 - **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** rating, tags, and AI selection panel; **swipe left/right** to navigate to next/previous image in the same folder/tag
+- **Zoom & pan** (detail view): pinch (or double-tap) to zoom up to 5x; while zoomed, drag to pan — the image tracks the finger 1:1 at any zoom level and is clamped so it can never be dragged out of view
+- **Animated images**: GIF and animated WebP play inline (Coil `coil-gif`); **motion photos** (JPEG with an embedded MP4, e.g. Pixel / Samsung "moving photo") show a ▶ button that plays the embedded video loop
 - **AI-selected images** are marked with an ✨ AutoAwesome icon badge in all grid layouts (Grid, Waterfall, Justified) and TAG grid view
 - **User ratings** are shown as gold-on-black score badges on thumbnails
 - **Tag assignment** shows ALL existing tags (from any image) as selectable options before allowing custom tag creation — both from long-press dialog and batch tag mode (always collected regardless of browse mode)
@@ -62,6 +64,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 │           ├── MainActivity.kt           # Single Activity, edge-to-edge
 │           ├── ai/
 │           │   ├── AiEditService.kt      # qwen-image-2.0 AI edit (DashScope)
+│           │   ├── AiEditSelectionStore.kt # AI Edit image-selection prefs (shared by album/detail screen/edit screen)
 │           │   ├── AiRatingService.kt    # DashScope API batch scoring (10 img/batch)
 │           │   └── ImageResizer.kt       # Resize to 800px max, cache in ai_rating/
 │           ├── data/
@@ -70,11 +73,11 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 │           │   └── repository/ ...       # MediaStore scan + Room flows
 │           ├── ui/
 │           │   ├── component/ ...        # ImageThumbnail, WaterfallGrid, JustifiedGrid, RatingBar, TagChip
-│           │   ├── navigation/ ...       # AppNavGraph with 8 routes
-│           │   ├── screen/ ...           # All screens
+│           │   ├── navigation/ ...       # AppNavGraph with 9 routes
+│           │   ├── screen/ ...           # All screens (incl. VaultScreen — password vault)
 │           │   ├── theme/ ...            # Material3 dynamic color
 │           │   └── viewmodel/ ...        # AlbumViewModel
-│           └── util/ ...                 # ImageUtil, BatchProcessor, PermissionHelper
+│           └── util/ ...                 # ImageUtil, BatchProcessor, PermissionHelper, MotionPhotoExtractor
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── gradle.properties
@@ -85,18 +88,19 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 ---
 
-## 8 Navigation Routes
+## 9 Navigation Routes
 
 | Route | Screen | Purpose |
 |-------|--------|---------|
 | `album` | `AlbumScreen` | Main album browser: folder grid → image grid with 3 view layouts, left drawer menu |
 | `tag` | `TagScreen` | Tag list → images per tag *(can be discovered via drawer, or navigated separately)* |
 | `rating` | `RatingScreen` | Sort/filter by user rating or AI score *(still accessible via nav route)* |
-| `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, swipe down to go back, swipe up for controls |
-| `ai_edit` | `AiEditScreen` | **AI Image Editing**: qwen-image-2.0 — select source image + drag to select area + optional target reference + prompt → AI edits area, composited back |
-| `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope |
+| `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, swipe down to go back, swipe up for controls; zoom/pan, GIF & motion-photo playback, file size, AI Rating/AI Edit buttons |
+| `ai_edit` | `AiEditScreen` | **AI Image Editing**: qwen-image-2.0 — first image(s) + area/brush selection + optional second/third reference images + prompt (10 saved slots) |
+| `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope; optional `imageUri` query arg pre-selects one image (used by the detail-screen AI Rating button) |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
+| `vault` | `VaultScreen` | **Photo Vault**: password-protected private storage, optional AES-256-GCM encryption, hide/unhide |
 
 ---
 
@@ -104,7 +108,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 | Action | Result |
 |--------|--------|
-| **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Edit / AI Rating |
+| **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Edit / AI Rating / Photo Vault |
 | **Tap folder card** (Folder mode) | Enter folder to see images in selected layout (folder cards show image count, sortable by modified date / count / name) |
 | **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking (toggle) |
@@ -113,8 +117,9 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Swipe right** (detail view) | Previous image in same folder/tag |
 | **Swipe up on image** (detail view) | Reveal rating bar, tags, AI selection panel |
 | **Toolbar Layout button** (inside folder) | Dropdown: Grid (▦) / Waterfall (🌊) / Justified (▭) |
-| **Toolbar Sort button** (folder list) | Dropdown: ↓Modified date (default) / ↓Count / ↑Name |
-| **Toolbar Sort button** (inside folder) | Dropdown: ↓Modified date (default) / ↑Name / Rating ↓ / AI Score ↓ / Group by submenu |
+| **Toolbar Sort button** (folder list) | Dropdown: ↓Modified date (default) / ↑Modified date / ↓Count / ↑Count / ↑Name / ↓Name |
+| **Toolbar Sort button** (inside folder) | Dropdown: ↓Modified date (default) / ↑Modified date / ↑Name / ↓Name / Rating ↓ / Rating ↑ / AI Score ↓ / AI Score ↑ / Group by submenu |
+| **Toolbar Sort button** → **Group by submenu** | None / Day / Month / Year / Rating Score / AI Score — group bar headers; **long-press a header to batch-select every image in that group** |
 | **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Edit / AI Rating |
 | **AI Edit** | Via drawer ✏️ |
 | **AI Rating** | Via drawer ✨ |
@@ -128,12 +133,12 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 #### Folder mode (default — no drawer tab selected)
 - **Step 1**: Shows a 2-column folder grid with folder icons, image count per folder
-- **Step 1 sort** (↕ button in toolbar): **↓Modified date** (default, newest first) / **↓Count** (most images first) / **↑Name** (alphabetical)
+- **Step 1 sort** (↕ button in toolbar): **↓Modified date** (default, newest first) / **↑Modified date** (oldest first) / **↓Count** (most images first) / **↑Count** (fewest first) / **↑Name** (alphabetical) / **↓Name** (reverse alphabetical)
 - **Step 2**: Tap a folder → images displayed in the selected layout (Grid/Waterfall/Justified)
 - Layout toggle and sort button appear in toolbar when inside a folder
 - Default thumbnail sort: **↓Modified date** (newest first)
-- Sort options: **↓Modified date** (default) / **↑Name** / **Rating ↓** / **AI Score ↓** — with ✓ checkmark on active option
-- **Group by**: submenu with None / Day / Month / Year — sections thumbnails by date header
+- Sort options: **↓Modified date** (default) / **↑Modified date** / **↑Name** / **↓Name** / **Rating ↓** / **Rating ↑** / **AI Score ↓** / **AI Score ↑** — with ✓ checkmark on active option
+- **Group by**: submenu with None / Day / Month / Year / Rating Score / AI Score — sections thumbnails by header bar; "Rating Score" groups by star rating (highest first, "Unrated" last), "AI Score" groups by rounded score ("AI 87", "No AI score" last)
 
 #### Tag mode
 - Grid of tag cards — tap a tag to see all images with that tag
@@ -149,15 +154,22 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Step 1**: 2-column grid of `ElevatedCard`s with folder icons, **image count** shown below folder name
 - **Folder list sort** (↕ button in toolbar when on folder grid):
   - **↓Modified date** (default) — newest folder first (by latest image date)
+  - **↑Modified date** — oldest folder first
   - **↓Count** — folders with most images first
+  - **↑Count** — folders with fewest images first
   - **↑Name** — alphabetical order
+  - **↓Name** — reverse alphabetical order
 - **Step 2**: Tap a folder → "← All Folders" back button at top, then image grid
 - Sort images inside a folder via the Sort button (↕):
   - **↓Modified date** (default) — newest first
+  - **↑Modified date** — oldest first
   - **↑Name** — alphabetical by filename
+  - **↓Name** — reverse alphabetical
   - **Rating ↓** — highest user rating first
+  - **Rating ↑** — lowest user rating first
   - **AI Score ↓** — highest AI score first
-  - **Group by** submenu: organize thumbnails by Day, Month, or Year sections
+  - **AI Score ↑** — lowest AI score first
+  - **Group by** submenu: organize thumbnails into sections by **Day**, **Month**, **Year**, **Rating Score** (e.g. `5.0 ★`, "Unrated" last), or **AI Score** (e.g. `AI 87`, "No AI score" last) — each group has a header bar, and **long-pressing a header bar enters multi-select with the whole group selected** (for batch rating / tagging / copying / deleting)
 
 ### Grid View
 - **3 columns** of square thumbnails (1:1 aspect ratio)
@@ -184,11 +196,15 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ### Image Detail Screen
 - **Full-screen image** — no `.aspectRatio()` constraint; uses `fillMaxSize()` + `ContentScale.Fit` inside a `Box` that fills available screen space
 - **Swipe down** anywhere on the image → navigates back to thumbnail grid (folder/tag context preserved)
-- **Swipe up** → reveals detail panel with rating bar, tags, AI selection, metadata
+- **Swipe up** → reveals detail panel with **name, folder, full path, pixel size, and file size (MB/KB)**, rating bar, tags, AI selection, and **AI Actions buttons**
+- **AI Actions** (below the tag area): **AI Rating** — opens the AI Rating screen with this image pre-selected; **AI Edit** — opens the AI Edit screen with this image already added as a first-image source
 - **Swipe left** → next image in same folder/tag
 - **Swipe right** → previous image in same folder/tag
-- Tap on image (when panel is hidden) to toggle top bar
-- Swipe down on the detail panel itself to hide it again
+- **Tap on image** (when panel is hidden) to toggle top bar
+- **Swipe down on the detail panel itself** to hide it again
+- **Zoom & pan**: pinch or double-tap to zoom up to 5x; single-finger drag pans and **tracks the finger 1:1 at any zoom** (pointer deltas are multiplied by the layer scale — without this, high-DPI screens moved the image far less than the finger), and the pan is **clamped to the ContentScale.Fit bounds** so the zoomed image can't be flung out of view
+- **GIF / animated WebP**: play automatically (Coil `coil-gif` decoder registered in `PyqCrApp.newImageLoader`)
+- **Motion photos** (moving photos — JPEG with an embedded MP4, e.g. Google Pixel / Samsung): a ▶ "Motion photo" chip appears; tapping it extracts the embedded video (`MotionPhotoExtractor` scans for the MP4 `ftyp` box) and plays it as a looping video over the still frame, with a ✕ Close button
 
 ### AI Rating Screen
 - **Single unified view** — no separate selection step
@@ -233,8 +249,14 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **API Configuration** card with:
   - DashScope API Key input (encrypted storage via separate EncryptedSharedPreferences from AI Rating)
   - Model Name input (default `qwen-image-2.0`)
-  - **Save Config** button — persists API Key, Model name, **and** the edit prompt in one tap
-- **Edit Prompt** card: multi-line `OutlinedTextField` (3–6 lines) for the user's custom edit instruction (e.g. "replace the person with the one from the target image"); saved by the Save Config button
+  - **Save Config** button — persists API Key, Model name, **and** the edit prompt in one tap; the prompt is also written into the saved-prompt library (see below)
+- **Saved Prompt selector**:
+  - Read-only dropdown field above the prompt box showing the active slot (e.g. `Prompt 2 · text…`, or `Prompt 3 (empty)`)
+  - The dropdown lists **all 10 slots** — filled ones show their text preview, empty ones show "(empty)"; ✓ marks the active slot, ✕ clears (not removes) a slot so the 1–10 numbering never shifts
+  - Picking a **filled** slot loads its text into the prompt box; picking an **empty** slot clears the box and marks that slot as the write target
+  - "No saved prompts yet" when every slot is empty; a "N/10 slots used" counter sits under the Save Config button
+  - The old separate **Save Prompt** button is gone — **Save Config** now handles both: it writes the prompt box into the selected slot (overwrite), or into the slot that already holds the same text, or into the first free slot ("All 10 slots full — select a slot to overwrite" if none)
+- Multi-line `OutlinedTextField` (3–6 lines) for the user's custom edit instruction (e.g. "replace the person with the one from the target image")
 - **Source Images** card:
   - Tap to open a **4-column LazyVerticalGrid** gallery picker to select source images
   - Tap an **unselected** thumbnail → opens a drag-to-select **area dialog** (`AreaSelectionDialog`): drag a rectangle over the image to choose the exact region to edit (coordinates mapped through `ContentScale.Fit` letterboxing)
@@ -246,6 +268,9 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - Orange border (Color 0xFFFF9800) on the selected target thumbnail
   - Close button (✕) to deselect target
   - Optional — if omitted, the edit operates on source image content alone
+- **Third Image** card (reference, like the second):
+  - Same single-select picker as the Second Image — a purple border (Color 0xFF9C27B0) marks the selection, ✕ removes it
+  - Optional; the request sends first image, then second, then third, then the prompt (both the multimodal-generation endpoint and the chat-compatible fallback)
 - **Run AI Edit** button:
   - Validates API key, at least one source area, and non-empty prompt
   - Launches `AiEditService.editImages()` via OkHttp coroutine
@@ -263,6 +288,15 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Results section**: list of saved file paths for successfully edited images
 - Uses **qwen-image-2.0** (DashScope `multimodal-generation/generation` endpoint) with fallback to chat-compatible endpoint
 - The service encodes source and target images to base64, composes a multimodal request with the custom prompt, downloads the edited result image, and composites it back onto the original at the selected position
+
+### Photo Vault
+- **Password-protected private area** reached via the left drawer 🔒 **Photo Vault** — files live in app-private storage (`externalFilesDir/vault`), invisible to other apps and to the album's own MediaStore-backed views
+- **First run**: set a vault password (PBKDF2-HMAC-SHA256 hash of the password is stored in EncryptedSharedPreferences); every later visit asks for the password to unlock
+- **Import from Gallery**: in-app gallery grid picker (multi-select) — each imported image is **copied** out of MediaStore into the vault (originals are untouched)
+- **Encrypt on import**: optional per-import switch — files are encrypted with **AES-256-GCM** using a per-file random salt and a key derived from the vault password; encrypted entries show a 🔒 tile instead of a preview and need the password to view
+- **Hide/Unhide**: every entry can be hidden — hidden entries disappear from the grid until the "Show hidden" toggle is on; view an entry to toggle Hide/Unhide (🙈 badge on hidden tiles)
+- **View & delete**: tap an entry to open the viewer (decrypts on demand), showing name and 🔒/🙈 badges with **Hide/Unhide** and **Delete** actions
+- Summary line shows "N in vault · N encrypted · N hidden (N shown)"
 
 ### Tag/Rating Assignment
 - **Long-press dialog** shows existing tags as selectable buttons before offering a "create new" option
@@ -305,7 +339,7 @@ Push to `main` branch — workflow builds and uploads APK as artifact.
 | AGP | 8.7.0 | Android Gradle Plugin |
 | KSP | 2.0.21-1.0.27 | Room annotation processor |
 | Compose BOM | 2024.10.01 | Compose toolkit |
-| Coil | 3.0.4 | Image loading |
+| Coil | 3.0.4 | Image loading (incl. `coil-gif` for animated GIF/WebP) |
 | Room | 2.6.1 | Local database |
 | Retrofit | 2.11.0 | HTTP client (unused) |
 | OkHttp | 4.12.0 | HTTP client (used by AI) |

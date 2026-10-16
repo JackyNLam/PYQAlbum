@@ -53,6 +53,7 @@ import androidx.security.crypto.MasterKey
 import com.pyqcr.ai.AiEditBackgroundDebugLog
 import com.pyqcr.ai.AiEditBackgroundProgress
 import com.pyqcr.ai.AiEditJobItem
+import com.pyqcr.ai.AiEditSelectionStore
 import com.pyqcr.ai.AiEditService
 import com.pyqcr.ai.AiEditWorkManager
 import com.pyqcr.ai.CropRect
@@ -103,6 +104,7 @@ fun AiEditScreen(
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
     var selectedSourceAreas by remember { mutableStateOf<Map<String, EditSelection>>(emptyMap()) }
     var selectedTargetUri by remember { mutableStateOf<String?>(null) }
+    var selectedThirdUri by remember { mutableStateOf<String?>(null) }
 
     // Area selection dialog state
     var areaDialogUri by remember { mutableStateOf<String?>(null) }
@@ -123,19 +125,24 @@ fun AiEditScreen(
         }
     }
 
-    // One-shot import of source/target images marked in the album's batch
-    // select menu (pyqcr_ai_edit_select prefs). Sources start with a
-    // full-image selection; tap one to refine the area/brush.
+    // One-shot import of source/target/third images marked in the album's batch
+    // select menu or via the image-detail "AI Edit" button
+    // (pyqcr_ai_edit_select prefs). Sources start with a full-image selection;
+    // tap one to refine the area/brush.
     LaunchedEffect(Unit) {
-        val sources = loadAiEditSourceUris(context)
+        val sources = AiEditSelectionStore.loadSourceUris(context)
         if (sources.isNotEmpty()) {
             selectedSourceAreas = sources.associateWith {
                 EditSelection(cropRect = CropRect(0f, 0f, 1f, 1f))
             }
         }
-        val target = loadAiEditTargetUris(context).firstOrNull()
+        val target = AiEditSelectionStore.loadTargetUris(context).firstOrNull()
         if (target != null) {
             selectedTargetUri = target
+        }
+        val third = AiEditSelectionStore.loadThirdUris(context).firstOrNull()
+        if (third != null) {
+            selectedThirdUri = third
         }
     }
 
@@ -169,15 +176,14 @@ fun AiEditScreen(
                     }
                 },
                 actions = {
-                    if (selectedSourceAreas.isNotEmpty() || selectedTargetUri != null) {
+                    if (selectedSourceAreas.isNotEmpty() || selectedTargetUri != null || selectedThirdUri != null) {
                         TextButton(onClick = {
                             selectedSourceAreas = emptyMap()
                             selectedTargetUri = null
+                            selectedThirdUri = null
                             outputPaths = emptyList()
                             bgDebugLog = emptyList()
-                            saveAiEditSourceUris(context, emptySet())
-                            saveAiEditTargetUris(context, emptySet())
-                            clearAiEditSelections(context)
+                            AiEditSelectionStore.clearAll(context)
                         }) {
                             Text("Clear All", color = MaterialTheme.colorScheme.error)
                         }
@@ -243,19 +249,25 @@ fun AiEditScreen(
                         Spacer(Modifier.height(12.dp))
 
                         // Saved prompt selector — dropdown above the prompt box.
-                        // Selecting a saved prompt loads it into the box so the
-                        // user can overwrite that slot with "Save Prompt".
+                        // Shows all 10 slots (empty ones too). Tapping a filled
+                        // slot loads it into the box; tapping an empty slot clears
+                        // the box and marks it as the target for the next Save
+                        // Config press.
                         Box(modifier = Modifier.fillMaxWidth()) {
                             OutlinedTextField(
-                                value = if (selectedSavedPromptIdx in savedPrompts.indices)
-                                    "Prompt ${selectedSavedPromptIdx + 1} · " +
-                                        savedPrompts[selectedSavedPromptIdx].replace("\n", " ")
-                                else "",
+                                value = if (selectedSavedPromptIdx in 0 until MAX_SAVED_PROMPTS) {
+                                    val slotContent = savedPrompts[selectedSavedPromptIdx]
+                                    if (slotContent.isBlank())
+                                        "Prompt ${selectedSavedPromptIdx + 1} (empty)"
+                                    else
+                                        "Prompt ${selectedSavedPromptIdx + 1} · " +
+                                            slotContent.replace("\n", " ")
+                                } else "",
                                 onValueChange = {},
                                 readOnly = true,
                                 singleLine = true,
                                 label = { Text("Saved Prompt") },
-                                placeholder = { Text("Select Prompt 1-10 (${savedPrompts.size}/10 saved)") },
+                                placeholder = { Text("Select Prompt 1-10 (${savedPrompts.count { it.isNotBlank() }}/10 saved)") },
                                 trailingIcon = {
                                     Icon(Icons.Default.ArrowDropDown, contentDescription = "Open saved prompts")
                                 },
@@ -278,13 +290,14 @@ fun AiEditScreen(
                                 expanded = promptMenuExpanded,
                                 onDismissRequest = { promptMenuExpanded = false }
                             ) {
-                                if (savedPrompts.isEmpty()) {
+                                if (savedPrompts.none { it.isNotBlank() }) {
                                     DropdownMenuItem(
                                         text = { Text("No saved prompts yet") },
                                         onClick = { promptMenuExpanded = false }
                                     )
                                 }
-                                savedPrompts.forEachIndexed { index, prompt ->
+                                for (index in 0 until MAX_SAVED_PROMPTS) {
+                                    val prompt = savedPrompts[index]
                                     DropdownMenuItem(
                                         text = {
                                             Column {
@@ -294,9 +307,13 @@ fun AiEditScreen(
                                                     color = MaterialTheme.colorScheme.primary
                                                 )
                                                 Text(
-                                                    text = prompt.replace("\n", " "),
+                                                    text = if (prompt.isBlank()) "(empty)"
+                                                    else prompt.replace("\n", " "),
                                                     maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    color = if (prompt.isBlank())
+                                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                                    else MaterialTheme.colorScheme.onSurface
                                                 )
                                             }
                                         },
@@ -304,16 +321,18 @@ fun AiEditScreen(
                                             { Icon(Icons.Default.Check, contentDescription = "Selected") }
                                         } else null,
                                         onClick = {
-                                            customPrompt = prompt
+                                            // Filled slot: load its text. Empty slot: clear the
+                                            // box and mark it as the write target for Save Config.
+                                            customPrompt = if (prompt.isBlank()) "" else prompt
                                             selectedSavedPromptIdx = index
                                             promptMenuExpanded = false
                                         },
                                         trailingIcon = {
                                             IconButton(onClick = {
-                                                savedPrompts = savedPrompts.filterIndexed { i, _ -> i != index }
+                                                // Deleting clears the slot (keeps the 1-10 numbering)
+                                                savedPrompts = savedPrompts.toMutableList().also { it[index] = "" }
                                                 saveAiEditSavedPrompts(context, savedPrompts)
                                                 if (selectedSavedPromptIdx == index) selectedSavedPromptIdx = -1
-                                                else if (selectedSavedPromptIdx > index) selectedSavedPromptIdx--
                                             }) {
                                                 Icon(
                                                     Icons.Default.Delete,
@@ -342,52 +361,12 @@ fun AiEditScreen(
                             modifier = Modifier.fillMaxWidth()
                         )
 
-                        // Save/update the current prompt in the saved list (max 10)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            TextButton(
-                                onClick = {
-                                    val text = customPrompt.trim()
-                                    if (text.isEmpty()) {
-                                        Toast.makeText(context, "Prompt cannot be empty", Toast.LENGTH_SHORT).show()
-                                        return@TextButton
-                                    }
-                                    if (selectedSavedPromptIdx in savedPrompts.indices) {
-                                        // Overwrite the selected slot
-                                        savedPrompts = savedPrompts.toMutableList().also { it[selectedSavedPromptIdx] = text }
-                                        saveAiEditSavedPrompts(context, savedPrompts)
-                                        Toast.makeText(context, "Prompt ${selectedSavedPromptIdx + 1} overwritten", Toast.LENGTH_SHORT).show()
-                                    } else if (savedPrompts.contains(text)) {
-                                        selectedSavedPromptIdx = savedPrompts.indexOf(text)
-                                        Toast.makeText(context, "Already saved as Prompt ${selectedSavedPromptIdx + 1}", Toast.LENGTH_SHORT).show()
-                                    } else if (savedPrompts.size >= MAX_SAVED_PROMPTS) {
-                                        Toast.makeText(context, "All 10 slots full — select a slot to overwrite", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        savedPrompts = savedPrompts + text
-                                        selectedSavedPromptIdx = savedPrompts.lastIndex
-                                        saveAiEditSavedPrompts(context, savedPrompts)
-                                        Toast.makeText(context, "Saved as Prompt ${selectedSavedPromptIdx + 1}", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    Icons.Default.Save,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text("Save Prompt")
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "${savedPrompts.size}/10 saved",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Spacer(Modifier.height(12.dp))
-
-                        // Save Config button (saves API key, model name, AND prompt)
+                        // Save Config saves the API key, the model name, AND the
+                        // prompt (merged from the old separate "Save Prompt" button).
+                        // Slot write rules:
+                        //   1. A slot is selected (filled or empty) → write there.
+                        //   2. The text already exists in some slot → select it.
+                        //   3. Otherwise → first free slot; all full → error toast.
                         var configSaved by remember { mutableStateOf(false) }
                         Button(
                             onClick = {
@@ -398,6 +377,32 @@ fun AiEditScreen(
                                 saveAiEditApiKey(context, apiKey)
                                 saveAiEditModelName(context, modelName)
                                 saveAiEditPrompt(context, customPrompt)
+                                val text = customPrompt.trim()
+                                if (text.isNotEmpty()) {
+                                    val activeIdx = selectedSavedPromptIdx
+                                    when {
+                                        activeIdx in 0 until MAX_SAVED_PROMPTS -> {
+                                            savedPrompts = savedPrompts.toMutableList().also { it[activeIdx] = text }
+                                            saveAiEditSavedPrompts(context, savedPrompts)
+                                            Toast.makeText(context, "Prompt ${activeIdx + 1} saved", Toast.LENGTH_SHORT).show()
+                                        }
+                                        savedPrompts.contains(text) -> {
+                                            selectedSavedPromptIdx = savedPrompts.indexOf(text)
+                                            Toast.makeText(context, "Already saved as Prompt ${selectedSavedPromptIdx + 1}", Toast.LENGTH_SHORT).show()
+                                        }
+                                        else -> {
+                                            val emptyIdx = savedPrompts.indexOfFirst { it.isBlank() }
+                                            if (emptyIdx >= 0) {
+                                                savedPrompts = savedPrompts.toMutableList().also { it[emptyIdx] = text }
+                                                selectedSavedPromptIdx = emptyIdx
+                                                saveAiEditSavedPrompts(context, savedPrompts)
+                                                Toast.makeText(context, "Saved as Prompt ${emptyIdx + 1}", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "All 10 slots full — select a slot to overwrite", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }
+                                }
                                 configSaved = true
                                 Toast.makeText(context, "Configuration saved", Toast.LENGTH_SHORT).show()
                             },
@@ -412,13 +417,21 @@ fun AiEditScreen(
                             Text("Save Config")
                         }
 
-                        if (configSaved) {
-                            Spacer(Modifier.height(4.dp))
+                        Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "✓ Configuration saved",
+                                text = "${savedPrompts.count { it.isNotBlank() }}/10 slots used",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            Spacer(Modifier.weight(1f))
+                            if (configSaved) {
+                                Text(
+                                    text = "✓ Saved",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
                 }
@@ -465,8 +478,10 @@ fun AiEditScreen(
                         }
 
                         if (showSourcePicker) {
-                            // All images grid for selection
-                            val nonTargetImages = allImages.filter { it.uri != selectedTargetUri }
+                            // All images grid for selection (excluding second/third refs)
+                            val nonTargetImages = allImages.filter {
+                                it.uri != selectedTargetUri && it.uri != selectedThirdUri
+                            }
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(4),
                                 contentPadding = PaddingValues(2.dp),
@@ -591,7 +606,7 @@ fun AiEditScreen(
                                                 .padding(2.dp)
                                                 .clickable {
                                                     selectedSourceAreas = selectedSourceAreas - image.uri
-                                                    saveAiEditSourceUris(context, selectedSourceAreas.keys)
+                                                    AiEditSelectionStore.saveSourceUris(context, selectedSourceAreas.keys)
                                                 }
                                         ) {
                                             Text("✕", color = Color.White, fontSize = MaterialTheme.typography.labelSmall.fontSize)
@@ -653,7 +668,9 @@ fun AiEditScreen(
                         }
 
                         if (showTargetPicker) {
-                            val nonSourceImages = allImages.filter { it.uri !in selectedSourceAreas }
+                            val nonSourceImages = allImages.filter {
+                                it.uri !in selectedSourceAreas && it.uri != selectedThirdUri
+                            }
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(4),
                                 contentPadding = PaddingValues(2.dp),
@@ -671,7 +688,7 @@ fun AiEditScreen(
                                             .aspectRatio(1f)
                                             .clickable {
                                                 selectedTargetUri = image.uri
-                                                saveAiEditTargetUris(context, setOf(image.uri))
+                                                AiEditSelectionStore.saveTargetUris(context, setOf(image.uri))
                                                 showTargetPicker = false
                                             }
                                     ) {
@@ -717,7 +734,7 @@ fun AiEditScreen(
                                     IconButton(
                                         onClick = {
                                             selectedTargetUri = null
-                                            saveAiEditTargetUris(context, emptySet())
+                                            AiEditSelectionStore.saveTargetUris(context, emptySet())
                                             showTargetPicker = true
                                         },
                                         modifier = Modifier
@@ -728,6 +745,125 @@ fun AiEditScreen(
                                         Icon(
                                             Icons.Default.Close,
                                             contentDescription = "Remove second image",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ======== Third image section ========
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Third Image (Reference)",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Spacer(Modifier.height(8.dp))
+
+                        // Toggle: show third image picker
+                        var showThirdPicker by remember { mutableStateOf(false) }
+
+                        if (selectedThirdUri == null && !showThirdPicker) {
+                            Button(
+                                onClick = { showThirdPicker = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(
+                                    Icons.Default.Image,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Select Third Image")
+                            }
+                        }
+
+                        if (showThirdPicker) {
+                            val nonOtherImages = allImages.filter {
+                                it.uri !in selectedSourceAreas && it.uri != selectedTargetUri
+                            }
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(4),
+                                contentPadding = PaddingValues(2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 300.dp)
+                                    .background(Color.Black)
+                            ) {
+                                gridItems(nonOtherImages, key = { it.uri }) { image ->
+                                    val isThird = image.uri == selectedThirdUri
+                                    Box(
+                                        modifier = Modifier
+                                            .aspectRatio(1f)
+                                            .clickable {
+                                                selectedThirdUri = image.uri
+                                                AiEditSelectionStore.saveThirdUris(context, setOf(image.uri))
+                                                showThirdPicker = false
+                                            }
+                                    ) {
+                                        ImageThumbnail(
+                                            imageUri = image.uri,
+                                            modifier = Modifier.fillMaxSize(),
+                                            backgroundColor = Color.Black
+                                        )
+                                        if (isThird) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .border(3.dp, Color(0xFF9C27B0))
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(Modifier.height(4.dp))
+                            TextButton(onClick = { showThirdPicker = false }) {
+                                Text("Cancel")
+                            }
+                        }
+
+                        // Show selected third thumbnail
+                        if (selectedThirdUri != null) {
+                            Spacer(Modifier.height(8.dp))
+                            val thirdImage = allImages.find { it.uri == selectedThirdUri }
+                            if (thirdImage != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 200.dp)
+                                ) {
+                                    ImageThumbnail(
+                                        imageUri = thirdImage.uri,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .border(3.dp, Color(0xFF9C27B0)),
+                                        backgroundColor = Color.Black
+                                    )
+                                    IconButton(
+                                        onClick = {
+                                            selectedThirdUri = null
+                                            AiEditSelectionStore.saveThirdUris(context, emptySet())
+                                            showThirdPicker = true
+                                        },
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .size(28.dp)
+                                            .background(Color.Red, RoundedCornerShape(50))
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Close,
+                                            contentDescription = "Remove third image",
                                             tint = Color.White,
                                             modifier = Modifier.size(16.dp)
                                         )
@@ -769,6 +905,7 @@ fun AiEditScreen(
                             modelName = modelName,
                             prompt = customPrompt,
                             targetUri = selectedTargetUri,
+                            thirdUri = selectedThirdUri,
                             items = items
                         )
                         Toast.makeText(context, "✅ AI edit started in background", Toast.LENGTH_SHORT).show()
@@ -948,7 +1085,7 @@ fun AiEditScreen(
             initialSelection = selectedSourceAreas[uri],
             onConfirm = { selection ->
                 selectedSourceAreas = selectedSourceAreas + (uri to selection)
-                saveAiEditSourceUris(context, selectedSourceAreas.keys)
+                AiEditSelectionStore.saveSourceUris(context, selectedSourceAreas.keys)
                 areaDialogUri = null
             },
             onDismiss = {
@@ -1080,18 +1217,26 @@ private fun saveAiEditPrompt(context: Context, prompt: String) {
 private const val KEY_SAVED_PROMPTS = "ai_edit_saved_prompts"
 private const val MAX_SAVED_PROMPTS = 10
 
-/** Load the saved prompt library (max 10), oldest first. */
+/**
+ * Load the saved prompt library as a fixed 10-slot list where "" marks an
+ * empty slot. Older persisted data (variable-length arrays of filled prompts)
+ * is padded with empty slots so the 1-10 numbering stays stable.
+ */
 private fun loadAiEditSavedPrompts(context: Context): List<String> {
     val prefs = context.getSharedPreferences("pyqcr_ai_edit_config", Context.MODE_PRIVATE)
-    val raw = prefs.getString(KEY_SAVED_PROMPTS, null) ?: return emptyList()
-    return try {
+    val raw = prefs.getString(KEY_SAVED_PROMPTS, null)
+    if (raw == null) return List(MAX_SAVED_PROMPTS) { "" }
+    val loaded = try {
         com.google.gson.Gson().fromJson(raw, Array<String>::class.java)?.toList() ?: emptyList()
-    } catch (e: Exception) { emptyList() }
+    } catch (e: Exception) {
+        emptyList()
+    }
+    return (loaded + List(MAX_SAVED_PROMPTS) { "" }).take(MAX_SAVED_PROMPTS)
 }
 
-/** Persist the saved prompt library, capped at [MAX_SAVED_PROMPTS]. */
+/** Persist the saved prompt library, always as a fixed 10-slot list. */
 private fun saveAiEditSavedPrompts(context: Context, prompts: List<String>) {
-    val limited = prompts.take(MAX_SAVED_PROMPTS)
+    val limited = (prompts + List(MAX_SAVED_PROMPTS) { "" }).take(MAX_SAVED_PROMPTS)
     val prefs = context.getSharedPreferences("pyqcr_ai_edit_config", Context.MODE_PRIVATE)
     prefs.edit().putString(KEY_SAVED_PROMPTS, com.google.gson.Gson().toJson(limited)).apply()
 }
@@ -1152,35 +1297,4 @@ private fun loadBitmapDimensions(context: Context, uriStr: String): Pair<Int, In
     } catch (e: Exception) {
         null
     }
-}
-
-// ---------- AI Edit batch-selection prefs (imported once on screen entry) ----------
-
-private const val AI_EDIT_SELECT_PREFS = "pyqcr_ai_edit_select"
-private const val KEY_SOURCE_URIS = "ai_edit_source_uris"
-private const val KEY_TARGET_URIS = "ai_edit_target_uris"
-
-private fun loadAiEditSourceUris(context: Context): Set<String> {
-    val prefs = context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
-    return prefs.getStringSet(KEY_SOURCE_URIS, emptySet()) ?: emptySet()
-}
-
-private fun saveAiEditSourceUris(context: Context, uris: Set<String>) {
-    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
-        .edit().putStringSet(KEY_SOURCE_URIS, uris).apply()
-}
-
-private fun loadAiEditTargetUris(context: Context): Set<String> {
-    val prefs = context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
-    return prefs.getStringSet(KEY_TARGET_URIS, emptySet()) ?: emptySet()
-}
-
-private fun saveAiEditTargetUris(context: Context, uris: Set<String>) {
-    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
-        .edit().putStringSet(KEY_TARGET_URIS, uris).apply()
-}
-
-private fun clearAiEditSelections(context: Context) {
-    context.getSharedPreferences(AI_EDIT_SELECT_PREFS, Context.MODE_PRIVATE)
-        .edit().remove(KEY_SOURCE_URIS).remove(KEY_TARGET_URIS).apply()
 }
