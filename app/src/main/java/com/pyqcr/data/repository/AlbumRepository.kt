@@ -2,6 +2,7 @@ package com.pyqcr.data.repository
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import com.pyqcr.data.db.AppDatabase
 import com.pyqcr.data.db.FolderInfo
@@ -219,8 +220,16 @@ class AlbumRepository(
         )
 
         val uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        // Hide recycled images (API 30+ trash): the album only shows items that
+        // are not in the recoverable recycle bin. On older APIs the column does
+        // not exist, so the filter is omitted entirely.
+        val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            "${MediaStore.MediaColumns.IS_TRASHED} = 0"
+        } else {
+            null
+        }
         val cursor = context.contentResolver.query(
-            uri, projection, null, null,
+            uri, projection, selection, null,
             "${MediaStore.Images.Media.DATE_ADDED} DESC"
         )
 

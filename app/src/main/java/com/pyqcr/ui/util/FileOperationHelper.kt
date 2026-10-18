@@ -574,6 +574,25 @@ object FileOperationHelper {
     }
 
     /**
+     * Build a single system TRASH request for a batch of images (API 30+). The
+     * system shows ONE confirmation dialog; on confirm the images move to the
+     * recoverable recycle bin (the Android "trash" folder) instead of being
+     * deleted permanently. Returns null on older APIs or failure — the caller
+     * falls back to [createDeleteRequest] / [deleteMediaDirect] then.
+     */
+    fun createTrashRequest(context: Context, uris: List<String>): IntentSender? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            val contentUris = uris.map { Uri.parse(it) }
+            MediaStore.createTrashRequest(context.contentResolver, contentUris.toMutableList(), true)
+                .intentSender
+        } catch (e: Exception) {
+            Log.w(TAG, "createTrashRequest failed", e)
+            null
+        }
+    }
+
+    /**
      * Directly delete images on API < 30 (no system confirmation dialog available).
      * Returns the number successfully deleted.
      */

@@ -382,44 +382,81 @@ fun AlbumScreen(
         }
     }
 
+    // Success-message template for the system trash/delete dialog ("{n}" is the
+    // number of images the user just confirmed). Default = plain delete.
+    var deleteSuccessMessage by remember { mutableStateOf("Deleted {n} image(s)") }
+    // URIs to remove from the DB when the system dialog returns OK. Null → the
+    // current multi-selection. Lets "Move to Vault" trash only the images that
+    // were actually copied out of the gallery.
+    var pendingDeleteUris by remember { mutableStateOf<List<String>?>(null) }
+
     // System delete confirmation launcher (API 30+) — one dialog for the whole batch
     val deleteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
-            val uris = selectedImageUris.toList()
+            val uris = pendingDeleteUris ?: selectedImageUris.toList()
             viewModel.deleteImages(uris)
-            scope.launch { snackbarHostState.showSnackbar("Deleted ${uris.size} image(s)") }
+            scope.launch {
+                snackbarHostState.showSnackbar(deleteSuccessMessage.replace("{n}", "${uris.size}"))
+            }
+            isMultiSelectMode = false
+            selectedImageUris = emptySet()
+        }
+        pendingDeleteUris = null
+        deleteSuccessMessage = "Deleted {n} image(s)"
+    }
+
+    // Favourite confirmation launcher (Android 13+) — marks items the app does
+    // not own through the platform request dialog (the direct IS_FAVORITE write
+    // is rejected for foreign rows).
+    var pendingFavouriteMessage by remember { mutableStateOf("") }
+    val favouriteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            scope.launch {
+                favouriteUris = withContext(Dispatchers.IO) {
+                    FavouriteStore.loadFavouriteUris(context)
+                }
+                snackbarHostState.showSnackbar(pendingFavouriteMessage)
+            }
+        }
+    }
+
+    /**
+     * Remove [uris] from the gallery — RECYCLE BIN FIRST on API 30+ (the system
+     * trash request, recoverable), falling back to a permanent delete on older
+     * APIs or when the trash request cannot be built. [trashTemplate] / 
+     * [directTemplate] are the success messages ({n} = count).
+     */
+    val trashOrDelete: (List<String>, String, String) -> Unit = { uris, trashTemplate, directTemplate ->
+        if (uris.isEmpty()) return@trashOrDelete
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            val trashRequest = FileOperationHelper.createTrashRequest(context, uris)
+            if (trashRequest != null) {
+                pendingDeleteUris = uris
+                deleteSuccessMessage = trashTemplate
+                deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
+                return@trashOrDelete
+            }
+        }
+        scope.launch {
+            val n = FileOperationHelper.deleteMediaDirect(context, uris)
+            viewModel.deleteImages(uris)
+            snackbarHostState.showSnackbar(directTemplate.replace("{n}", "$n"))
             isMultiSelectMode = false
             selectedImageUris = emptySet()
         }
     }
 
-    /** Kick off the system delete flow for the current selection (API 30+) or delete directly (older). */
+    /** Delete the current selection — recycle bin first on API 30+. */
     val performDelete: () -> Unit = {
-        val uris = selectedImageUris.toList()
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            val request = FileOperationHelper.createDeleteRequest(context, uris)
-            if (request != null) {
-                deleteLauncher.launch(IntentSenderRequest.Builder(request).build())
-            } else {
-                scope.launch {
-                    val n = FileOperationHelper.deleteMediaDirect(context, uris)
-                    viewModel.deleteImages(uris)
-                    snackbarHostState.showSnackbar("Deleted $n/${uris.size} image(s)")
-                    isMultiSelectMode = false
-                    selectedImageUris = emptySet()
-                }
-            }
-        } else {
-            scope.launch {
-                val n = FileOperationHelper.deleteMediaDirect(context, uris)
-                viewModel.deleteImages(uris)
-                snackbarHostState.showSnackbar("Deleted $n/${uris.size} image(s)")
-                isMultiSelectMode = false
-                selectedImageUris = emptySet()
-            }
-        }
+        trashOrDelete(
+            selectedImageUris.toList(),
+            "Moved {n} image(s) to the recycle bin",
+            "Deleted {n} image(s) permanently"
+        )
     }
 
     // Collage creation state
@@ -1275,6 +1312,50 @@ fun AlbumScreen(
                             folderBrowserDir = android.os.Environment.getExternalStorageDirectory()
                             showDestinationDialog = true
                         },
+                        onMoveToVault = {
+                            // Move = copy into the vault (no encryption — the vault's
+                            // app-private storage already hides them), then the
+                            // originals leave the gallery (recycle bin first).
+                            val uris = selectedImageUris.toList()
+                            if (uris.isEmpty()) {
+                                // nothing selected — nothing to do
+                            } else {
+                                scope.launch {
+                                    var ok = 0
+                                    var fail = 0
+                                    val importedUris = mutableListOf<String>()
+                                    for (uri in uris) {
+                                        val name = VaultStorage.galleryDisplayName(context, uri)
+                                        val result = withContext(Dispatchers.IO) {
+                                            VaultStorage.importFromGallery(
+                                                context = context,
+                                                uri = uri,
+                                                displayName = name
+                                            )
+                                        }
+                                        if (result) {
+                                            ok++
+                                            importedUris.add(uri)
+                                        } else {
+                                            fail++
+                                        }
+                                    }
+                                    if (ok == 0) {
+                                        snackbarHostState.showSnackbar("Could not move images to the vault")
+                                        return@launch
+                                    }
+                                    // Originals leave the gallery — recycle bin first
+                                    trashOrDelete(
+                                        importedUris,
+                                        "Moved {n} image(s) to the vault",
+                                        "Moved {n} image(s) to the vault"
+                                    )
+                                    if (fail > 0) {
+                                        snackbarHostState.showSnackbar("$fail image(s) failed to copy to the vault")
+                                    }
+                                }
+                            }
+                        },
                         onDelete = {
                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                                 performDelete()
@@ -1300,25 +1381,59 @@ fun AlbumScreen(
                                 val toAdd = contextUris - alreadyFav
                                 if (toAdd.isEmpty() && alreadyFav.isNotEmpty()) {
                                     // All selected are already favourites → unmark them
+                                    var okDirect = 0
+                                    val failed = mutableListOf<String>()
                                     withContext(Dispatchers.IO) {
                                         alreadyFav.forEach {
-                                            FavouriteStore.setFavourite(context, it, false)
+                                            if (FavouriteStore.setFavourite(context, it, false)) okDirect++
+                                            else failed.add(it)
                                         }
                                     }
-                                    favouriteUris = favouriteUris - alreadyFav
-                                    snackbarHostState.showSnackbar(
-                                        "${alreadyFav.size} removed from favourites"
-                                    )
+                                    if (failed.isNotEmpty()) {
+                                        val sender = FavouriteStore.createFavoriteRequest(
+                                            context, failed, false
+                                        )
+                                        if (sender != null) {
+                                            pendingFavouriteMessage = "${failed.size} removed from favourites"
+                                            favouriteLauncher.launch(
+                                                IntentSenderRequest.Builder(sender).build()
+                                            )
+                                        }
+                                    }
+                                    // Reload so the hearts reflect the direct writes
+                                    favouriteUris = withContext(Dispatchers.IO) {
+                                        FavouriteStore.loadFavouriteUris(context)
+                                    }
+                                    if (okDirect > 0) {
+                                        snackbarHostState.showSnackbar("$okDirect removed from favourites")
+                                    }
                                 } else {
+                                    // Mark the not-yet-favourited images
+                                    var okDirect = 0
+                                    val failed = mutableListOf<String>()
                                     withContext(Dispatchers.IO) {
                                         toAdd.forEach {
-                                            FavouriteStore.setFavourite(context, it, true)
+                                            if (FavouriteStore.setFavourite(context, it, true)) okDirect++
+                                            else failed.add(it)
                                         }
                                     }
-                                    favouriteUris = favouriteUris + toAdd
-                                    snackbarHostState.showSnackbar(
-                                        "${toAdd.size} marked as favourite"
-                                    )
+                                    if (failed.isNotEmpty()) {
+                                        val sender = FavouriteStore.createFavoriteRequest(
+                                            context, failed, true
+                                        )
+                                        if (sender != null) {
+                                            pendingFavouriteMessage = "${failed.size} marked as favourite"
+                                            favouriteLauncher.launch(
+                                                IntentSenderRequest.Builder(sender).build()
+                                            )
+                                        }
+                                    }
+                                    favouriteUris = withContext(Dispatchers.IO) {
+                                        FavouriteStore.loadFavouriteUris(context)
+                                    }
+                                    if (okDirect > 0) {
+                                        snackbarHostState.showSnackbar("$okDirect marked as favourite")
+                                    }
                                 }
                             }
                         }
@@ -2084,6 +2199,7 @@ private fun BatchMultiSelectBar(
     onAiEdit: () -> Unit,
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit,
+    onMoveToVault: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -2170,6 +2286,11 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onMoveTo() },
                         text = { Text("Move to…") },
                         leadingIcon = { Icon(Icons.Default.Forward, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onMoveToVault() },
+                        text = { Text("Move to Vault") },
+                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     HorizontalDivider()
                     DropdownMenuItem(

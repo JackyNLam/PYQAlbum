@@ -3,6 +3,7 @@ package com.pyqcr.util
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -35,7 +36,12 @@ object FavouriteStore {
         }
     }
 
-    /** Set (true) or clear (false) the favourite flag. Returns false on failure. */
+    /**
+     * Set (true) or clear (false) the favourite flag by writing IS_FAVORITE
+     * directly. Returns false when the provider rejects the write — the caller
+     * then falls back to the platform [createFavoriteRequest] dialog, which
+     * shows a system prompt the user approves once.
+     */
     fun setFavourite(context: Context, uri: String, favourite: Boolean): Boolean {
         if (!supported) return false
         return try {
@@ -45,6 +51,29 @@ object FavouriteStore {
             context.contentResolver.update(Uri.parse(uri), values, null, null) > 0
         } catch (e: Exception) {
             false
+        }
+    }
+
+    /**
+     * Platform favourite request (Android 13+): shows the system "mark as
+     * favourite?" permission/confirmation dialog for [uris] in ONE prompt —
+     * the reliable path for photos the app does not own, where a direct
+     * IS_FAVORITE write is not allowed. Returns null on older APIs / failure.
+     */
+    fun createFavoriteRequest(
+        context: Context,
+        uris: List<String>,
+        favourite: Boolean
+    ): IntentSender? {
+        if (!supported) return null
+        return try {
+            MediaStore.createFavoriteRequest(
+                context.contentResolver,
+                uris.map { Uri.parse(it) }.toMutableList(),
+                favourite
+            ).intentSender
+        } catch (e: Exception) {
+            null
         }
     }
 

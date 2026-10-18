@@ -33,7 +33,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   7. **Stop button** appears while either run is active — cancels the foreground scoring (per-image, responsive) or the background WorkManager job
   8. No image-count limit — selections of any size are rated (URI list is passed to the background worker via a cache file, sidestepping WorkManager's 10 KiB input-data cap)
   9. Selection persists across app launches (SharedPreferences)
-- **Multi-select mode**: long-press enters multi-select; the bottom bar's ⋮ menu has **Select All / Deselect All** (applies to the current folder or tag view), **Collage**, batch Tag / Rate / **Favourite** / Remove Tags / AI Ranking / Remove AI Info, **Copy to…** and **Move to…** (SAF folder picker to choose destination), and **Delete**
+- **Multi-select mode**: long-press enters multi-select; the bottom bar's ⋮ menu has **Select All / Deselect All** (applies to the current folder or tag view), **Collage**, batch Tag / Rate / **Favourite** / Remove Tags / AI Ranking / Remove AI Info, **Copy to…** and **Move to…** (SAF folder picker to choose destination), **Move to Vault**, and **Delete** — Delete **moves the images to the system recycle bin first** (Android 11+ trash, restorable) instead of deleting permanently
 - **Remove Tags** (multi-select ⋮) lists **only the tags actually present on the selected images** — tags that none of the selected images carry are not offered
 - **Collage**: select ≥2 images → ⋮ → **Collage** — opens an options dialog first: **background color** for empty space (White / Black / Gray / Beige / Light Blue / Pink), **number of columns** (2–5), and **image order** (▲▼ reorder; images flow left-to-right, top-to-bottom). Images are scaled to fit uniform cells on the chosen background and saved to `Pictures/PYQAlbum/collage_<timestamp>.jpg`; all inputs plus the output are auto-tagged with a unique **`Collage <timestamp>`** tag so the set is easy to find and re-edit under the Tag view
 - **Copy**: files are written via ContentResolver stream to the chosen folder (works on all Android versions)
@@ -100,7 +100,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope; the detail-screen AI Ranking toggle feeds the shared selection queue |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
-| `vault` | `VaultScreen` | **Photo Vault**: private storage hidden from other gallery apps — import without a password, optional AES-256-GCM encrypt/decrypt with the vault password, hide/unhide, move out to the gallery |
+| `vault` | `VaultScreen` | **Photo Vault**: private storage hidden from other gallery apps — full-screen folder-filtered import without a password, optional AES-256-GCM encrypt/decrypt with the vault password, move out to the gallery |
 
 ---
 
@@ -124,7 +124,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Edit / AI Rating |
 | **AI Edit** | Via drawer ✏️ |
 | **AI Rating** | Via drawer ✨ |
-| **Multi-select mode** | Batch actions (⋮ menu): Select All / Deselect All / Collage / Tag / Rate / **Favourite** / Remove Tags / AI Ranking / Remove AI Info / Copy to… / Move to… / Delete |
+| **Multi-select mode** | Batch actions (⋮ menu): Select All / Deselect All / Collage / Tag / Rate / **Favourite** / Remove Tags / AI Ranking / Remove AI Info / Copy to… / Move to… / **Move to Vault** / Delete (moves to the **recycle bin** first on Android 11+) |
 | **Select All / Deselect All** (⋮ in multi-select) | Toggles selection of every image in the current folder or tag view |
 | **Collage** (⋮ in multi-select) | Builds a collage from ≥2 selected images; tags inputs + output with a unique `Collage <timestamp>` tag |
 | **Thumbnail rating badge** | Gold number (e.g. `3.5` or `5.0`) at top-left corner of thumbnails with ratings |
@@ -177,7 +177,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - White background, `ContentScale.Fit` keeps original proportions
 - `combinedClickable` with click → detail and long-press → action dialog
 - Multi-select: long-press enters mode, selected images get overlay with ✓ badge
-- Batch actions (⋮ menu): **Select All / Deselect All**, **Collage**, Tag / Rate / **Favourite** / Remove Tags / AI Ranking / Remove AI Info, **Copy to…** / **Move to…** (SAF folder picker), Delete
+- Batch actions (⋮ menu): **Select All / Deselect All**, **Collage**, Tag / Rate / **Favourite** / Remove Tags / AI Ranking / Remove AI Info, **Copy to…** / **Move to…** (SAF folder picker), **Move to Vault**, Delete (recycle bin first on Android 11+)
 - Rating badge: gold number overlay at top-left (only shown for rated images > 0)
 - AI selection badge: ✨ AutoAwesome icon at bottom-right
 
@@ -295,14 +295,13 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 ### Photo Vault
 - **Private area** reached via the left drawer 🔒 **Photo Vault** — files live in app-private storage (`externalFilesDir/vault`), **invisible to other gallery apps** and to the album's own MediaStore-backed views; no password needed to browse
-- **Import from Gallery**: in-app gallery grid picker (multi-select) — each imported image is **copied as-is** (its original bytes: JPEG, PNG, GIF, motion photos…) out of MediaStore into the vault; **no auto-encryption** — entries are visible without a password
+- **Import from Gallery**: **full-screen** in-app gallery grid picker with a **folder filter** (chips row: "All folders" + each gallery folder) — each imported image is **copied as-is** (its original bytes: JPEG, PNG, GIF, motion photos…) out of MediaStore into the vault; **no auto-encryption** — entries are visible without a password
 - **Encrypt** (viewer action): protects one entry with **AES-256-GCM** (per-file random salt, key derived from the vault password via PBKDF2). The first Encrypt asks you to **set the vault password**; afterwards the password is re-entered to view/decrypt encrypted entries. Encrypted entries show a 🔒 tile instead of a preview
 - **Decrypt** (viewer action): removes the password protection back to a plaintext entry (requires the vault password)
 - **Move out** (viewer action): exports the entry back to the gallery (`Pictures/PYQAlbum` via MediaStore) and removes the vault copy — encrypted entries must be unlocked first
-- **Hide/Unhide**: every entry can be hidden — hidden entries disappear from the grid until the "Show hidden" toggle is on; view an entry to toggle Hide/Unhide (🙈 badge on hidden tiles)
 - **View**: tap a plaintext entry to view it directly; GIFs/animated WebP play through Coil and motion photos get a ▶ "Motion photo" chip; tap an encrypted entry to be asked for the vault password first
 - **Delete**: removes the entry from the vault (irreversible)
-- Summary line shows "N in vault · N encrypted · N hidden (N shown)"
+- Summary line shows "N in vault · N encrypted"
 
 ### Tag/Rating Assignment
 - **Long-press dialog** shows existing tags as selectable buttons before offering a "create new" option

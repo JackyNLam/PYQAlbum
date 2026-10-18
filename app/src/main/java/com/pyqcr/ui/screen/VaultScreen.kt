@@ -13,6 +13,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -58,7 +62,6 @@ import java.security.SecureRandom
  *   apps and to the album's own MediaStore-backed views).
  * - Optionally encrypt each entry with AES-256-GCM using a key derived from
  *   the vault password (PBKDF2) — without the password the file is useless.
- * - Hide/unhide entries; hidden ones only appear after toggling "Show hidden".
  *
  * Layout:
  *   vault/
@@ -79,13 +82,14 @@ fun VaultScreen(onBack: () -> Unit) {
 
     // Vault state
     var entries by remember { mutableStateOf<List<VaultEntry>>(emptyList()) }
-    var showHidden by remember { mutableStateOf(false) }
     var galleryImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
     var importing by remember { mutableStateOf(false) }
 
     // Import picker state
     var showImportPicker by remember { mutableStateOf(false) }
     var importSelection by remember { mutableStateOf(setOf<String>()) }
+    // Folder filter for the import picker (null = all folders)
+    var importFolderFilter by remember { mutableStateOf<String?>(null) }
 
     // Viewer state
     var viewingEntry by remember { mutableStateOf<VaultEntry?>(null) }
@@ -250,6 +254,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                 onClick = {
                                     showImportPicker = true
                                     importSelection = emptySet()
+                                    importFolderFilter = null
                                 },
                                 enabled = !importing
                             ) {
@@ -261,30 +266,18 @@ fun VaultScreen(onBack: () -> Unit) {
                                 Spacer(Modifier.width(6.dp))
                                 Text("Import from Gallery")
                             }
-                            Spacer(Modifier.weight(1f))
-                            FilterChip(
-                                selected = showHidden,
-                                onClick = { showHidden = !showHidden },
-                                label = { Text("Show hidden") }
-                            )
                         }
 
-                        val visibleEntries = remember(entries, showHidden) {
-                            if (showHidden) entries
-                            else entries.filter { !it.hidden }
-                        }
-                        val hiddenCount = entries.count { it.hidden }
                         val encryptedCount = entries.count { it.encrypted }
 
                         Text(
-                            text = "${entries.size} in vault · $encryptedCount encrypted · " +
-                                "$hiddenCount hidden (${visibleEntries.size} shown)",
+                            text = "${entries.size} in vault · $encryptedCount encrypted",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp)
                         )
 
-                        if (visibleEntries.isEmpty()) {
+                        if (entries.isEmpty()) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -293,23 +286,19 @@ fun VaultScreen(onBack: () -> Unit) {
                             ) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text(
-                                        text = if (entries.isEmpty())
-                                            "No images in the vault yet"
-                                        else "No visible entries — toggle \"Show hidden\"",
+                                        text = "No images in the vault yet",
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                     Spacer(Modifier.height(8.dp))
-                                    if (entries.isEmpty()) {
-                                        Text(
-                                            text = "Import copies from your gallery into this " +
-                                                "private area (hidden from other apps — encrypt later if you want).",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            textAlign = TextAlign.Center,
-                                            modifier = Modifier.padding(horizontal = 32.dp)
-                                        )
-                                    }
+                                    Text(
+                                        text = "Import copies from your gallery into this " +
+                                            "private area (hidden from other apps — encrypt later if you want).",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.padding(horizontal = 32.dp)
+                                    )
                                 }
                             }
                         } else {
@@ -323,7 +312,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                     .weight(1f)
                                     .background(Color.White)
                             ) {
-                                gridItems(visibleEntries, key = { it.id }) { entry ->
+                                gridItems(entries, key = { it.id }) { entry ->
                                     VaultCell(
                                         entry = entry,
                                         previewPath = if (entry.encrypted) null
@@ -337,22 +326,75 @@ fun VaultScreen(onBack: () -> Unit) {
         }
     }
 
-    // ===================== Import picker dialog =====================
+    // ===================== Import picker dialog (full-screen, folder filter) =====================
     if (showImportPicker) {
-        AlertDialog(
+        // Distinct gallery folders for the filter row ("All folders" + each folder)
+        val folders = remember(galleryImages) {
+            galleryImages.map { it.folderName }
+                .filter { !it.isNullOrBlank() }
+                .distinct()
+                .sorted()
+        }
+        val filteredImages = remember(galleryImages, importFolderFilter) {
+            if (importFolderFilter == null) galleryImages
+            else galleryImages.filter { it.folderName == importFolderFilter }
+        }
+        Dialog(
             onDismissRequest = { showImportPicker = false },
-            title = { Text("Import ${importSelection.size} image(s)") },
-            text = {
-                Column {
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp)
+                ) {
+                    // Header
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Import to Photo Vault",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { showImportPicker = false }) {
+                            Icon(Icons.Default.Close, contentDescription = "Close")
+                        }
+                    }
                     Text(
-                        text = "Images are copied as-is into the vault's app-private " +
-                            "storage — no password needed, and other gallery apps " +
-                            "cannot see them. Password-protect individual images later " +
-                            "with the Encrypt action in the viewer.",
+                        text = "Copied as-is into app-private storage — no password needed, " +
+                            "and hidden from other gallery apps. Encrypt later from the viewer " +
+                            "if you want password protection.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(8.dp))
+                    // Folder filter chips
+                    if (folders.isNotEmpty()) {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            contentPadding = PaddingValues(horizontal = 2.dp)
+                        ) {
+                            item {
+                                FilterChip(
+                                    selected = importFolderFilter == null,
+                                    onClick = { importFolderFilter = null },
+                                    label = { Text("All folders") }
+                                )
+                            }
+                            items(folders) { folder ->
+                                FilterChip(
+                                    selected = importFolderFilter == folder,
+                                    onClick = { importFolderFilter = folder },
+                                    label = { Text(folder) }
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    // Grid fills the remaining screen height
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(4),
                         contentPadding = PaddingValues(2.dp),
@@ -360,10 +402,10 @@ fun VaultScreen(onBack: () -> Unit) {
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 320.dp)
+                            .weight(1f)
                             .background(Color.Black)
                     ) {
-                        gridItems(galleryImages, key = { it.uri }) { image ->
+                        gridItems(filteredImages, key = { it.uri }) { image ->
                             val selected = image.uri in importSelection
                             Box(
                                 modifier = Modifier
@@ -398,48 +440,58 @@ fun VaultScreen(onBack: () -> Unit) {
                             }
                         }
                     }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        importing = true
-                        scope.launch {
-                            var ok = 0
-                            var fail = 0
-                            for (uri in importSelection) {
-                                val name = VaultStorage.galleryDisplayName(context, uri)
-                                val result = withContext(Dispatchers.IO) {
-                                    VaultStorage.importFromGallery(
-                                        context = context,
-                                        uri = uri,
-                                        displayName = name
-                                    )
-                                }
-                                if (result) ok++ else fail++
-                            }
-                            importing = false
-                            showImportPicker = false
-                            refreshEntries()
-                            Toast.makeText(
-                                context,
-                                if (fail == 0) "Imported $ok image(s) to the vault"
-                                else "Imported $ok, $fail failed",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                    // Footer: selection count + actions
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${importSelection.size} selected",
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { showImportPicker = false }) {
+                            Text("Cancel")
                         }
-                    },
-                    enabled = importSelection.isNotEmpty() && !importing
-                ) {
-                    Text(if (importing) "Importing…" else "Import")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showImportPicker = false }) {
-                    Text("Cancel")
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                importing = true
+                                scope.launch {
+                                    var ok = 0
+                                    var fail = 0
+                                    for (uri in importSelection) {
+                                        val name = VaultStorage.galleryDisplayName(context, uri)
+                                        val result = withContext(Dispatchers.IO) {
+                                            VaultStorage.importFromGallery(
+                                                context = context,
+                                                uri = uri,
+                                                displayName = name
+                                            )
+                                        }
+                                        if (result) ok++ else fail++
+                                    }
+                                    importing = false
+                                    showImportPicker = false
+                                    refreshEntries()
+                                    Toast.makeText(
+                                        context,
+                                        if (fail == 0) "Imported $ok image(s) to the vault"
+                                        else "Imported $ok, $fail failed",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            enabled = importSelection.isNotEmpty() && !importing
+                        ) {
+                            Text(if (importing) "Importing…" else "Import")
+                        }
+                    }
                 }
             }
-        )
+        }
     }
 
     // Motion-photo detection: when a view path resolves, look for an embedded
@@ -524,35 +576,17 @@ fun VaultScreen(onBack: () -> Unit) {
                         CircularProgressIndicator()
                     }
                     Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (entry.encrypted) {
-                            Text(
-                                text = "🔒 Encrypted",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (entry.hidden) {
-                            Text(
-                                text = "🙈 Hidden",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                    if (entry.encrypted) {
+                        Text(
+                            text = "🔒 Encrypted",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             },
             confirmButton = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = {
-                        VaultStorage.setHidden(context, entry, !entry.hidden)
-                        refreshEntries()
-                        viewingEntry = null
-                        viewPath = null
-                        viewError = null
-                    }) {
-                        Text(if (entry.hidden) "Unhide" else "Hide")
-                    }
                     if (!entry.encrypted) {
                         // Password-protect this entry (first Encrypt sets the password)
                         TextButton(onClick = {
@@ -800,20 +834,6 @@ private fun VaultCell(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-        }
-        // Hidden badge
-        if (entry.hidden) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .background(Color(0xCC000000), RoundedCornerShape(2.dp))
-                    .padding(horizontal = 3.dp, vertical = 1.dp)
-            ) {
-                Text(
-                    text = "🙈",
-                    fontSize = MaterialTheme.typography.labelSmall.fontSize
-                )
-            }
         }
     }
 }

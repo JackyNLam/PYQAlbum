@@ -2,6 +2,9 @@ package com.pyqcr.ui.screen
 
 import android.content.Context
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -133,6 +136,23 @@ fun ImageDetailScreen(
     var showAiEditRoleDialog by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // Favourite fallback: when the direct IS_FAVORITE write is rejected (foreign
+    // row the app does not own), the platform favourite-request dialog takes
+    // over — a system prompt the user approves once.
+    var pendingFavouriteValue by remember { mutableStateOf(false) }
+    val favouriteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            isFavourite = pendingFavouriteValue
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar(
+                    if (pendingFavouriteValue) "Marked as favourite" else "Removed from favourites"
+                )
+            }
+        }
+    }
+
     // Toggle this image in/out of the AI Ranking queue (same as batch menu's
     // "AI Ranking" item) — feedback mirrors the batch menu snackbar.
     val toggleAiRanking: () -> Unit = {
@@ -162,7 +182,17 @@ fun ImageDetailScreen(
                         if (newValue) "Marked as favourite" else "Removed from favourites"
                     )
                 } else {
-                    snackbarHostState.showSnackbar("Could not update favourite")
+                    // Direct write rejected (row the app does not own) — hand the
+                    // toggle over to the platform favourite-request dialog.
+                    val sender = FavouriteStore.createFavoriteRequest(
+                        context, listOf(imageUri), newValue
+                    )
+                    if (sender != null) {
+                        pendingFavouriteValue = newValue
+                        favouriteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                    } else {
+                        snackbarHostState.showSnackbar("Could not update favourite")
+                    }
                 }
             }
         }
