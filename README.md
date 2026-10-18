@@ -14,7 +14,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - **Grid**: 3 columns, square thumbnails (1:1 aspect ratio)
   - **Waterfall (River)**: 3 columns, Pinterest-style staggered heights
   - **Justified Grid**: 3 images per row, fixed height (120dp), dynamic width proportional to aspect ratio
-- **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Edit, AI Rating, Photo Vault
+- **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Edit, AI Rating, Photo Vault, Recycle Bin
 - **Click thumbnail** → full-screen detail view (safe null handling, no crash)
 - **Long-press** → enters multi-select mode directly (no intermediate dialog); bottom bar shows selected count, action menu (⋮), and Cancel
 - **Sort inside a folder**: Use the Sort (↕) button in the toolbar — every criterion offers both directions:
@@ -33,13 +33,13 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   7. **Stop button** appears while either run is active — cancels the foreground scoring (per-image, responsive) or the background WorkManager job
   8. No image-count limit — selections of any size are rated (URI list is passed to the background worker via a cache file, sidestepping WorkManager's 10 KiB input-data cap)
   9. Selection persists across app launches (SharedPreferences)
-- **Multi-select mode**: long-press enters multi-select; the bottom bar's ⋮ menu has **Select All / Deselect All** (applies to the current folder or tag view), **Collage**, batch Tag / Rate / **Favourite** / Remove Tags / AI Ranking / Remove AI Info, **Copy to…** and **Move to…** (SAF folder picker to choose destination), **Move to Vault**, and **Delete** — Delete **moves the images to the system recycle bin first** (Android 11+ trash, restorable) instead of deleting permanently
+- **Multi-select mode**: long-press enters multi-select; the bottom bar's ⋮ menu has **Select All / Deselect All** (applies to the current folder or tag view), **Collage**, batch Tag / Rate / **Favourite** / Remove Tags / **AI Ranking** (one merged button: queues the images for AI rating AND clears their stale AI info so they get re-ranked), **Copy to…** and **Move to…** (in-app folder browser), **Move to Vault**, and **Delete** — Delete **moves the images to the system recycle bin first** (Android 11+ trash, restorable) instead of deleting permanently; the recycle bin itself is browsable from the left drawer (per-image **Restore** via the system recovery request)
 - **Remove Tags** (multi-select ⋮) lists **only the tags actually present on the selected images** — tags that none of the selected images carry are not offered
 - **Collage**: select ≥2 images → ⋮ → **Collage** — opens an options dialog first: **background color** for empty space (White / Black / Gray / Beige / Light Blue / Pink), **number of columns** (2–5), and **image order** (▲▼ reorder; images flow left-to-right, top-to-bottom). Images are scaled to fit uniform cells on the chosen background and saved to `Pictures/PYQAlbum/collage_<timestamp>.jpg`; all inputs plus the output are auto-tagged with a unique **`Collage <timestamp>`** tag so the set is easy to find and re-edit under the Tag view
 - **Copy**: files are written via ContentResolver stream to the chosen folder (works on all Android versions)
 - **Move**: real file move — same-volume moves use `File.renameTo` (instant, preserves the modified date); cross-volume / content-only URIs fall back to copy + restore the modified date + delete the source (API 30+ uses a recoverable delete request)
 - **Default destination**: `Pictures/PYQAlbum/` (fallback if external folder can't be resolved)
-- **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** rating, tags, and AI selection panel; **swipe left/right** to navigate to next/previous image in the same folder/tag
+- **Full-screen image**: Tap image to toggle controls; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** rating, tags, AI toggles and the full batch-action set (Resize / Copy / Move / Move to Vault / Delete — the same operations as the album batch ⋮ menu); **swipe left/right** to navigate to next/previous image in the same folder/tag
 - **Zoom & pan** (detail view): pinch (or double-tap) to zoom up to 5x; while zoomed, drag to pan — the image tracks the finger 1:1 at any zoom level and is clamped so it can never be dragged out of view
 - **Animated images**: GIF and animated WebP play inline (Coil `coil-gif`); **motion photos** (JPEG with an embedded MP4, e.g. Pixel / Samsung "moving photo") show a ▶ button that plays the embedded video loop
 - **AI-selected images** are marked with an ✨ AutoAwesome icon badge in all grid layouts (Grid, Waterfall, Justified) and TAG grid view
@@ -100,7 +100,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope; the detail-screen AI Ranking toggle feeds the shared selection queue |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
-| `vault` | `VaultScreen` | **Photo Vault**: private storage hidden from other gallery apps — full-screen folder-filtered import without a password, optional AES-256-GCM encrypt/decrypt with the vault password, move out to the gallery |
+| `vault` | `VaultScreen` | **Photo Vault**: private storage hidden from other gallery apps — full-screen folder-filtered **Move from Gallery** (the originals go to the system recycle bin), optional AES-256-GCM encrypt/decrypt with the vault password, move out to the gallery |
 
 ---
 
@@ -108,7 +108,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 | Action | Result |
 |--------|--------|
-| **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Edit / AI Rating / Photo Vault |
+| **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Edit / AI Rating / Photo Vault / Recycle Bin |
 | **Tap folder card** (Folder mode) | Enter folder to see images in selected layout (folder cards show image count, sortable by modified date / count / name) |
 | **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Ranking (toggle) |
@@ -124,7 +124,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Edit / AI Rating |
 | **AI Edit** | Via drawer ✏️ |
 | **AI Rating** | Via drawer ✨ |
-| **Multi-select mode** | Batch actions (⋮ menu): Select All / Deselect All / Collage / Tag / Rate / **Favourite** / Remove Tags / AI Ranking / Remove AI Info / Copy to… / Move to… / **Move to Vault** / Delete (moves to the **recycle bin** first on Android 11+) |
+| **Multi-select mode** | Batch actions (⋮ menu): Select All / Deselect All / Collage / Tag / Rate / **Favourite** / Remove Tags / **AI Ranking** (queues + clears stale AI info) / Copy to… / Move to… / **Move to Vault** / Delete (recycle bin first on Android 11+) |
 | **Select All / Deselect All** (⋮ in multi-select) | Toggles selection of every image in the current folder or tag view |
 | **Collage** (⋮ in multi-select) | Builds a collage from ≥2 selected images; tags inputs + output with a unique `Collage <timestamp>` tag |
 | **Thumbnail rating badge** | Gold number (e.g. `3.5` or `5.0`) at top-left corner of thumbnails with ratings |
@@ -143,6 +143,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 #### Tag mode
 - Grid of tag cards — tap a tag to see all images with that tag
+- A **Favourite** card at the top of the tag list opens the MediaStore favourites (Android 13+ `IS_FAVORITE` flag) as a pseudo-tag browse view
 - Tap **All Tags** back button to return to tag list
 - Tags are assigned via long-press → **Add Tag** action
 - Existing tags are shown as selectable options when adding a tag
@@ -177,7 +178,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - White background, `ContentScale.Fit` keeps original proportions
 - `combinedClickable` with click → detail and long-press → action dialog
 - Multi-select: long-press enters mode, selected images get overlay with ✓ badge
-- Batch actions (⋮ menu): **Select All / Deselect All**, **Collage**, Tag / Rate / **Favourite** / Remove Tags / AI Ranking / Remove AI Info, **Copy to…** / **Move to…** (SAF folder picker), **Move to Vault**, Delete (recycle bin first on Android 11+)
+- Batch actions (⋮ menu): **Select All / Deselect All**, **Collage**, Tag / Rate / **Favourite** / Remove Tags / **AI Ranking** (one button — adds to the rating queue and clears stale AI info), **Copy to…** / **Move to…** (in-app folder browser), **Move to Vault**, Delete (recycle bin first on Android 11+)
 - Rating badge: gold number overlay at top-left (only shown for rated images > 0)
 - AI selection badge: ✨ AutoAwesome icon at bottom-right
 
@@ -202,13 +203,18 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - **AI Ranking** — toggles this image in/out of the AI Rating selection queue (✓ shows it's queued; run the rating from the drawer ✨ AI Rating)
   - **AI Edit** — opens a role dialog (**As AI Edit source / As AI Edit target**, tap again to remove) that toggles the image in the AI Edit queue, exactly like the batch menu's AI Edit dialog
   - **Mark as Favourite** — sets/unset the Android 13+ MediaStore `IS_FAVORITE` flag so other apps (WeChat, Google Photos) can identify the image
+- **More Actions** (below the Favourite button — the rest of the album batch ⋮ menu applied to this single image):
+  - **Resize** — the same options dialog as the batch menu (width 500/1000/2000/custom; replace original or save a `_resized` copy)
+  - **Copy** / **Move** — in-app folder browser (+ optional SAF picker); a move re-maps the image's tags to the new MediaStore URI and drops the original via the recycle bin
+  - **Vault** — copies the image into the photo vault, then sends the original to the recycle bin
+  - **Delete** — recycle bin first on Android 11+, permanent on older APIs
 - **Swipe left** → next image in same folder/tag
 - **Swipe right** → previous image in same folder/tag
 - **Tap on image** (when panel is hidden) to toggle top bar
 - **Swipe down on the detail panel itself** to hide it again
 - **Zoom & pan**: pinch or double-tap to zoom up to 5x; single-finger drag pans and **tracks the finger 1:1 at any zoom** (pointer deltas are multiplied by the layer scale — without this, high-DPI screens moved the image far less than the finger), and the pan is **clamped to the ContentScale.Fit bounds** so the zoomed image can't be flung out of view
 - **GIF / animated WebP**: play automatically (Coil `coil-gif` decoder registered in `PyqCrApp.newImageLoader`)
-- **Motion photos** (moving photos — JPEG with an embedded MP4, e.g. Google Pixel / Samsung): a ▶ "Motion photo" chip appears; tapping it extracts the embedded video (`MotionPhotoExtractor` scans for the MP4 `ftyp` box) and plays it as a looping video over the still frame, with a ✕ Close button
+- **Motion photos** (moving photos — JPEG with an embedded MP4, e.g. Google Pixel / Samsung): a ▶ "Motion photo" chip appears; tapping it extracts the embedded video (`MotionPhotoExtractor` validates the MP4 `ftyp` box and probes the result with `MediaMetadataRetriever`, so EXIF false positives are skipped) and plays it as a looping video over the still frame — the player automatically retries once on a transient decode error, with a ✕ Close button
 
 ### AI Rating Screen
 - **Single unified view** — no separate selection step
@@ -227,6 +233,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - Tap any thumbnail to deselect it
   - "Select All" / "Deselect All" toggle
 - **Submit to AI Rating** button — runs the full pipeline: resize → API call → save scores
+  - Resize is OOM-safe and never drops an image on its own: huge files skip the full byte-array read, decode falls back through bounds/sampled/stream paths, and as a last resort the **original bytes are sent** so the image still reaches the AI API
 - **Real-time progress tracking** — shows:
   - Resizing progress per image (`Resizing (3/10): IMG_123.jpg`)
   - AI batch progress (`AI Rating in progress — batch 2/3 (17/25 images processed)`)

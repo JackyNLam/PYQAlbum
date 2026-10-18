@@ -1,7 +1,9 @@
 package com.pyqcr.ui.screen
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.os.Environment
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -14,16 +16,13 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -40,6 +39,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
@@ -53,6 +53,7 @@ import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.MotionPhotoPlayer
 import com.pyqcr.ui.component.RatingBar
 import com.pyqcr.ui.component.TagChip
+import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.MotionPhotoExtractor
 import kotlinx.coroutines.Dispatchers
@@ -143,9 +144,13 @@ fun ImageDetailScreen(
     val favouriteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            isFavourite = pendingFavouriteValue
-            coroutineScope.launch {
+        coroutineScope.launch {
+            // Re-read the real flag on ANY result — some ROMs report
+            // RESULT_CANCELED even though the platform dialog applied it.
+            isFavourite = withContext(Dispatchers.IO) {
+                FavouriteStore.isFavourite(context, imageUri)
+            }
+            if (result.resultCode == android.app.Activity.RESULT_OK) {
                 snackbarHostState.showSnackbar(
                     if (pendingFavouriteValue) "Marked as favourite" else "Removed from favourites"
                 )
@@ -236,6 +241,147 @@ fun ImageDetailScreen(
                 coroutineScope.launch { snackbarHostState.showSnackbar("Added as AI Edit target") }
             }
         }
+    }
+
+    // ---- Batch-menu actions on the swipe-up panel ----
+    // The same operations the album's batch ⋮ menu offers, applied to this
+    // single image: resize / copy / move / move-to-vault / delete.
+
+    var showResizeDialog by remember { mutableStateOf(false) }
+    var destinationDialogOp by remember { mutableStateOf("copy") }
+    var folderBrowserDir by remember { mutableStateOf<File?>(null) }
+    var showDestinationDialog by remember { mutableStateOf(false) }
+    var showFullAccessDialog by remember { mutableStateOf(false) }
+    var targetFolderForOperation by remember { mutableStateOf<File?>(null) }
+    var selectedTreeUri by remember { mutableStateOf<Uri?>(null) }
+
+    // System trash/delete confirmation (API 30+); on success refresh the album
+    // DB and leave the detail screen (the image no longer exists).
+    var pendingDeleteUris by remember { mutableStateOf<List<String>?>(null) }
+    var pendingDeleteMessage by remember { mutableStateOf("") }
+    val deleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK && pendingDeleteUris != null) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar(pendingDeleteMessage)
+                withContext(Dispatchers.IO) {
+                    repository.refreshImagesFromMediaStore()
+                }
+                onBack()
+            }
+        }
+        pendingDeleteUris = null
+    }
+
+    /**
+     * Send [uris] to the recycle bin first (system trash request, API 30+),
+     * falling back to a permanent direct delete on older APIs. Mirrors the
+     * album batch menu's trashOrDelete.
+     */
+    val trashUris: (List<String>, String, String) -> Unit = { uris, trashMsg, directMsg ->
+        val deleteDirectly: () -> Unit = {
+            coroutineScope.launch {
+                FileOperationHelper.deleteMediaDirect(context, uris)
+                snackbarHostState.showSnackbar(directMsg)
+                withContext(Dispatchers.IO) {
+                    repository.refreshImagesFromMediaStore()
+                }
+                onBack()
+            }
+        }
+        if (uris.isNotEmpty()) {
+            val trashRequest = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                FileOperationHelper.createTrashRequest(context, uris)
+            } else {
+                null
+            }
+            if (trashRequest != null) {
+                pendingDeleteUris = uris
+                pendingDeleteMessage = trashMsg
+                deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
+            } else {
+                deleteDirectly()
+            }
+        }
+    }
+
+    /**
+     * Copy/move this image through the in-app folder browser (or the SAF tree
+     * picker); moves re-map tag cross-refs and then drop the gallery originals
+     * via the recycle-bin path.
+     */
+    val launchCopyMove: (String, List<String>, File?, Uri?) -> Unit = { op, uris, destDir, treeUri ->
+        coroutineScope.launch {
+            val results = withContext(Dispatchers.IO) {
+                if (op == "move") {
+                    FileOperationHelper.batchMoveViaFiles(context, uris, destDir, treeUri)
+                } else {
+                    FileOperationHelper.batchCopyViaFiles(context, uris, destDir, treeUri)
+                }
+            }
+            val ok = results.count { it.second.success }
+            val failed = results.size - ok
+            val needTrash = results.filter { it.second.sourceNeedsDeletion }.map { it.first }
+            snackbarHostState.showSnackbar(
+                if (op == "move") {
+                    if (failed == 0) "Moved $ok image(s)" else "Moved $ok, $failed failed"
+                } else {
+                    if (failed == 0) "Copied $ok image(s)" else "Copied $ok, $failed failed"
+                }
+            )
+            if (op == "move") {
+                // Re-point the tag cross-refs at the new MediaStore URIs (tags
+                // are keyed by URI — a move must remap them).
+                withContext(Dispatchers.IO) {
+                    for ((sourceUri, result) in results) {
+                        if (result.success) {
+                            val newUri = FileOperationHelper.resolveNewImageUri(
+                                context, result.destination ?: "", treeUri
+                            )
+                            if (newUri != null && newUri != sourceUri) {
+                                tagDao.moveImageCrossRef(sourceUri, newUri)
+                            }
+                        }
+                    }
+                }
+                if (needTrash.isNotEmpty()) {
+                    trashUris(needTrash, "Moved image(s)", "Moved image(s)")
+                } else {
+                    withContext(Dispatchers.IO) {
+                        repository.refreshImagesFromMediaStore()
+                    }
+                    onBack()
+                }
+            } else {
+                withContext(Dispatchers.IO) {
+                    repository.refreshImagesFromMediaStore()
+                }
+            }
+        }
+    }
+
+    /** Proceed with the pending copy/move after the All-files-access flow. */
+    val continueCopyMove: () -> Unit = {
+        showFullAccessDialog = false
+        launchCopyMove(destinationDialogOp, listOf(imageUri), targetFolderForOperation, selectedTreeUri)
+    }
+
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            selectedTreeUri = uri
+            val destDir = resolveTreeUriToPath(uri)
+            targetFolderForOperation = destDir
+            launchCopyMove(destinationDialogOp, listOf(imageUri), destDir, uri)
+        }
+    }
+
+    val fullAccessLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        continueCopyMove()
     }
 
     /**
@@ -796,6 +942,112 @@ fun ImageDetailScreen(
                         Text(if (isFavourite) "Favourite ✓ (visible in other apps)" else "Mark as Favourite")
                     }
 
+                    Spacer(Modifier.height(16.dp))
+
+                    // ====== More actions (same as the album's batch select menu) ======
+                    Text(
+                        text = "More Actions",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { showResizeDialog = true },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.PhotoSizeSelectLarge,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Resize")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                destinationDialogOp = "copy"
+                                folderBrowserDir = Environment.getExternalStorageDirectory()
+                                showDestinationDialog = true
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.SaveAlt,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Copy")
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                destinationDialogOp = "move"
+                                folderBrowserDir = Environment.getExternalStorageDirectory()
+                                showDestinationDialog = true
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.Forward,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Move")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                coroutineScope.launch {
+                                    val name = VaultStorage.galleryDisplayName(context, imageUri)
+                                    val imported = withContext(Dispatchers.IO) {
+                                        VaultStorage.importFromGallery(context, imageUri, name)
+                                    }
+                                    if (imported) {
+                                        trashUris(listOf(imageUri), "Moved to photo vault", "Moved to photo vault")
+                                    } else {
+                                        snackbarHostState.showSnackbar("Could not move to the vault")
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Vault")
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            trashUris(listOf(imageUri), "Moved to the recycle bin", "Deleted permanently")
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Delete")
+                    }
+
                     // AI Edit role dialog — same source/target roles as the batch menu
                     if (showAiEditRoleDialog) {
                         AlertDialog(
@@ -819,6 +1071,170 @@ fun ImageDetailScreen(
                                 TextButton(onClick = { toggleAiEditRole(false) }) {
                                     Text(if (aiEditTarget) "Remove as target" else "As AI Edit target")
                                 }
+                            }
+                        )
+                    }
+
+                    // Batch-style dialogs for the single image: resize options
+                    // and the in-app copy/move folder browser (same as the
+                    // album's batch menu).
+                    if (showResizeDialog) {
+                        ResizeOptionsDialog(
+                            imageCount = 1,
+                            onDismiss = { showResizeDialog = false },
+                            onConfirm = { targetWidth, saveMode ->
+                                showResizeDialog = false
+                                coroutineScope.launch {
+                                    val ok = withContext(Dispatchers.IO) {
+                                        resizeSingleImageToWidth(context, imageUri, targetWidth, saveMode)
+                                    }
+                                    if (ok) {
+                                        snackbarHostState.showSnackbar("Resized to ${targetWidth}px wide")
+                                    } else {
+                                        snackbarHostState.showSnackbar("Resize failed")
+                                    }
+                                    if (saveMode == "suffix") {
+                                        withContext(Dispatchers.IO) {
+                                            repository.refreshImagesFromMediaStore()
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
+
+                    if (showDestinationDialog) {
+                        val currentDir = folderBrowserDir ?: Environment.getExternalStorageDirectory()
+                        val isCopy = destinationDialogOp == "copy"
+                        val isRoot = currentDir == Environment.getExternalStorageDirectory()
+                        val subDirs = remember(currentDir) {
+                            currentDir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }
+                                ?.sortedBy { it.name.lowercase() }
+                                ?: emptyList()
+                        }
+                        AlertDialog(
+                            onDismissRequest = { showDestinationDialog = false },
+                            title = { Text(if (isCopy) "Copy to..." else "Move to...") },
+                            text = {
+                                Column {
+                                    Text(
+                                        text = currentDir.absolutePath,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                                    LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
+                                        if (!isRoot) {
+                                            item {
+                                                TextButton(
+                                                    onClick = { folderBrowserDir = currentDir.parentFile },
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.ArrowUpward,
+                                                        contentDescription = "Parent folder",
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                    Spacer(Modifier.width(8.dp))
+                                                    Text("..", modifier = Modifier.fillMaxWidth())
+                                                }
+                                            }
+                                        }
+                                        items(subDirs.size) { i ->
+                                            val dir = subDirs[i]
+                                            TextButton(
+                                                onClick = { folderBrowserDir = dir },
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Folder,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(dir.name, modifier = Modifier.fillMaxWidth())
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            showDestinationDialog = false
+                                            folderPickerLauncher.launch(null)
+                                        },
+                                        modifier = Modifier.height(36.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.FolderOpen,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("System", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                    Spacer(Modifier.weight(1f))
+                                    TextButton(onClick = { showDestinationDialog = false }) {
+                                        Text("Cancel")
+                                    }
+                                    TextButton(onClick = {
+                                        showDestinationDialog = false
+                                        val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+                                                !android.os.Environment.isExternalStorageManager() &&
+                                                !FileOperationHelper.isStandardMediaCollection(currentDir)
+                                        if (needFullAccess) {
+                                            targetFolderForOperation = currentDir
+                                            selectedTreeUri = null
+                                            showFullAccessDialog = true
+                                        } else {
+                                            launchCopyMove(destinationDialogOp, listOf(imageUri), currentDir, null)
+                                        }
+                                    }) {
+                                        Text("Select folder")
+                                    }
+                                }
+                            }
+                        )
+                    }
+
+                    if (showFullAccessDialog) {
+                        AlertDialog(
+                            onDismissRequest = { continueCopyMove() },
+                            title = { Text("Copy/Move to any folder?") },
+                            text = {
+                                Text(
+                                    "The chosen folder sits outside Android's media folders, which " +
+                                        "normal apps cannot write to directly. Granting \"All files access\" " +
+                                        "lets the app copy/move into ANY folder on this phone.\n\n" +
+                                        "Android will open a settings screen — enable the switch there, " +
+                                        "then the copy/move starts automatically."
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    showFullAccessDialog = false
+                                    try {
+                                        fullAccessLauncher.launch(
+                                            Intent(
+                                                android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                                Uri.parse("package:${context.packageName}")
+                                            )
+                                        )
+                                    } catch (e: Exception) {
+                                        continueCopyMove()
+                                    }
+                                }) { Text("Grant access") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { continueCopyMove() }) { Text("Later") }
                             }
                         )
                     }

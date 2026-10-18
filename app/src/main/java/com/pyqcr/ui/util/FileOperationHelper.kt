@@ -593,6 +593,22 @@ object FileOperationHelper {
     }
 
     /**
+     * Build a single system RECOVERY request for a batch of trashed images
+     * (API 30+): the user confirms once and the images are restored from the
+     * recycle bin back into the gallery. Returns null on older APIs / failure.
+     */
+    fun createRecoveryRequest(context: Context, uris: List<String>): IntentSender? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            val contentUris = uris.map { Uri.parse(it) }
+            MediaStore.createRecoveryRequest(context.contentResolver, contentUris).intentSender
+        } catch (e: Exception) {
+            Log.w(TAG, "createRecoveryRequest failed", e)
+            null
+        }
+    }
+
+    /**
      * Directly delete images on API < 30 (no system confirmation dialog available).
      * Returns the number successfully deleted.
      */

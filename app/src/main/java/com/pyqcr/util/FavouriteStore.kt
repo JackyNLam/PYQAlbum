@@ -48,7 +48,12 @@ object FavouriteStore {
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.IS_FAVORITE, if (favourite) 1 else 0)
             }
-            context.contentResolver.update(Uri.parse(uri), values, null, null) > 0
+            val updated = context.contentResolver.update(Uri.parse(uri), values, null, null) > 0
+            // Some providers report a successful update without persisting the
+            // flag on rows the app does not own — verify the column actually
+            // changed so the caller falls back to the platform request dialog
+            // (createFavoriteRequest) instead of silently "succeeding".
+            updated && isFavourite(context, uri) == favourite
         } catch (e: Exception) {
             false
         }

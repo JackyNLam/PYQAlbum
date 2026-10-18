@@ -12,7 +12,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,96 +35,115 @@ import androidx.compose.ui.viewinterop.AndroidView
  * a separate window layer, which renders as a BLACK rectangle inside Compose
  * dialogs/overlays on several devices — the classic "motion photo shows a
  * black screen" bug. TextureView renders into the composable layer itself.
+ *
+ * A transient first-prepare failure is retried once automatically: the
+ * AndroidView is recreated (key = attempt), building a fresh player; only the
+ * second failure surfaces the error message.
  */
 @Composable
 fun MotionPhotoPlayer(
     videoPath: String,
     onClose: () -> Unit
 ) {
-    var ready by remember { mutableStateOf(false) }
-    var failed by remember { mutableStateOf(false) }
-    var released by remember { mutableStateOf(false) }
+    var ready by remember(videoPath) { mutableStateOf(false) }
+    var failed by remember(videoPath) { mutableStateOf(false) }
+    var attempt by remember(videoPath) { mutableIntStateOf(1) }
+
+    // One automatic retry: the first prepare can fail with a transient decoder
+    // error on some devices; keying the AndroidView by [attempt] forces a fresh
+    // TextureView + MediaPlayer for the second try.
+    LaunchedEffect(failed, attempt, videoPath) {
+        if (failed && attempt < 2) {
+            attempt += 1
+            ready = false
+            failed = false
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { ctx ->
-                TextureView(ctx).apply {
-                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                        override fun onSurfaceTextureAvailable(
-                            surface: SurfaceTexture,
-                            width: Int,
-                            height: Int
-                        ) {
-                            try {
-                                val mp = MediaPlayer().apply {
-                                    setDataSource(videoPath)
-                                    setSurface(Surface(surface))
-                                    isLooping = true
-                                    setVolume(0f, 0f) // motion clips are silent
-                                    setOnPreparedListener { p ->
-                                        if (!released) {
-                                            ready = true
-                                            p.start()
+        key(attempt) {
+            AndroidView(
+                factory = { ctx ->
+                    TextureView(ctx).apply {
+                        surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                            override fun onSurfaceTextureAvailable(
+                                surface: SurfaceTexture,
+                                width: Int,
+                                height: Int
+                            ) {
+                                try {
+                                    val mp = MediaPlayer().apply {
+                                        setDataSource(videoPath)
+                                        setSurface(Surface(surface))
+                                        isLooping = true
+                                        setVolume(0f, 0f) // motion clips are silent
+                                        setOnPreparedListener { p ->
+                                            // Only start when THIS view's player is
+                                            // still alive (tag is cleared on release).
+                                            if (tag == p) {
+                                                ready = true
+                                                p.start()
+                                            }
                                         }
+                                        setOnErrorListener { _, what, extra ->
+                                            failed = true
+                                            true
+                                        }
+                                        setOnCompletionListener { }
+                                        prepareAsync()
                                     }
-                                    setOnErrorListener { _, what, extra ->
-                                        failed = true
-                                        true
-                                    }
-                                    setOnCompletionListener { }
-                                    prepareAsync()
+                                    // Keep the player alive as long as this view lives;
+                                    // released when the surface goes away or the
+                                    // composable leaves composition.
+                                    tag = mp
+                                } catch (e: Exception) {
+                                    failed = true
                                 }
-                                // Keep the player alive as long as this view lives;
-                                // released when the surface goes away or the
-                                // composable leaves composition.
-                                tag = mp
-                            } catch (e: Exception) {
-                                failed = true
+                            }
+
+                            override fun onSurfaceTextureSizeChanged(
+                                surface: SurfaceTexture,
+                                width: Int,
+                                height: Int
+                            ) {
+                            }
+
+                            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                                val mp = tag as? MediaPlayer
+                                try {
+                                    mp?.apply {
+                                        setOnPreparedListener(null)
+                                        setOnErrorListener(null)
+                                        stop()
+                                        release()
+                                    }
+                                } catch (e: Exception) {
+                                }
+                                tag = null
+                                return true
+                            }
+
+                            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
                             }
                         }
-
-                        override fun onSurfaceTextureSizeChanged(
-                            surface: SurfaceTexture,
-                            width: Int,
-                            height: Int
-                        ) {
-                        }
-
-                        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-                            val mp = tag as? MediaPlayer
-                            try {
-                                mp?.apply {
-                                    setOnPreparedListener(null)
-                                    setOnErrorListener(null)
-                                    stop()
-                                    release()
-                                }
-                            } catch (e: Exception) {
-                            }
-                            tag = null
-                            released = true
-                            return true
-                        }
-
-                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-                        }
                     }
-                }
-            },
-            modifier = Modifier.fillMaxSize(),
-            onRelease = {
-                val mp = it.tag as? MediaPlayer
-                try {
-                    mp?.apply {
-                        setOnPreparedListener(null)
-                        setOnErrorListener(null)
-                        stop()
-                        release()
+                },
+                modifier = Modifier.fillMaxSize(),
+                onRelease = {
+                    val mp = it.tag as? MediaPlayer
+                    try {
+                        mp?.apply {
+                            setOnPreparedListener(null)
+                            setOnErrorListener(null)
+                            stop()
+                            release()
+                        }
+                    } catch (e: Exception) {
                     }
-                } catch (e: Exception) {
+                    it.tag = null
                 }
-            }
-        )
+            )
+        }
 
         // Loading spinner while the video prepares (surface is transparent
         // until the first frame, so the still frame shows through meanwhile)
@@ -132,8 +154,9 @@ fun MotionPhotoPlayer(
             )
         }
 
-        // Playback failure → tell the user instead of showing a silent black box
-        if (failed) {
+        // Playback failed twice (initial + retry) → tell the user instead of
+        // showing a silent black box
+        if (failed && attempt >= 2) {
             Text(
                 text = "This motion photo could not be played",
                 color = Color.White,

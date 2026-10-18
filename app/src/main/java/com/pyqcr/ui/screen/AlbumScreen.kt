@@ -414,12 +414,30 @@ fun AlbumScreen(
     val favouriteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            scope.launch {
-                favouriteUris = withContext(Dispatchers.IO) {
-                    FavouriteStore.loadFavouriteUris(context)
-                }
+        scope.launch {
+            // Reload on ANY result — some ROMs report RESULT_CANCELED even
+            // though the platform dialog applied the flag.
+            favouriteUris = withContext(Dispatchers.IO) {
+                FavouriteStore.loadFavouriteUris(context)
+            }
+            if (result.resultCode == android.app.Activity.RESULT_OK) {
                 snackbarHostState.showSnackbar(pendingFavouriteMessage)
+            }
+        }
+    }
+
+    // Recycle-bin browsing: trashed images + system restore launcher (API 30+)
+    var trashedImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
+    val restoreLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            viewModel.refreshImages()
+            scope.launch {
+                trashedImages = withContext(Dispatchers.IO) {
+                    repository.getTrashedImages()
+                }
+                snackbarHostState.showSnackbar("Restored image from the recycle bin")
             }
         }
     }
@@ -564,76 +582,9 @@ fun AlbumScreen(
             try {
                 var successCount = 0
                 var failCount = 0
-                val contentResolver = context.contentResolver
                 for (uriStr in uris) {
-                    val uri = Uri.parse(uriStr)
                     val ok = withContext(Dispatchers.IO) {
-                        try {
-                            // Decode bounds
-                            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, boundsOpts) }
-                            val ow = boundsOpts.outWidth
-                            val oh = boundsOpts.outHeight
-                            if (ow <= 0 || oh <= 0) return@withContext false
-
-                            val scale = targetWidth.toFloat() / ow
-                            val fw = targetWidth.coerceAtLeast(1)
-                            val fh = (oh * scale).toInt().coerceAtLeast(1)
-
-                            var sample = 1
-                            while (ow / (sample shl 1) >= fw && oh / (sample shl 1) >= fh) sample = sample shl 1
-
-                            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
-                            val sampled = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOpts) } ?: return@withContext false
-                            val resized = Bitmap.createScaledBitmap(sampled, fw, fh, true)
-                            sampled.recycle()
-
-                            when (saveMode) {
-                                "replace" -> {
-                                    contentResolver.openOutputStream(uri, "wt")?.use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-                                        ?: run { resized.recycle(); return@withContext false }
-                                }
-                                "suffix" -> {
-                                    val name = try {
-                                        contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DISPLAY_NAME), null, null, null)?.use { c ->
-                                            if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)) else null
-                                        }
-                                    } catch (e: Exception) { null } ?: "image_${System.currentTimeMillis()}.jpg"
-                                    val base = name.substringBeforeLast('.')
-                                    val ext = name.substringAfterLast('.', "jpg")
-                                    val newName = "${base}_resized.$ext"
-
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                        val relPath = try {
-                                            contentResolver.query(uri, arrayOf(MediaStore.Images.Media.RELATIVE_PATH), null, null, null)?.use { c ->
-                                                if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH)) else null
-                                            }
-                                        } catch (e: Exception) { null } ?: Environment.DIRECTORY_PICTURES + "/PYQAlbum"
-
-                                        val values = ContentValues().apply {
-                                            put(MediaStore.Images.Media.DISPLAY_NAME, newName)
-                                            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                                            put(MediaStore.Images.Media.RELATIVE_PATH, relPath)
-                                        }
-                                        val newUri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                                            ?: run { resized.recycle(); return@withContext false }
-                                        contentResolver.openOutputStream(newUri)?.use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-                                            ?: run { resized.recycle(); contentResolver.delete(newUri, null, null); return@withContext false }
-                                    } else {
-                                        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "PYQAlbum")
-                                        if (!dir.exists()) dir.mkdirs()
-                                        val file = File(dir, newName)
-                                        java.io.FileOutputStream(file).use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-                                        MediaStoreUtils.scanFile(context, file.absolutePath)
-                                    }
-                                }
-                            }
-                            resized.recycle()
-                            true
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                            false
-                        }
+                        resizeSingleImageToWidth(context, uriStr, targetWidth, saveMode)
                     }
                     if (ok) successCount++ else failCount++
                 }
@@ -703,11 +654,27 @@ fun AlbumScreen(
         allTags.find { it.name == selectedTagName }
     }
 
-    // Load tag images when a tag is selected
-    LaunchedEffect(selectedTag) {
-        selectedTag?.let { tag ->
-            repository.getImagesByTag(tag.name).collect { imageList ->
-                tagImages = imageList
+    // Load tag images when a tag is selected; the "Favourite" pseudo-tag loads
+    // from MediaStore (IS_FAVORITE flag) instead of the local cross-ref table.
+    LaunchedEffect(selectedTag, selectedTagName, favouriteUris) {
+        if (selectedTagName == "Favourite") {
+            tagImages = withContext(Dispatchers.IO) {
+                repository.getFavouriteImages()
+            }
+        } else {
+            selectedTag?.let { tag ->
+                repository.getImagesByTag(tag.name).collect { imageList ->
+                    tagImages = imageList
+                }
+            }
+        }
+    }
+
+    // Load trashed images when the recycle bin is opened
+    LaunchedEffect(selectedBrowseMode) {
+        if (selectedBrowseMode == BrowseMode.RECYCLE_BIN) {
+            trashedImages = withContext(Dispatchers.IO) {
+                repository.getTrashedImages()
             }
         }
     }
@@ -843,6 +810,18 @@ fun AlbumScreen(
                         onNavigateToVault()
                     }
                 )
+
+                DrawerItem(
+                    icon = Icons.Default.Delete,
+                    label = "Recycle Bin",
+                    selected = selectedBrowseMode == BrowseMode.RECYCLE_BIN,
+                    onClick = {
+                        selectedBrowseMode = BrowseMode.RECYCLE_BIN
+                        selectedFolder = null
+                        selectedTagName = null
+                        scope.launch { drawerState.close() }
+                    }
+                )
             }
         }
     ) {
@@ -863,6 +842,7 @@ fun AlbumScreen(
                                 if (selectedFolder != null) selectedFolder!! else "pyqAlbum"
                             )
                             BrowseMode.TAG -> Text(selectedTagName ?: "Tags")
+                            BrowseMode.RECYCLE_BIN -> Text("Recycle Bin")
                         }
                     },
                     actions = {
@@ -1290,7 +1270,11 @@ fun AlbumScreen(
                             showRateDialog = true
                         },
                         onSelectForAi = {
-                            // Toggle: remove already-selected URIs, add the rest
+                            // Toggle: remove already-selected URIs, add the rest.
+                            // Images newly added to the ranking queue also get
+                            // their stale AI info cleared (the merged "AI Ranking"
+                            // button = old "AI Ranking" + "Remove AI Info") so
+                            // they are ranked again.
                             val alreadySelected = selectedImageUris.intersect(aiSelectedUris)
                             val newlySelected = selectedImageUris - aiSelectedUris
                             if (newlySelected.isEmpty() && alreadySelected.isNotEmpty()) {
@@ -1299,14 +1283,11 @@ fun AlbumScreen(
                             } else {
                                 // Add newly selected, keep existing ones
                                 aiSelectedUris = aiSelectedUris + newlySelected
+                                if (newlySelected.isNotEmpty()) {
+                                    viewModel.batchRemoveAiInfo(newlySelected.toList())
+                                }
                             }
                             saveAiSelectedUris(context, aiSelectedUris)
-                        },
-                        onRemoveAiInfo = {
-                            val uris = selectedImageUris.toList()
-                            viewModel.batchRemoveAiInfo(uris)
-                            isMultiSelectMode = false
-                            selectedImageUris = emptySet()
                         },
                         onCopyTo = {
                             destinationDialogOp = "copy"
@@ -1617,6 +1598,30 @@ fun AlbumScreen(
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
+                                // Favourite pseudo-tag — MediaStore IS_FAVORITE images
+                                item {
+                                    ElevatedCard(
+                                        onClick = { selectedTagName = "Favourite" },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(16.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Favorite,
+                                                contentDescription = null,
+                                                tint = Color(0xFFE91E63),
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                text = "Favourite",
+                                                style = MaterialTheme.typography.bodyMedium
+                                            )
+                                        }
+                                    }
+                                }
                                 items(allTags) { tag ->
                                     ElevatedCard(
                                         onClick = { selectedTagName = tag.name },
@@ -1773,6 +1778,73 @@ fun AlbumScreen(
                                                         )
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    BrowseMode.RECYCLE_BIN -> {
+                        if (trashedImages.isEmpty()) {
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Recycle bin is empty",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        } else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(3),
+                                contentPadding = PaddingValues(2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black)
+                            ) {
+                                items(trashedImages, key = { it.uri }) { image ->
+                                    Box(modifier = Modifier.aspectRatio(1f)) {
+                                        ImageThumbnail(
+                                            imageUri = image.uri,
+                                            modifier = Modifier.fillMaxSize(),
+                                            backgroundColor = Color.Black
+                                        )
+                                        // Restore button — sends the item back to the
+                                        // gallery via the system recovery request.
+                                        Row(
+                                            modifier = Modifier
+                                                .align(Alignment.BottomCenter)
+                                                .fillMaxWidth()
+                                                .background(Color(0x99000000))
+                                                .padding(vertical = 2.dp),
+                                            horizontalArrangement = Arrangement.Center
+                                        ) {
+                                            TextButton(
+                                                onClick = {
+                                                    val restoreRequest = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                                                        FileOperationHelper.createRecoveryRequest(context, listOf(image.uri))
+                                                    } else {
+                                                        null
+                                                    }
+                                                    if (restoreRequest != null) {
+                                                        restoreLauncher.launch(
+                                                            IntentSenderRequest.Builder(restoreRequest).build()
+                                                        )
+                                                    } else {
+                                                        scope.launch {
+                                                            snackbarHostState.showSnackbar("Recycle bin requires Android 11+")
+                                                        }
+                                                    }
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 8.dp)
+                                            ) {
+                                                Text("Restore", color = Color.White)
                                             }
                                         }
                                     }
@@ -2200,7 +2272,6 @@ private fun BatchMultiSelectBar(
     onRate: () -> Unit,
     onFavourite: () -> Unit,
     onSelectForAi: () -> Unit,
-    onRemoveAiInfo: () -> Unit,
     onResize: () -> Unit,
     onAiEdit: () -> Unit,
     onCopyTo: () -> Unit,
@@ -2270,11 +2341,6 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onAiEdit() },
                         text = { Text("AI Edit") },
                         leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) }
-                    )
-                    DropdownMenuItem(
-                        onClick = { showMenu = false; onRemoveAiInfo() },
-                        text = { Text("Remove AI Info") },
-                        leadingIcon = { Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     HorizontalDivider()
                     DropdownMenuItem(
@@ -2673,7 +2739,7 @@ private fun ImageGridCell(
     }
 }
 
-enum class BrowseMode { FOLDER, TAG }
+enum class BrowseMode { FOLDER, TAG, RECYCLE_BIN }
 private enum class ViewLayout { GRID, WATERFALL, JUSTIFIED }
 
 // ---------- Collage options ----------
@@ -2915,7 +2981,7 @@ private fun saveAiSelectedUris(context: Context, uris: Set<String>) {
  * Works for primary storage ("primary:") tree URIs.
  * Returns null if resolution fails.
  */
-private fun resolveTreeUriToPath(treeUri: Uri): File? {
+internal fun resolveTreeUriToPath(treeUri: Uri): File? {
     return try {
         val docId = android.provider.DocumentsContract.getTreeDocumentId(treeUri)
         // docId looks like "primary:DCIM/Camera" or "XXXX-XXXX:path"
@@ -2968,7 +3034,7 @@ internal object FileUtils {
  * whether to replace the original or save a copy with "_resized" suffix.
  */
 @Composable
-private fun ResizeOptionsDialog(
+internal fun ResizeOptionsDialog(
     imageCount: Int,
     onDismiss: () -> Unit,
     onConfirm: (targetWidth: Int, saveMode: String) -> Unit
@@ -3046,4 +3112,88 @@ private fun ResizeOptionsDialog(
             }
         }
     )
+}
+
+/**
+ * Resize one image to [targetWidth] pixels wide. [saveMode] is either
+ * "replace" (re-compress the original MediaStore row in place) or "suffix"
+ * (save a new "_resized" copy). Shared by the album batch menu and the
+ * single-image detail panel. Returns true on success.
+ */
+internal suspend fun resizeSingleImageToWidth(
+    context: Context,
+    uriStr: String,
+    targetWidth: Int,
+    saveMode: String
+): Boolean {
+    return withContext(Dispatchers.IO) {
+        try {
+            val uri = Uri.parse(uriStr)
+            val contentResolver = context.contentResolver
+            // Decode bounds
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, boundsOpts) }
+            val ow = boundsOpts.outWidth
+            val oh = boundsOpts.outHeight
+            if (ow <= 0 || oh <= 0) return@withContext false
+
+            val scale = targetWidth.toFloat() / ow
+            val fw = targetWidth.coerceAtLeast(1)
+            val fh = (oh * scale).toInt().coerceAtLeast(1)
+
+            var sample = 1
+            while (ow / (sample shl 1) >= fw && oh / (sample shl 1) >= fh) sample = sample shl 1
+
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+            val sampled = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOpts) } ?: return@withContext false
+            val resized = Bitmap.createScaledBitmap(sampled, fw, fh, true)
+            sampled.recycle()
+
+            when (saveMode) {
+                "replace" -> {
+                    contentResolver.openOutputStream(uri, "wt")?.use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                        ?: run { resized.recycle(); return@withContext false }
+                }
+                "suffix" -> {
+                    val name = try {
+                        contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DISPLAY_NAME), null, null, null)?.use { c ->
+                            if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)) else null
+                        }
+                    } catch (e: Exception) { null } ?: "image_${System.currentTimeMillis()}.jpg"
+                    val base = name.substringBeforeLast('.')
+                    val ext = name.substringAfterLast('.', "jpg")
+                    val newName = "${base}_resized.$ext"
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val relPath = try {
+                            contentResolver.query(uri, arrayOf(MediaStore.Images.Media.RELATIVE_PATH), null, null, null)?.use { c ->
+                                if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH)) else null
+                            }
+                        } catch (e: Exception) { null } ?: Environment.DIRECTORY_PICTURES + "/PYQAlbum"
+
+                        val values = ContentValues().apply {
+                            put(MediaStore.Images.Media.DISPLAY_NAME, newName)
+                            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                            put(MediaStore.Images.Media.RELATIVE_PATH, relPath)
+                        }
+                        val newUri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                            ?: run { resized.recycle(); return@withContext false }
+                        contentResolver.openOutputStream(newUri)?.use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                            ?: run { resized.recycle(); contentResolver.delete(newUri, null, null); return@withContext false }
+                    } else {
+                        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "PYQAlbum")
+                        if (!dir.exists()) dir.mkdirs()
+                        val file = File(dir, newName)
+                        java.io.FileOutputStream(file).use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                        MediaStoreUtils.scanFile(context, file.absolutePath)
+                    }
+                }
+            }
+            resized.recycle()
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
 }

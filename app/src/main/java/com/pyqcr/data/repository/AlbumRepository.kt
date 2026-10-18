@@ -147,7 +147,13 @@ class AlbumRepository(
 
     suspend fun refreshImagesFromMediaStore() = withContext(ioDispatcher) {
         try {
-            val images = loadImagesFromMediaStore()
+            val images = loadImagesFromMediaStore(
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    "${MediaStore.MediaColumns.IS_TRASHED} = 0"
+                } else {
+                    null
+                }
+            )
             val liveUris = images.map { it.uri }
 
             // MediaStore unavailable (no permission / storage error): keep the
@@ -207,7 +213,27 @@ class AlbumRepository(
         }
     }
 
-    private fun loadImagesFromMediaStore(): List<ImageEntity> {
+    /**
+     * Images currently in the system recycle bin (API 30+ trash). Empty on
+     * older APIs where the trash does not exist.
+     */
+    suspend fun getTrashedImages(): List<ImageItem> = withContext(ioDispatcher) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext emptyList()
+        loadImagesFromMediaStore("${MediaStore.MediaColumns.IS_TRASHED} = 1")
+            .map { it.toImageItem() }
+    }
+
+    /**
+     * Images currently marked as favourite (MediaStore IS_FAVORITE, API 33+).
+     * Empty on older APIs. Used by the "Favourite" pseudo-tag in Tag browse.
+     */
+    suspend fun getFavouriteImages(): List<ImageItem> = withContext(ioDispatcher) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return@withContext emptyList()
+        loadImagesFromMediaStore("${MediaStore.MediaColumns.IS_FAVORITE} = 1")
+            .map { it.toImageItem() }
+    }
+
+    private fun loadImagesFromMediaStore(selection: String?): List<ImageEntity> {
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DISPLAY_NAME,
@@ -220,14 +246,6 @@ class AlbumRepository(
         )
 
         val uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        // Hide recycled images (API 30+ trash): the album only shows items that
-        // are not in the recoverable recycle bin. On older APIs the column does
-        // not exist, so the filter is omitted entirely.
-        val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            "${MediaStore.MediaColumns.IS_TRASHED} = 0"
-        } else {
-            null
-        }
         val cursor = context.contentResolver.query(
             uri, projection, selection, null,
             "${MediaStore.Images.Media.DATE_ADDED} DESC"

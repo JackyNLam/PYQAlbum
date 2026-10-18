@@ -6,6 +6,9 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -47,6 +50,7 @@ import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
 import com.pyqcr.ui.component.MotionPhotoPlayer
+import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.util.MotionPhotoExtractor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -58,8 +62,9 @@ import java.security.SecureRandom
 /**
  * Photo Vault — a password-protected private area reached from the left menu.
  *
- * - Copy images from the gallery into app-private storage (invisible to other
- *   apps and to the album's own MediaStore-backed views).
+ * - Move images from the gallery into app-private storage (invisible to other
+ *   apps and to the album's own MediaStore-backed views); the gallery
+ *   originals go to the system recycle bin (API 30+).
  * - Optionally encrypt each entry with AES-256-GCM using a key derived from
  *   the vault password (PBKDF2) — without the password the file is useless.
  *
@@ -111,6 +116,35 @@ fun VaultScreen(onBack: () -> Unit) {
     var showMotionVideo by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
+
+    // Originals of moved images leave the gallery — recycle bin first (API 30+,
+    // one system dialog for the whole batch), permanent delete on older APIs.
+    val trashLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            Toast.makeText(context, "Originals moved to the recycle bin", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Send [uris] (already copied into the vault) to the recycle bin. */
+    val trashOriginals: (List<String>) -> Unit = { uris ->
+        if (uris.isNotEmpty()) {
+            val trashRequest = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                FileOperationHelper.createTrashRequest(context, uris)
+            } else {
+                null
+            }
+            if (trashRequest != null) {
+                trashLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
+            } else {
+                scope.launch {
+                    val n = FileOperationHelper.deleteMediaDirect(context, uris)
+                    Toast.makeText(context, "Deleted $n original image(s)", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     // Refresh the entry list from disk whenever the vault is (re)opened
     fun refreshEntries() {
@@ -264,7 +298,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(Modifier.width(6.dp))
-                                Text("Import from Gallery")
+                                Text("Move from Gallery")
                             }
                         }
 
@@ -292,8 +326,10 @@ fun VaultScreen(onBack: () -> Unit) {
                                     )
                                     Spacer(Modifier.height(8.dp))
                                     Text(
-                                        text = "Import copies from your gallery into this " +
-                                            "private area (hidden from other apps — encrypt later if you want).",
+                                        text = "Move images from your gallery into this " +
+                                            "private area (hidden from other apps — encrypt " +
+                                            "later if you want). The gallery originals go to " +
+                                            "the recycle bin.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         textAlign = TextAlign.Center,
@@ -355,7 +391,7 @@ fun VaultScreen(onBack: () -> Unit) {
                     // Header
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "Import to Photo Vault",
+                            text = "Move to Photo Vault",
                             style = MaterialTheme.typography.titleMedium,
                             modifier = Modifier.weight(1f)
                         )
@@ -364,9 +400,10 @@ fun VaultScreen(onBack: () -> Unit) {
                         }
                     }
                     Text(
-                        text = "Copied as-is into app-private storage — no password needed, " +
-                            "and hidden from other gallery apps. Encrypt later from the viewer " +
-                            "if you want password protection.",
+                        text = "Moved as-is into app-private storage — no password needed, " +
+                            "and hidden from other gallery apps. The gallery originals go to " +
+                            "the recycle bin. Encrypt later from the viewer if you want " +
+                            "password protection.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -462,6 +499,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                 scope.launch {
                                     var ok = 0
                                     var fail = 0
+                                    val movedUris = mutableListOf<String>()
                                     for (uri in importSelection) {
                                         val name = VaultStorage.galleryDisplayName(context, uri)
                                         val result = withContext(Dispatchers.IO) {
@@ -471,22 +509,29 @@ fun VaultScreen(onBack: () -> Unit) {
                                                 displayName = name
                                             )
                                         }
-                                        if (result) ok++ else fail++
+                                        if (result) {
+                                            ok++
+                                            movedUris.add(uri)
+                                        } else {
+                                            fail++
+                                        }
                                     }
                                     importing = false
                                     showImportPicker = false
                                     refreshEntries()
                                     Toast.makeText(
                                         context,
-                                        if (fail == 0) "Imported $ok image(s) to the vault"
-                                        else "Imported $ok, $fail failed",
+                                        if (fail == 0) "Moved $ok image(s) to the vault"
+                                        else "Moved $ok, $fail failed",
                                         Toast.LENGTH_SHORT
                                     ).show()
+                                    // Originals leave the gallery — recycle bin first
+                                    trashOriginals(movedUris)
                                 }
                             },
                             enabled = importSelection.isNotEmpty() && !importing
                         ) {
-                            Text(if (importing) "Importing…" else "Import")
+                            Text(if (importing) "Moving…" else "Move")
                         }
                     }
                 }
