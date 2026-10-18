@@ -431,22 +431,28 @@ fun AlbumScreen(
      * [directTemplate] are the success messages ({n} = count).
      */
     val trashOrDelete: (List<String>, String, String) -> Unit = { uris, trashTemplate, directTemplate ->
-        if (uris.isEmpty()) return@trashOrDelete
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            val trashRequest = FileOperationHelper.createTrashRequest(context, uris)
+        val deleteDirectly: () -> Unit = {
+            scope.launch {
+                val n = FileOperationHelper.deleteMediaDirect(context, uris)
+                viewModel.deleteImages(uris)
+                snackbarHostState.showSnackbar(directTemplate.replace("{n}", "$n"))
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            }
+        }
+        if (uris.isNotEmpty()) {
+            val trashRequest = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                FileOperationHelper.createTrashRequest(context, uris)
+            } else {
+                null
+            }
             if (trashRequest != null) {
                 pendingDeleteUris = uris
                 deleteSuccessMessage = trashTemplate
                 deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
-                return@trashOrDelete
+            } else {
+                deleteDirectly()
             }
-        }
-        scope.launch {
-            val n = FileOperationHelper.deleteMediaDirect(context, uris)
-            viewModel.deleteImages(uris)
-            snackbarHostState.showSnackbar(directTemplate.replace("{n}", "$n"))
-            isMultiSelectMode = false
-            selectedImageUris = emptySet()
         }
     }
 

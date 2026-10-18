@@ -33,7 +33,7 @@ class ImageResizer(private val context: Context) {
             // works for every URI scheme MediaStore hands back.
             val bytes = context.contentResolver.openInputStream(imageUri)
                 ?.use { it.readBytes() }
-            if (bytes.isNullOrEmpty()) return null
+            if (bytes == null || bytes.size == 0) return null
 
             // First decode bounds
             val boundsOptions = BitmapFactory.Options().apply {
