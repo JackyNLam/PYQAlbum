@@ -426,21 +426,8 @@ fun AlbumScreen(
         }
     }
 
-    // Recycle-bin browsing: trashed images + system restore launcher (API 30+)
+    // Recycle-bin browsing: trashed images (restore clears the IS_TRASHED flag)
     var trashedImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
-    val restoreLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            viewModel.refreshImages()
-            scope.launch {
-                trashedImages = withContext(Dispatchers.IO) {
-                    repository.getTrashedImages()
-                }
-                snackbarHostState.showSnackbar("Restored image from the recycle bin")
-            }
-        }
-    }
 
     /**
      * Remove [uris] from the gallery — RECYCLE BIN FIRST on API 30+ (the system
@@ -1815,8 +1802,8 @@ fun AlbumScreen(
                                             modifier = Modifier.fillMaxSize(),
                                             backgroundColor = Color.Black
                                         )
-                                        // Restore button — sends the item back to the
-                                        // gallery via the system recovery request.
+                                        // Restore button — clears the MediaStore IS_TRASHED
+                                        // flag to send the item straight back to the gallery.
                                         Row(
                                             modifier = Modifier
                                                 .align(Alignment.BottomCenter)
@@ -1827,18 +1814,24 @@ fun AlbumScreen(
                                         ) {
                                             TextButton(
                                                 onClick = {
-                                                    val restoreRequest = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                                                        FileOperationHelper.createRecoveryRequest(context, listOf(image.uri))
-                                                    } else {
-                                                        null
-                                                    }
-                                                    if (restoreRequest != null) {
-                                                        restoreLauncher.launch(
-                                                            IntentSenderRequest.Builder(restoreRequest).build()
+                                                    // createRecoveryRequest is a hidden API in this
+                                                    // build, so restore = direct IS_TRASHED = 0 update.
+                                                    scope.launch {
+                                                        val restored = FileOperationHelper.restoreFromTrash(
+                                                            context, listOf(image.uri)
                                                         )
-                                                    } else {
-                                                        scope.launch {
-                                                            snackbarHostState.showSnackbar("Recycle bin requires Android 11+")
+                                                        if (restored > 0) {
+                                                            viewModel.refreshImages()
+                                                            trashedImages = withContext(Dispatchers.IO) {
+                                                                repository.getTrashedImages()
+                                                            }
+                                                            snackbarHostState.showSnackbar(
+                                                                "Restored image from the recycle bin"
+                                                            )
+                                                        } else {
+                                                            snackbarHostState.showSnackbar(
+                                                                "Could not restore this image"
+                                                            )
                                                         }
                                                     }
                                                 },

@@ -593,19 +593,24 @@ object FileOperationHelper {
     }
 
     /**
-     * Build a single system RECOVERY request for a batch of trashed images
-     * (API 30+): the user confirms once and the images are restored from the
-     * recycle bin back into the gallery. Returns null on older APIs / failure.
+     * Restore trashed images by clearing their MediaStore IS_TRASHED flag
+     * (all API levels — the system recovery-request intent is not a public
+     * API in this build). Works for rows owned by this app, i.e. the images
+     * it trashed itself. Returns the number successfully restored.
      */
-    fun createRecoveryRequest(context: Context, uris: List<String>): IntentSender? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        return try {
-            val contentUris = uris.map { Uri.parse(it) }
-            MediaStore.createRecoveryRequest(context.contentResolver, contentUris).intentSender
-        } catch (e: Exception) {
-            Log.w(TAG, "createRecoveryRequest failed", e)
-            null
+    suspend fun restoreFromTrash(context: Context, uris: List<String>): Int = withContext(Dispatchers.IO) {
+        var restored = 0
+        for (u in uris) {
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_TRASHED, 0)
+                }
+                if (context.contentResolver.update(Uri.parse(u), values, null, null) > 0) restored++
+            } catch (e: Exception) {
+                Log.w(TAG, "restoreFromTrash failed for $u", e)
+            }
         }
+        restored
     }
 
     /**
