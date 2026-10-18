@@ -156,25 +156,6 @@ fun VaultScreen(onBack: () -> Unit) {
         }
     }
 
-    /** Run [action] for [entry], requesting the vault password when needed. */
-    val requirePasswordOrRun: (VaultAction, VaultEntry) -> Unit = { action, entry ->
-        if (action == VaultAction.ENCRYPT && !VaultStorage.hasPassword(context)) {
-            // First encryption — the user picks the vault password now
-            pendingAction = VaultAction.ENCRYPT to entry
-            newPassword = ""
-            newPasswordConfirm = ""
-            dialogError = null
-            showCreatePasswordDialog = true
-        } else if (!authed) {
-            pendingAction = action to entry
-            enteredPassword = ""
-            dialogError = null
-            showPasswordDialog = true
-        } else {
-            runVaultAction(action, entry, password)
-        }
-    }
-
     /** Execute [action] once a verified vault password is available. */
     val runVaultAction: (VaultAction, VaultEntry, String) -> Unit = { action, entry, pwd ->
         scope.launch {
@@ -214,6 +195,25 @@ fun VaultScreen(onBack: () -> Unit) {
                     Toast.LENGTH_SHORT
                 ).show()
             }
+        }
+    }
+
+    /** Run [action] for [entry], requesting the vault password when needed. */
+    val requirePasswordOrRun: (VaultAction, VaultEntry) -> Unit = { action, entry ->
+        if (action == VaultAction.ENCRYPT && !VaultStorage.hasPassword(context)) {
+            // First encryption — the user picks the vault password now
+            pendingAction = VaultAction.ENCRYPT to entry
+            newPassword = ""
+            newPasswordConfirm = ""
+            dialogError = null
+            showCreatePasswordDialog = true
+        } else if (!authed) {
+            pendingAction = action to entry
+            enteredPassword = ""
+            dialogError = null
+            showPasswordDialog = true
+        } else {
+            runVaultAction(action, entry, password)
         }
     }
 
