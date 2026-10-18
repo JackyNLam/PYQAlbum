@@ -1,9 +1,7 @@
 package com.pyqcr.ui.screen
 
-import android.media.MediaPlayer
+import android.content.Context
 import android.net.Uri
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -22,6 +20,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -39,17 +38,19 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.pyqcr.PyqCrApp
+import com.pyqcr.ai.AiEditSelectionStore
 import com.pyqcr.data.db.ImageTagCrossRef
 import com.pyqcr.data.db.TagEntity
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.ui.component.MotionPhotoPlayer
 import com.pyqcr.ui.component.RatingBar
 import com.pyqcr.ui.component.TagChip
+import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.MotionPhotoExtractor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -116,6 +117,96 @@ fun ImageDetailScreen(
     // MP4 (null = not a motion photo); [showMotionVideo] toggles the video surface.
     var motionVideoPath by remember(imageUri) { mutableStateOf<String?>(null) }
     var showMotionVideo by remember { mutableStateOf(false) }
+
+    // ---- AI queue / favourite state for the swipe-up toggle buttons ----
+    // (Same stores as the album's batch menu: pyqcr_ai_select prefs for AI
+    // Ranking, AiEditSelectionStore for AI Edit, MediaStore IS_FAVORITE for
+    // the favourite flag.)
+    var aiSelectedUris by remember(imageUri) { mutableStateOf(loadImageAiSelectedUris(context)) }
+    var aiEditSource by remember(imageUri) {
+        mutableStateOf(AiEditSelectionStore.loadSourceUris(context).contains(imageUri))
+    }
+    var aiEditTarget by remember(imageUri) {
+        mutableStateOf(AiEditSelectionStore.loadTargetUris(context).contains(imageUri))
+    }
+    var isFavourite by remember(imageUri) { mutableStateOf(FavouriteStore.isFavourite(context, imageUri)) }
+    var showAiEditRoleDialog by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Toggle this image in/out of the AI Ranking queue (same as batch menu's
+    // "AI Ranking" item) — feedback mirrors the batch menu snackbar.
+    val toggleAiRanking: () -> Unit = {
+        val wasSelected = imageUri in aiSelectedUris
+        aiSelectedUris = if (wasSelected) aiSelectedUris - imageUri else aiSelectedUris + imageUri
+        saveImageAiSelectedUris(context, aiSelectedUris)
+        coroutineScope.launch {
+            snackbarHostState.showSnackbar(
+                if (wasSelected) "Removed from AI Ranking" else "Added to AI Ranking"
+            )
+        }
+    }
+
+    // Toggle the platform favourite flag (MediaStore IS_FAVORITE, API 33+).
+    val toggleFavourite: () -> Unit = {
+        if (!FavouriteStore.supported) {
+            coroutineScope.launch { snackbarHostState.showSnackbar("Favourite requires Android 13+") }
+        } else {
+            val newValue = !isFavourite
+            coroutineScope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    FavouriteStore.setFavourite(context, imageUri, newValue)
+                }
+                if (ok) {
+                    isFavourite = newValue
+                    snackbarHostState.showSnackbar(
+                        if (newValue) "Marked as favourite" else "Removed from favourites"
+                    )
+                } else {
+                    snackbarHostState.showSnackbar("Could not update favourite")
+                }
+            }
+        }
+    }
+
+    // Apply an AI Edit role toggle for this image (add if absent, remove if
+    // present) — same source/target semantics as the batch menu's role dialog.
+    val toggleAiEditRole: (Boolean) -> Unit = { asSource ->
+        showAiEditRoleDialog = false
+        if (asSource) {
+            val currentlySource = AiEditSelectionStore.loadSourceUris(context).contains(imageUri)
+            if (currentlySource) {
+                AiEditSelectionStore.saveSourceUris(
+                    context, AiEditSelectionStore.loadSourceUris(context) - imageUri
+                )
+                aiEditSource = false
+                coroutineScope.launch { snackbarHostState.showSnackbar("Removed from AI Edit source") }
+            } else {
+                AiEditSelectionStore.addSource(context, imageUri)
+                aiEditSource = true
+                aiEditTarget = false
+                coroutineScope.launch { snackbarHostState.showSnackbar("Added as AI Edit source") }
+            }
+        } else {
+            val currentlyTarget = AiEditSelectionStore.loadTargetUris(context).contains(imageUri)
+            if (currentlyTarget) {
+                AiEditSelectionStore.saveTargetUris(
+                    context, AiEditSelectionStore.loadTargetUris(context) - imageUri
+                )
+                aiEditTarget = false
+                coroutineScope.launch { snackbarHostState.showSnackbar("Removed from AI Edit target") }
+            } else {
+                val targets = (AiEditSelectionStore.loadTargetUris(context) + imageUri)
+                    .minus(AiEditSelectionStore.loadSourceUris(context))
+                AiEditSelectionStore.saveTargetUris(context, targets)
+                AiEditSelectionStore.saveSourceUris(
+                    context, AiEditSelectionStore.loadSourceUris(context) - imageUri
+                )
+                aiEditTarget = true
+                aiEditSource = false
+                coroutineScope.launch { snackbarHostState.showSnackbar("Added as AI Edit target") }
+            }
+        }
+    }
 
     /**
      * Clamp a pan offset so the zoomed image stays within the viewport.
@@ -202,6 +293,7 @@ fun ImageDetailScreen(
     // (threshold replaced by swipeThreshold)
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             if (showControls && !showDetailPanel) {
                 TopAppBar(
@@ -607,7 +699,7 @@ fun ImageDetailScreen(
 
                     Spacer(Modifier.height(16.dp))
 
-                    // ====== AI actions (below the tag area) ======
+                    // ====== AI actions (below the tag area) — toggles, like the batch menu ======
                     Text(
                         text = "AI Actions",
                         style = MaterialTheme.typography.titleSmall
@@ -617,9 +709,17 @@ fun ImageDetailScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        // AI Ranking — toggle this image in/out of the rating queue
                         Button(
-                            onClick = onOpenAiRating,
-                            modifier = Modifier.weight(1f)
+                            onClick = toggleAiRanking,
+                            modifier = Modifier.weight(1f),
+                            colors = if (imageUri in aiSelectedUris) {
+                                ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                ButtonDefaults.buttonColors()
+                            }
                         ) {
                             Icon(
                                 Icons.Default.AutoAwesome,
@@ -627,11 +727,19 @@ fun ImageDetailScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(Modifier.width(6.dp))
-                            Text("AI Rating")
+                            Text(if (imageUri in aiSelectedUris) "AI Ranking ✓" else "AI Ranking")
                         }
+                        // AI Edit — toggle source/target role via a small dialog
                         Button(
-                            onClick = onOpenAiEdit,
-                            modifier = Modifier.weight(1f)
+                            onClick = { showAiEditRoleDialog = true },
+                            modifier = Modifier.weight(1f),
+                            colors = if (aiEditSource || aiEditTarget) {
+                                ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                ButtonDefaults.buttonColors()
+                            }
                         ) {
                             Icon(
                                 Icons.Default.Edit,
@@ -639,8 +747,50 @@ fun ImageDetailScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(Modifier.width(6.dp))
-                            Text("AI Edit")
+                            Text(if (aiEditSource || aiEditTarget) "AI Edit ✓" else "AI Edit")
                         }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    // Favourite — platform flag other apps (WeChat, Google Photos) can read
+                    OutlinedButton(
+                        onClick = toggleFavourite,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            Icons.Default.Favorite,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = if (isFavourite) Color(0xFFE91E63) else LocalContentColor.current
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (isFavourite) "Favourite ✓ (visible in other apps)" else "Mark as Favourite")
+                    }
+
+                    // AI Edit role dialog — same source/target roles as the batch menu
+                    if (showAiEditRoleDialog) {
+                        AlertDialog(
+                            onDismissRequest = { showAiEditRoleDialog = false },
+                            title = { Text("AI Edit selection") },
+                            text = {
+                                Text(
+                                    if (aiEditSource || aiEditTarget)
+                                        "This image is already in the AI Edit queue. " +
+                                            "Choose a role to keep or switch it."
+                                    else
+                                        "Choose a role for this image in the AI Edit queue."
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = { toggleAiEditRole(true) }) {
+                                    Text(if (aiEditSource) "Remove as source" else "As AI Edit source")
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { toggleAiEditRole(false) }) {
+                                    Text(if (aiEditTarget) "Remove as target" else "As AI Edit target")
+                                }
+                            }
+                        )
                     }
                 }
             }
@@ -661,69 +811,15 @@ private fun formatFileSize(bytes: Long): String {
 }
 
 /**
- * Plays the motion-photo video extracted by [MotionPhotoExtractor] using
- * [MediaPlayer] on a [SurfaceView] (AndroidView interop). The player is
- * released when the composable leaves composition.
+ * AI Ranking queue prefs — same SharedPreferences keys as the album's batch
+ * menu ("pyqcr_ai_select" / "ai_selected_uris"; also read by AiSelectScreen).
  */
-@Composable
-private fun MotionPhotoPlayer(
-    videoPath: String,
-    onClose: () -> Unit
-) {
-    var player by remember { mutableStateOf<MediaPlayer?>(null) }
+private fun loadImageAiSelectedUris(context: Context): Set<String> {
+    val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
+    return prefs.getStringSet("ai_selected_uris", emptySet()) ?: emptySet()
+}
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { ctx ->
-                SurfaceView(ctx).apply {
-                    holder.addCallback(object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) {
-                            try {
-                                val mp = MediaPlayer().apply {
-                                    setDataSource(videoPath)
-                                    setDisplay(holder)
-                                    isLooping = true
-                                    setVolume(0f, 0f) // motion clips are silent
-                                    prepare()
-                                    start()
-                                }
-                                player = mp
-                            } catch (e: Exception) {
-                                // Unsupported codec or corrupt clip — the still
-                                // frame behind stays visible
-                            }
-                        }
-
-                        override fun surfaceChanged(
-                            holder: SurfaceHolder,
-                            format: Int,
-                            width: Int,
-                            height: Int
-                        ) {
-                        }
-
-                        override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            try { player?.release() } catch (e: Exception) {}
-                            player = null
-                        }
-                    })
-                }
-            },
-            modifier = Modifier.fillMaxSize(),
-            onRelease = {
-                try { player?.release() } catch (e: Exception) {}
-                player = null
-            }
-        )
-
-        // Close button over the video
-        TextButton(
-            onClick = onClose,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 8.dp)
-        ) {
-            Text("✕ Close motion", color = Color.White)
-        }
-    }
+private fun saveImageAiSelectedUris(context: Context, uris: Set<String>) {
+    val prefs = context.getSharedPreferences("pyqcr_ai_select", Context.MODE_PRIVATE)
+    prefs.edit().putStringSet("ai_selected_uris", uris).apply()
 }

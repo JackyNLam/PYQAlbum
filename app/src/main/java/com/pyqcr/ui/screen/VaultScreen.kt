@@ -1,7 +1,9 @@
 package com.pyqcr.ui.screen
 
+import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -40,6 +42,8 @@ import com.pyqcr.PyqCrApp
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
+import com.pyqcr.ui.component.MotionPhotoPlayer
+import com.pyqcr.util.MotionPhotoExtractor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -71,9 +75,7 @@ fun VaultScreen(onBack: () -> Unit) {
 
     // Auth state
     var password by remember { mutableStateOf("") }
-    var confirmPassword by remember { mutableStateOf("") }
     var authed by remember { mutableStateOf(false) }
-    var errorMsg by remember { mutableStateOf<String?>(null) }
 
     // Vault state
     var entries by remember { mutableStateOf<List<VaultEntry>>(emptyList()) }
@@ -84,12 +86,25 @@ fun VaultScreen(onBack: () -> Unit) {
     // Import picker state
     var showImportPicker by remember { mutableStateOf(false) }
     var importSelection by remember { mutableStateOf(setOf<String>()) }
-    var encryptImport by remember { mutableStateOf(true) }
 
     // Viewer state
     var viewingEntry by remember { mutableStateOf<VaultEntry?>(null) }
     var viewPath by remember { mutableStateOf<String?>(null) }
     var viewError by remember { mutableStateOf<String?>(null) }
+
+    // Password-prompt plumbing: an action (view/encrypt/decrypt/move-out) is
+    // parked in [pendingAction] until a vault password is entered/created.
+    var pendingAction by remember { mutableStateOf<Pair<VaultAction, VaultEntry>?>(null) }
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var enteredPassword by remember { mutableStateOf("") }
+    var dialogError by remember { mutableStateOf<String?>(null) }
+    var showCreatePasswordDialog by remember { mutableStateOf(false) }
+    var newPassword by remember { mutableStateOf("") }
+    var newPasswordConfirm by remember { mutableStateOf("") }
+
+    // Motion-photo state for the viewer (extracted MP4 in cache)
+    var motionVideoPath by remember { mutableStateOf<String?>(null) }
+    var showMotionVideo by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
 
@@ -104,27 +119,100 @@ fun VaultScreen(onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(authed) {
-        if (authed) refreshEntries()
+    LaunchedEffect(Unit) {
+        refreshEntries()
     }
 
-    /** Open the viewer for [entry], decrypting on demand when encrypted. */
+    // Resolve the viewable path for [entry]: the plaintext path directly, or
+    // the decrypted cache file when the entry is encrypted (needs [pwd]).
+    val resolveViewPath: (VaultEntry, String?) -> String? = { entry, pwd ->
+        if (entry.encrypted) {
+            if (pwd.isNullOrEmpty()) null
+            else VaultStorage.decryptToCache(context, entry, pwd)
+        } else {
+            VaultStorage.entryFile(context, entry).absolutePath
+        }
+    }
+
+    /** Open the viewer for [entry]; encrypted entries prompt for the password. */
     val openViewer: (VaultEntry) -> Unit = { entry ->
         viewingEntry = entry
         viewPath = null
         viewError = null
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                if (entry.encrypted) {
-                    VaultStorage.decryptToCache(context, entry, password)
-                } else {
-                    VaultStorage.entryFile(context, entry).absolutePath
+        if (entry.encrypted && !authed) {
+            pendingAction = VaultAction.VIEW to entry
+            enteredPassword = ""
+            dialogError = null
+            showPasswordDialog = true
+        } else {
+            scope.launch {
+                viewPath = withContext(Dispatchers.IO) {
+                    resolveViewPath(entry, password)
+                }
+                if (viewPath == null) {
+                    viewError = "Wrong password or corrupted file"
                 }
             }
-            if (result == null) {
-                viewError = "Wrong password or corrupted file"
+        }
+    }
+
+    /** Run [action] for [entry], requesting the vault password when needed. */
+    val requirePasswordOrRun: (VaultAction, VaultEntry) -> Unit = { action, entry ->
+        if (action == VaultAction.ENCRYPT && !VaultStorage.hasPassword(context)) {
+            // First encryption — the user picks the vault password now
+            pendingAction = VaultAction.ENCRYPT to entry
+            newPassword = ""
+            newPasswordConfirm = ""
+            dialogError = null
+            showCreatePasswordDialog = true
+        } else if (!authed) {
+            pendingAction = action to entry
+            enteredPassword = ""
+            dialogError = null
+            showPasswordDialog = true
+        } else {
+            runVaultAction(action, entry, password)
+        }
+    }
+
+    /** Execute [action] once a verified vault password is available. */
+    val runVaultAction: (VaultAction, VaultEntry, String) -> Unit = { action, entry, pwd ->
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                when (action) {
+                    VaultAction.VIEW -> resolveViewPath(entry, pwd)
+                    VaultAction.ENCRYPT -> {
+                        if (VaultStorage.encryptEntry(context, entry, pwd)) "encrypted" else null
+                    }
+                    VaultAction.DECRYPT -> {
+                        if (VaultStorage.decryptEntry(context, entry, pwd)) "decrypted" else null
+                    }
+                    VaultAction.MOVE_OUT -> {
+                        if (VaultStorage.moveOut(context, entry, pwd)) "moved" else null
+                    }
+                }
+            }
+            if (action == VaultAction.VIEW) {
+                if (result == null) {
+                    viewError = "Wrong password or corrupted file"
+                } else {
+                    viewPath = result
+                }
             } else {
-                viewPath = result
+                viewingEntry = null
+                viewPath = null
+                viewError = null
+                refreshEntries()
+                Toast.makeText(
+                    context,
+                    when (result) {
+                        "encrypted" -> "Encrypted — password required to view now"
+                        "decrypted" -> "Decrypted — visible without a password"
+                        "moved" -> "Moved out of the vault to Pictures/PYQAlbum"
+                        else -> "Operation failed — wrong password?"
+                    },
+                    Toast.LENGTH_SHORT
+                ).show()
             }
         }
     }
@@ -146,136 +234,11 @@ fun VaultScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            when {
-                // 1) First run: set the vault password
-                !VaultStorage.hasPassword(context) -> {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Spacer(Modifier.height(48.dp))
-                        Text(
-                            text = "🔒 Set a vault password",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "It unlocks the vault and protects encrypted entries. " +
-                                "If you forget it, encrypted images cannot be recovered.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-                        Spacer(Modifier.height(24.dp))
-                        OutlinedTextField(
-                            value = password,
-                            onValueChange = { password = it },
-                            label = { Text("Password") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = confirmPassword,
-                            onValueChange = { confirmPassword = it },
-                            label = { Text("Confirm password") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (errorMsg != null) {
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                text = errorMsg!!,
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                        Spacer(Modifier.height(16.dp))
-                        Button(
-                            onClick = {
-                                when {
-                                    password.length < 4 -> {
-                                        errorMsg = "Password must be at least 4 characters"
-                                    }
-                                    password != confirmPassword -> {
-                                        errorMsg = "Passwords do not match"
-                                    }
-                                    else -> {
-                                        VaultStorage.setPassword(context, password)
-                                        authed = true
-                                        errorMsg = null
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Set Password")
-                        }
-                    }
-                }
-
-                // 2) Password locked
-                !authed -> {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Spacer(Modifier.height(48.dp))
-                        Text(
-                            text = "🔒 Photo Vault",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "Enter your vault password to unlock",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.height(24.dp))
-                        OutlinedTextField(
-                            value = password,
-                            onValueChange = { password = it },
-                            label = { Text("Password") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (errorMsg != null) {
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                text = errorMsg!!,
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                        Spacer(Modifier.height(16.dp))
-                        Button(
-                            onClick = {
-                                if (VaultStorage.verifyPassword(context, password)) {
-                                    authed = true
-                                    errorMsg = null
-                                } else {
-                                    errorMsg = "Wrong password"
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Unlock")
-                        }
-                    }
-                }
-
-                // 3) Vault contents
-                else -> {
-                    Column(modifier = Modifier.fillMaxSize()) {
+            // The vault is a normal private gallery: unencrypted entries are
+            // always visible and need no password. The vault password (created
+            // on first Encrypt) only protects entries the user explicitly
+            // encrypts — it is re-entered to view / decrypt / move them out.
+            Column(modifier = Modifier.fillMaxSize()) {
                         // Toolbar row
                         Row(
                             modifier = Modifier
@@ -340,7 +303,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                     if (entries.isEmpty()) {
                                         Text(
                                             text = "Import copies from your gallery into this " +
-                                                "private area (optionally encrypted).",
+                                                "private area (hidden from other apps — encrypt later if you want).",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             textAlign = TextAlign.Center,
@@ -371,8 +334,6 @@ fun VaultScreen(onBack: () -> Unit) {
                             }
                         }
                     }
-                }
-            }
         }
     }
 
@@ -383,21 +344,14 @@ fun VaultScreen(onBack: () -> Unit) {
             title = { Text("Import ${importSelection.size} image(s)") },
             text = {
                 Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Switch(
-                            checked = encryptImport,
-                            onCheckedChange = { encryptImport = it }
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("Encrypt with vault password")
-                    }
-                    if (encryptImport) {
-                        Text(
-                            text = "Encrypted files are unreadable without the vault password.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        text = "Images are copied as-is into the vault's app-private " +
+                            "storage — no password needed, and other gallery apps " +
+                            "cannot see them. Password-protect individual images later " +
+                            "with the Encrypt action in the viewer.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Spacer(Modifier.height(8.dp))
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(4),
@@ -459,9 +413,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                     VaultStorage.importFromGallery(
                                         context = context,
                                         uri = uri,
-                                        displayName = name,
-                                        encrypted = encryptImport,
-                                        password = if (encryptImport) password else null
+                                        displayName = name
                                     )
                                 }
                                 if (result) ok++ else fail++
@@ -490,6 +442,21 @@ fun VaultScreen(onBack: () -> Unit) {
         )
     }
 
+    // Motion-photo detection: when a view path resolves, look for an embedded
+    // MP4 (GIFs/animated WebP play directly through Coil, so no extraction).
+    LaunchedEffect(viewPath) {
+        motionVideoPath = null
+        showMotionVideo = false
+        val path = viewPath
+        if (path != null) {
+            motionVideoPath = withContext(Dispatchers.IO) {
+                MotionPhotoExtractor.extractToCache(
+                    context, Uri.fromFile(File(path)).toString()
+                )?.absolutePath
+            }
+        }
+    }
+
     // ===================== Viewer dialog =====================
     viewingEntry?.let { entry ->
         AlertDialog(
@@ -512,17 +479,41 @@ fun VaultScreen(onBack: () -> Unit) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     val currentPath = viewPath
                     if (currentPath != null) {
-                        AsyncImage(
-                            model = ImageRequest.Builder(context)
-                                .data(currentPath)
-                                .crossfade(true)
-                                .build(),
-                            contentDescription = entry.displayName,
+                        // GIF / animated WebP play directly through Coil; motion
+                        // photos get a ▶ chip that overlays the embedded video.
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 320.dp),
-                            contentScale = ContentScale.Fit
-                        )
+                                .heightIn(max = 320.dp)
+                        ) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(currentPath)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = entry.displayName,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Fit
+                            )
+                            if (!showMotionVideo && motionVideoPath != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .padding(bottom = 8.dp)
+                                        .background(Color(0x99000000), MaterialTheme.shapes.small)
+                                        .clickable { showMotionVideo = true }
+                                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                                ) {
+                                    Text("▶ Motion photo", color = Color.White)
+                                }
+                            }
+                            if (showMotionVideo && motionVideoPath != null) {
+                                MotionPhotoPlayer(
+                                    videoPath = motionVideoPath!!,
+                                    onClose = { showMotionVideo = false }
+                                )
+                            }
+                        }
                     } else if (viewError != null) {
                         Text(
                             text = viewError!!,
@@ -562,6 +553,26 @@ fun VaultScreen(onBack: () -> Unit) {
                     }) {
                         Text(if (entry.hidden) "Unhide" else "Hide")
                     }
+                    if (!entry.encrypted) {
+                        // Password-protect this entry (first Encrypt sets the password)
+                        TextButton(onClick = {
+                            requirePasswordOrRun(VaultAction.ENCRYPT, entry)
+                        }) {
+                            Text("Encrypt")
+                        }
+                    } else {
+                        // Remove the password protection (needs the vault password)
+                        TextButton(onClick = {
+                            requirePasswordOrRun(VaultAction.DECRYPT, entry)
+                        }) {
+                            Text("Decrypt")
+                        }
+                    }
+                    TextButton(onClick = {
+                        requirePasswordOrRun(VaultAction.MOVE_OUT, entry)
+                    }) {
+                        Text("Move out")
+                    }
                     TextButton(
                         onClick = {
                             VaultStorage.deleteEntry(context, entry)
@@ -590,6 +601,151 @@ fun VaultScreen(onBack: () -> Unit) {
                     viewError = null
                 }) {
                     Text("Close")
+                }
+            }
+        )
+    }
+
+    // ===================== Vault password prompt (existing password) =====================
+    if (showPasswordDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showPasswordDialog = false
+                pendingAction = null
+            },
+            title = { Text("Enter vault password") },
+            text = {
+                Column {
+                    Text(
+                        text = "This action is protected by the vault password.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = enteredPassword,
+                        onValueChange = {
+                            enteredPassword = it
+                            dialogError = null
+                        },
+                        label = { Text("Password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    if (dialogError != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = dialogError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val (action, entry) = pendingAction ?: return@TextButton
+                    if (VaultStorage.verifyPassword(context, enteredPassword)) {
+                        password = enteredPassword
+                        authed = true
+                        showPasswordDialog = false
+                        pendingAction = null
+                        runVaultAction(action, entry, enteredPassword)
+                    } else {
+                        dialogError = "Wrong password"
+                    }
+                }) {
+                    Text("OK")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showPasswordDialog = false
+                    pendingAction = null
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // ===================== Create vault password (first Encrypt) =====================
+    if (showCreatePasswordDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showCreatePasswordDialog = false
+                pendingAction = null
+            },
+            title = { Text("Set a vault password") },
+            text = {
+                Column {
+                    Text(
+                        text = "Encrypted entries are unreadable without this password. " +
+                            "If you forget it, the encrypted images cannot be recovered.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = newPassword,
+                        onValueChange = {
+                            newPassword = it
+                            dialogError = null
+                        },
+                        label = { Text("Password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newPasswordConfirm,
+                        onValueChange = {
+                            newPasswordConfirm = it
+                            dialogError = null
+                        },
+                        label = { Text("Confirm password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    if (dialogError != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = dialogError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val (action, entry) = pendingAction ?: return@TextButton
+                    when {
+                        newPassword.length < 4 -> {
+                            dialogError = "Password must be at least 4 characters"
+                        }
+                        newPassword != newPasswordConfirm -> {
+                            dialogError = "Passwords do not match"
+                        }
+                        else -> {
+                            VaultStorage.setPassword(context, newPassword)
+                            password = newPassword
+                            authed = true
+                            showCreatePasswordDialog = false
+                            pendingAction = null
+                            runVaultAction(action, entry, newPassword)
+                        }
+                    }
+                }) {
+                    Text("Set Password")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showCreatePasswordDialog = false
+                    pendingAction = null
+                }) {
+                    Text("Cancel")
                 }
             }
         )
@@ -663,6 +819,9 @@ private fun VaultCell(
 }
 
 // ===================== Vault domain model =====================
+
+/** What the user is trying to do when the vault password is requested. */
+private enum class VaultAction { VIEW, ENCRYPT, DECRYPT, MOVE_OUT }
 
 /** Lightweight entry description built from the on-disk metadata. */
 data class VaultEntry(
@@ -875,37 +1034,30 @@ object VaultStorage {
     }
 
     /**
-     * Copy [uri] from the gallery into the vault. When [encrypted], the bytes
-     * are AES-256-GCM encrypted with a key derived from [password].
-     * Returns true on success.
+     * Copy [uri] from the gallery into the vault in its ORIGINAL form
+     * (unencrypted — the vault's app-private storage already keeps it hidden
+     * from other gallery apps). Password protection is applied later with
+     * [encryptEntry] on the user's explicit choice. Returns true on success.
      */
     fun importFromGallery(
         context: Context,
         uri: String,
-        displayName: String,
-        encrypted: Boolean,
-        password: String?
+        displayName: String
     ): Boolean {
         return try {
-            if (encrypted && password.isNullOrEmpty()) return false
             val bytes = context.contentResolver.openInputStream(Uri.parse(uri))
                 ?.use { it.readBytes() } ?: return false
             if (bytes.isEmpty()) return false
 
             val id = "v" + System.currentTimeMillis() + "_" + (Math.random() * 100000).toInt()
-            val dataFile = if (encrypted) {
-                val enc = VaultCrypto.encryptBytes(bytes, password!!)
-                File(vaultDir(context), "$id.vault").apply { writeBytes(enc) }
-            } else {
-                File(vaultDir(context), id).apply { writeBytes(bytes) }
-            }
+            val dataFile = File(vaultDir(context), id).apply { writeBytes(bytes) }
             if (!dataFile.exists() || dataFile.length() == 0L) {
                 dataFile.delete()
                 return false
             }
             val meta = VaultMeta(
                 name = displayName,
-                encrypted = encrypted,
+                encrypted = false,
                 hidden = false,
                 dateAdded = System.currentTimeMillis()
             )
@@ -913,6 +1065,134 @@ object VaultStorage {
             true
         } catch (e: Exception) {
             false
+        }
+    }
+
+    /**
+     * Password-protect a plaintext entry in place: the bytes are AES-256-GCM
+     * encrypted with a key derived from [password] and stored as "<id>.vault";
+     * the plaintext copy is removed and the meta updated. Returns true on
+     * success.
+     */
+    fun encryptEntry(context: Context, entry: VaultEntry, password: String): Boolean {
+        return try {
+            if (entry.encrypted || password.isEmpty()) return false
+            val src = entryFile(context, entry)
+            val bytes = src.readBytes()
+            if (bytes.isEmpty()) return false
+            val enc = VaultCrypto.encryptBytes(bytes, password)
+            val vaultFile = File(vaultDir(context), "${entry.id}.vault")
+            vaultFile.writeBytes(enc)
+            if (!vaultFile.exists() || vaultFile.length() == 0L) {
+                vaultFile.delete()
+                return false
+            }
+            src.delete()
+            updateMeta(context, entry.id) { it.copy(encrypted = true) }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Remove the password protection of an encrypted entry in place: decrypt
+     * with [password] back to the plaintext file and drop the ".vault" copy.
+     * Returns true on success (false = wrong password / corrupted file).
+     */
+    fun decryptEntry(context: Context, entry: VaultEntry, password: String): Boolean {
+        return try {
+            if (!entry.encrypted) return false
+            val vaultFile = entryFile(context, entry)
+            val data = vaultFile.readBytes()
+            val plain = VaultCrypto.decryptBytes(data, password) ?: return false
+            val plainFile = File(vaultDir(context), entry.id).apply { writeBytes(plain) }
+            if (!plainFile.exists() || plainFile.length() == 0L) {
+                plainFile.delete()
+                return false
+            }
+            vaultFile.delete()
+            updateMeta(context, entry.id) { it.copy(encrypted = false) }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Move an entry OUT of the vault into the gallery (Pictures/PYQAlbum via
+     * a MediaStore insert with the IS_PENDING publish pattern — zero extra
+     * permission, exactly how the album's own copy/move writes to standard
+     * collections). Encrypted entries are decrypted with [password] in memory
+     * first. The vault copy is removed on success.
+     */
+    fun moveOut(context: Context, entry: VaultEntry, password: String?): Boolean {
+        var destUri: Uri? = null
+        return try {
+            val bytes = if (entry.encrypted) {
+                if (password.isNullOrEmpty()) return false
+                VaultCrypto.decryptBytes(entryFile(context, entry).readBytes(), password)
+                    ?: return false
+            } else {
+                entryFile(context, entry).readBytes()
+            }
+            if (bytes.isEmpty()) return false
+
+            val name = entry.displayName.ifBlank { "vault_image" }
+            val mime = when (name.substringAfterLast('.', "").lowercase()) {
+                "gif" -> "image/gif"
+                "webp" -> "image/webp"
+                "png" -> "image/png"
+                else -> "image/jpeg"
+            }
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/PYQAlbum")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+            }
+            destUri = context.contentResolver.insert(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
+            ) ?: return false
+            val output = context.contentResolver.openOutputStream(destUri!!)
+            if (output == null) {
+                context.contentResolver.delete(destUri!!, null, null)
+                return false
+            }
+            output.use { it.write(bytes) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val publishValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                }
+                val updated = context.contentResolver.update(destUri!!, publishValues, null, null)
+                if (updated == 0) {
+                    context.contentResolver.delete(destUri!!, null, null)
+                    return false
+                }
+            }
+            deleteEntry(context, entry)
+            true
+        } catch (e: Exception) {
+            destUri?.let { uri ->
+                try { context.contentResolver.delete(uri, null, null) } catch (_: Exception) {}
+            }
+            false
+        }
+    }
+
+    /** Rewrite one entry's meta file, applying [transform] to the stored meta. */
+    private fun updateMeta(context: Context, id: String, transform: (VaultMeta) -> VaultMeta) {
+        try {
+            val metaFile = File(vaultDir(context), "$id.meta")
+            val meta = try {
+                gson.fromJson(metaFile.readText(), VaultMeta::class.java)
+            } catch (e: Exception) {
+                VaultMeta()
+            }
+            metaFile.writeText(gson.toJson(transform(meta)))
+        } catch (_: Exception) {
         }
     }
 

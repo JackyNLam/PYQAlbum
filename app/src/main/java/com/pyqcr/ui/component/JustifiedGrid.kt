@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Label
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.Icon
@@ -47,6 +48,7 @@ fun JustifiedGrid(
     isMultiSelectMode: Boolean = false,
     selectedImageUris: Set<String> = emptySet(),
     aiSelectedUris: Set<String> = emptySet(),
+    favouriteUris: Set<String> = emptySet(),
     taggedUris: Set<String> = emptySet(),
     onImageClick: ((String) -> Unit)? = null,
     onLongPress: ((String) -> Unit)? = null,
@@ -188,6 +190,25 @@ fun JustifiedGrid(
                                     contentDescription = "AI Selected",
                                     tint = Color.White,
                                     modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
+                        // Favourite indicator (heart — MediaStore IS_FAVORITE)
+                        if (image.uri in favouriteUris) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .background(
+                                        Color(0xCC000000),
+                                        shape = MaterialTheme.shapes.small
+                                    )
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Favorite,
+                                    contentDescription = "Favourite",
+                                    tint = Color(0xFFFF4081),
+                                    modifier = Modifier.size(13.dp)
                                 )
                             }
                         }

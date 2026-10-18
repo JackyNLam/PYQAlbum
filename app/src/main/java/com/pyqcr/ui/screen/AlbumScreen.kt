@@ -71,6 +71,7 @@ import com.pyqcr.ui.viewmodel.AlbumViewModel
 import com.pyqcr.ui.viewmodel.FolderSortMode
 import com.pyqcr.ui.viewmodel.FolderListSortMode
 import com.pyqcr.ui.viewmodel.GroupByMode
+import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.ImageUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -127,6 +128,9 @@ fun AlbumScreen(
 
     // AI rating selection image URIs
     var aiSelectedUris by rememberSaveable { mutableStateOf<Set<String>>(emptySet()) }
+
+    // Favourite image URIs (MediaStore IS_FAVORITE flag, Android 13+)
+    var favouriteUris by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     // Long-press directly enters multi-select mode
 
@@ -373,6 +377,9 @@ fun AlbumScreen(
     // Load AI selected URIs
     LaunchedEffect(Unit) {
         aiSelectedUris = loadAiSelectedUris(context)
+        favouriteUris = withContext(Dispatchers.IO) {
+            FavouriteStore.loadFavouriteUris(context)
+        }
     }
 
     // System delete confirmation launcher (API 30+) — one dialog for the whole batch
@@ -1280,6 +1287,40 @@ fun AlbumScreen(
                         },
                         onAiEdit = {
                             showAiEditRoleDialog = true
+                        },
+                        onFavourite = {
+                            scope.launch {
+                                if (!FavouriteStore.supported) {
+                                    snackbarHostState.showSnackbar("Favourite requires Android 13+")
+                                    return@launch
+                                }
+                                val contextUris = selectedImageUris
+                                if (contextUris.isEmpty()) return@launch
+                                val alreadyFav = favouriteUris.intersect(contextUris)
+                                val toAdd = contextUris - alreadyFav
+                                if (toAdd.isEmpty() && alreadyFav.isNotEmpty()) {
+                                    // All selected are already favourites → unmark them
+                                    withContext(Dispatchers.IO) {
+                                        alreadyFav.forEach {
+                                            FavouriteStore.setFavourite(context, it, false)
+                                        }
+                                    }
+                                    favouriteUris = favouriteUris - alreadyFav
+                                    snackbarHostState.showSnackbar(
+                                        "${alreadyFav.size} removed from favourites"
+                                    )
+                                } else {
+                                    withContext(Dispatchers.IO) {
+                                        toAdd.forEach {
+                                            FavouriteStore.setFavourite(context, it, true)
+                                        }
+                                    }
+                                    favouriteUris = favouriteUris + toAdd
+                                    snackbarHostState.showSnackbar(
+                                        "${toAdd.size} marked as favourite"
+                                    )
+                                }
+                            }
                         }
                     )
                 }
@@ -1385,6 +1426,7 @@ fun AlbumScreen(
                                         isMultiSelectMode = isMultiSelectMode,
                                         selectedImageUris = selectedImageUris,
                                         aiSelectedUris = aiSelectedUris,
+                                        favouriteUris = favouriteUris,
                                         taggedUris = taggedUriSet,
                                         groupByMode = groupByMode,
                                         gridState = gridState,
@@ -1554,6 +1596,25 @@ fun AlbumScreen(
                                                             contentDescription = "AI Selected",
                                                             tint = Color.White,
                                                             modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                }
+                                                // Favourite indicator (heart — MediaStore IS_FAVORITE)
+                                                if (image.uri in favouriteUris) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.BottomCenter)
+                                                            .background(
+                                                                Color(0xCC000000),
+                                                                shape = MaterialTheme.shapes.small
+                                                            )
+                                                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Favorite,
+                                                            contentDescription = "Favourite",
+                                                            tint = Color(0xFFFF4081),
+                                                            modifier = Modifier.size(13.dp)
                                                         )
                                                     }
                                                 }
@@ -2016,6 +2077,7 @@ private fun BatchMultiSelectBar(
     onCollage: () -> Unit,
     onTag: () -> Unit,
     onRate: () -> Unit,
+    onFavourite: () -> Unit,
     onSelectForAi: () -> Unit,
     onRemoveAiInfo: () -> Unit,
     onResize: () -> Unit,
@@ -2071,6 +2133,11 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onRate() },
                         text = { Text("Rate") },
                         leadingIcon = { Icon(Icons.Default.Star, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onFavourite() },
+                        text = { Text("Favourite") },
+                        leadingIcon = { Icon(Icons.Default.Favorite, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     DropdownMenuItem(
                         onClick = { showMenu = false; onSelectForAi() },
@@ -2165,6 +2232,7 @@ private fun ImageGridView(
     isMultiSelectMode: Boolean,
     selectedImageUris: Set<String>,
     aiSelectedUris: Set<String>,
+    favouriteUris: Set<String> = emptySet(),
     taggedUris: Set<String>,
     groupByMode: GroupByMode = GroupByMode.NONE,
     gridState: LazyGridState = rememberLazyGridState(),
@@ -2244,6 +2312,7 @@ private fun ImageGridView(
                                 isMultiSelectMode = isMultiSelectMode,
                                 selectedImageUris = selectedImageUris,
                                 aiSelectedUris = aiSelectedUris,
+                                favouriteUris = favouriteUris,
                                 taggedUris = taggedUris,
                                 onImageClick = onImageClick,
                                 onLongPress = onLongPress,
@@ -2289,6 +2358,7 @@ private fun ImageGridView(
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
                 aiSelectedUris = aiSelectedUris,
+                favouriteUris = favouriteUris,
                 taggedUris = taggedUris,
                 onImageClick = gridClick,
                 onLongPress = onLongPress,
@@ -2304,6 +2374,7 @@ private fun ImageGridView(
                 isMultiSelectMode = isMultiSelectMode,
                 selectedImageUris = selectedImageUris,
                 aiSelectedUris = aiSelectedUris,
+                favouriteUris = favouriteUris,
                 taggedUris = taggedUris,
                 onImageClick = justifiedClick,
                 onLongPress = onLongPress,
@@ -2367,6 +2438,7 @@ private fun ImageGridCell(
     isMultiSelectMode: Boolean,
     selectedImageUris: Set<String>,
     aiSelectedUris: Set<String>,
+    favouriteUris: Set<String> = emptySet(),
     taggedUris: Set<String>,
     onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit,
@@ -2416,6 +2488,25 @@ private fun ImageGridCell(
                     contentDescription = "AI Selected",
                     tint = Color.White,
                     modifier = Modifier.size(14.dp)
+                )
+            }
+        }
+        // Favourite indicator (heart — MediaStore IS_FAVORITE)
+        if (image.uri in favouriteUris) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .background(
+                        Color(0xCC000000),
+                        shape = MaterialTheme.shapes.small
+                    )
+                    .padding(horizontal = 4.dp, vertical = 1.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Favorite,
+                    contentDescription = "Favourite",
+                    tint = Color(0xFFFF4081),
+                    modifier = Modifier.size(13.dp)
                 )
             }
         }
