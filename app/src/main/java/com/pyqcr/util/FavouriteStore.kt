@@ -1,5 +1,6 @@
 package com.pyqcr.util
 
+import android.app.PendingIntent
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
@@ -69,31 +70,46 @@ object FavouriteStore {
 
     /**
      * PRIMARY marking method (Android 13+): builds the platform favourite
-     * request. The system shows ONE confirmation dialog for [uris]; on approval
-     * the media provider itself persists IS_FAVORITE — unlike a direct write,
-     * this works for rows this app does NOT own (e.g. photos taken by other
-     * apps), which is exactly what other gallery apps read. Returns null on
-     * older APIs / failure — the caller may then fall back to [setFavourite].
+     * request exactly as the system API intends — one confirmation dialog for
+     * [imageUris]; on approval the media provider itself persists IS_FAVORITE,
+     * which works for rows this app does NOT own (e.g. photos taken by other
+     * apps), i.e. what other gallery apps read. Returns the platform
+     * PendingIntent so callers can build a launcher from it; null below
+     * Android 13 (the favourite-request DIALOG itself is API 33+, even though
+     * the IS_FAVORITE column exists from API 30) or on failure — callers then
+     * fall back to the WRITE-ACCESS request ([createWriteAccessRequest]) or the
+     * verified direct write ([setFavourite]).
+     */
+    fun setMediaFavoriteStatus(
+        context: Context,
+        imageUris: List<Uri>,
+        isFavorite: Boolean
+    ): PendingIntent? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
+        return try {
+            MediaStore.createFavoriteRequest(
+                context.contentResolver,
+                imageUris,
+                isFavorite
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Convenience wrapper for callers holding URI strings; delegates to
+     * [setMediaFavoriteStatus] (the canonical favourite-request builder).
      */
     fun createFavoriteRequest(
         context: Context,
         uris: List<String>,
         favourite: Boolean
-    ): IntentSender? {
-        // The favourite-request DIALOG itself is Android 13+ (API 33), even
-        // though the IS_FAVORITE column exists from API 30 — on Android 11/12
-        // callers must fall back to the direct verified write ([setFavourite]).
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
-        return try {
-            MediaStore.createFavoriteRequest(
-                context.contentResolver,
-                uris.map { Uri.parse(it) }.toMutableList(),
-                favourite
-            ).intentSender
-        } catch (e: Exception) {
-            null
-        }
-    }
+    ): IntentSender? = setMediaFavoriteStatus(
+        context,
+        uris.map { Uri.parse(it) },
+        favourite
+    )?.intentSender
 
     /**
      * Android 11/12 bridge for marking favourites on rows this app does not
