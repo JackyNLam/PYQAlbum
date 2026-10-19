@@ -486,12 +486,16 @@ fun VaultScreen(onBack: () -> Unit) {
                             }
                         }
                     }
-                    // Footer: selection count + actions
+                    // Footer: selection count + actions. The fixed bottom padding is
+                    // deliberately as large as the taller navigation bar (3-button
+                    // style ~48dp): some ROMs never deliver window insets into the
+                    // dialog, so systemBarsPadding() alone leaves the Move button
+                    // clipped behind the navigation bar.
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 6.dp)
-                            .padding(bottom = 8.dp),
+                            .padding(bottom = 48.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
