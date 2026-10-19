@@ -187,7 +187,7 @@ fun ImageDetailScreen(
     // when the request cannot be built.
     val toggleFavourite: () -> Unit = {
         if (!FavouriteStore.supported) {
-            coroutineScope.launch { snackbarHostState.showSnackbar("Favourite requires Android 13+") }
+            coroutineScope.launch { snackbarHostState.showSnackbar("Favourite requires Android 11+") }
         } else {
             val newValue = !isFavourite
             val sender = FavouriteStore.createFavoriteRequest(

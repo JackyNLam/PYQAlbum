@@ -33,7 +33,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   7. **Stop button** appears while either run is active — cancels the foreground scoring (per-image, responsive) or the background WorkManager job
   8. No image-count limit — selections of any size are rated (URI list is passed to the background worker via a cache file, sidestepping WorkManager's 10 KiB input-data cap)
   9. Selection persists across app launches (SharedPreferences)
-- **Multi-select mode**: long-press enters multi-select; the bottom bar's ⋮ menu has **Select All / Deselect All** (applies to the current folder, tag, or recycle-bin view), **Collage**, batch Tag / Rate / **Favourite** / Remove Tags / **AI Rating** (one merged button: queues the images for AI rating AND clears their stale AI info so they get re-ranked), **Copy to…** and **Move to…** (in-app folder browser), **Move to Vault**, and **Delete** — Delete **moves the images to the system recycle bin first** (Android 11+ trash, restorable) instead of deleting permanently; the recycle bin itself is browsable from the left drawer (per-image **Restore** clears the item's MediaStore trash flag to send it straight back to the gallery, per-image **Delete** removes it permanently — inside the bin, batch Delete is also permanent)
+- **Multi-select mode**: long-press enters multi-select; the bottom bar's ⋮ menu has **Select All / Deselect All** (applies to the current folder, tag, or recycle-bin view), **Collage**, batch Tag / Rate / **Favourite** / Remove Tags / **AI Rating** (if the selected images already have an AI score, asks whether to toggle the AI Rating queue or remove the stored AI info; otherwise it toggles the queue directly), **Copy to…** and **Move to…** (in-app folder browser), **Move to Vault**, and **Delete** — Delete **moves the images to the system recycle bin first** (Android 11+ trash, restorable) instead of deleting permanently; the recycle bin itself is browsable from the left drawer — inside the bin, batch ⋮ offers **Restore** (clears the MediaStore trash flag) and **Delete permanently**, and each item also has a per-image Restore / Delete row
 - **Remove Tags** (multi-select ⋮) lists **only the tags actually present on the selected images** — tags that none of the selected images carry are not offered
 - **Collage**: select ≥2 images → ⋮ → **Collage** — opens an options dialog first: **background color** for empty space (White / Black / Gray / Beige / Light Blue / Pink), **number of columns** (2–5), and **image order** (▲▼ reorder; images flow left-to-right, top-to-bottom). Images are scaled to fit uniform cells on the chosen background and saved to `Pictures/PYQAlbum/collage_<timestamp>.jpg`; all inputs plus the output are auto-tagged with a unique **`Collage <timestamp>`** tag so the set is easy to find and re-edit under the Tag view
 - **Copy**: files are written via ContentResolver stream to the chosen folder (works on all Android versions)
@@ -112,7 +112,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Tap folder card** (Folder mode) | Enter folder to see images in selected layout (folder cards show image count, sortable by modified date / count / name); the **All Folders** card at the top shows images from every folder at once |
 | **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Rating (toggle) |
-| **Favourite** (♥) | Marks images in **MediaStore `IS_FAVORITE`** (Android 13+) via the system **createFavoriteRequest** confirmation dialog — the media provider itself applies the flag, so it works for photos this app does not own, and apps that read MediaStore `IS_FAVORITE` (AOSP gallery, Files, etc.) can identify them. Note: WeChat favourites (收藏) are WeChat-internal and Google Photos favourites are cloud-based — neither can be set from another app. A direct IS_FAVORITE write is only attempted as a last resort if the system request cannot be built. Batch menu **Favourite**, and a **Mark as Favourite** button in the detail panel; ♥ badge on favourited thumbnails |
+| **Favourite** (♥) | Marks images in **MediaStore `IS_FAVORITE`** (Android 11+ column; the system **createFavoriteRequest** confirmation dialog is used on Android 13+) — the media provider itself applies the flag, so it works for photos this app does not own, and apps that read MediaStore `IS_FAVORITE` (AOSP gallery, Files, etc.) can identify them. Note: WeChat favourites (收藏) are WeChat-internal and Google Photos favourites are cloud-based — neither can be set from another app. A direct IS_FAVORITE write (verified after writing) is only attempted as a fallback when the request cannot be built (e.g. Android 11/12, where only rows this app owns may persist). Batch menu **Favourite**, and a **Mark as Favourite** button in the detail panel; ♥ badge on favourited thumbnails |
 | **Swipe down on image** (detail view) | Go back to thumbnail grid |
 | **Swipe left** (detail view) | Next image in same folder/tag |
 | **Swipe right** (detail view) | Previous image in same folder/tag |
@@ -124,7 +124,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Edit / AI Rating |
 | **AI Edit** | Via drawer ✏️ |
 | **AI Rating** | Via drawer ✨ |
-| **Multi-select mode** | Batch actions (⋮ menu): Select All / Deselect All / Collage / Tag / Rate / **Favourite** / Remove Tags / **AI Rating** (queues + clears stale AI info) / Copy to… / Move to… / **Move to Vault** / Delete (recycle bin first on Android 11+) |
+| **Multi-select mode** | Batch actions (⋮ menu): Select All / Deselect All / Collage / Tag / Rate / **Favourite** / Remove Tags / **AI Rating** (asks whether to toggle the queue or remove stored AI info when scores already exist; otherwise toggles the queue) / Copy to… / Move to… / **Move to Vault** / Delete (recycle bin first on Android 11+; inside the bin the ⋮ menu offers **Restore** and **Delete permanently** instead) |
 | **Select All / Deselect All** (⋮ in multi-select) | Toggles selection of every image in the current folder or tag view |
 | **Collage** (⋮ in multi-select) | Builds a collage from ≥2 selected images; tags inputs + output with a unique `Collage <timestamp>` tag |
 | **Thumbnail rating badge** | Gold number (e.g. `3.5` or `5.0`) at top-left corner of thumbnails with ratings |
@@ -143,7 +143,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 #### Tag mode
 - Grid of tag cards — tap a tag to see all images with that tag
-- A **Favourite** card at the top of the tag list opens the MediaStore favourites (Android 13+ `IS_FAVORITE` flag) as a pseudo-tag browse view
+- A **Favourite** card at the top of the tag list opens the MediaStore favourites (Android 11+ `IS_FAVORITE` flag) as a pseudo-tag browse view
 - Tap **All Tags** back button to return to tag list
 - Tags are assigned via long-press → **Add Tag** action
 - Existing tags are shown as selectable options when adding a tag
@@ -202,7 +202,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **AI Actions** (below the tag area), following the batch menu's function:
   - **AI Rating** — toggles this image in/out of the AI Rating selection queue (✓ shows it's queued; run the rating from the drawer ✨ AI Rating)
   - **AI Edit** — opens a role dialog (**As AI Edit source / As AI Edit target**, tap again to remove) that toggles the image in the AI Edit queue, exactly like the batch menu's AI Edit dialog
-  - **Mark as Favourite** — sets/unset the Android 13+ MediaStore `IS_FAVORITE` flag through the system **createFavoriteRequest** dialog (visible to apps that read it; WeChat收藏 / Google Photos favourites are their own app-internal clouds and cannot be set from outside)
+  - **Mark as Favourite** — sets/unset the MediaStore `IS_FAVORITE` flag (Android 11+ column; system **createFavoriteRequest** dialog on Android 13+, verified direct write fallback otherwise — the flag is visible to apps that read it; WeChat收藏 / Google Photos favourites are their own app-internal clouds and cannot be set from outside)
 - **More Actions** (below the Favourite button — the rest of the album batch ⋮ menu applied to this single image):
   - **Resize** — the same options dialog as the batch menu (width 500/1000/2000/custom; replace original or save a `_resized` copy)
   - **Copy** / **Move** — in-app folder browser (+ optional SAF picker); a move re-maps the image's tags to the new MediaStore URI and drops the original via the recycle bin

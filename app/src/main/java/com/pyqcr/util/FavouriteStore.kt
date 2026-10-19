@@ -16,9 +16,15 @@ import android.provider.MediaStore
  */
 object FavouriteStore {
 
-    /** IS_FAVORITE only exists from Android 13 (API 33) onward. */
+    /**
+     * The MediaStore IS_FAVORITE column exists from Android 11 (API 30) — the
+     * system favourite-request DIALOG (createFavoriteRequest) itself needs
+     * Android 13 (API 33) and is guarded separately inside
+     * [createFavoriteRequest], so callers can fall back to the direct
+     * (verified) write on API 30-32.
+     */
     val supported: Boolean
-        get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+        get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
 
     /** Whether the MediaStore row behind [uri] is currently marked favourite. */
     fun isFavourite(context: Context, uri: String): Boolean {
@@ -74,7 +80,10 @@ object FavouriteStore {
         uris: List<String>,
         favourite: Boolean
     ): IntentSender? {
-        if (!supported) return null
+        // The favourite-request DIALOG itself is Android 13+ (API 33), even
+        // though the IS_FAVORITE column exists from API 30 — on Android 11/12
+        // callers must fall back to the direct verified write ([setFavourite]).
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
         return try {
             MediaStore.createFavoriteRequest(
                 context.contentResolver,

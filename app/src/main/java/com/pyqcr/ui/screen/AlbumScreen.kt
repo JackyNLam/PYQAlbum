@@ -133,6 +133,22 @@ fun AlbumScreen(
     // AI rating selection image URIs
     var aiSelectedUris by rememberSaveable { mutableStateOf<Set<String>>(emptySet()) }
 
+    // Pure toggle of the current multi-selection in/out of the AI Rating
+    // queue — no AI info is touched here (the batch "AI Rating" menu asks
+    // separately whether stored AI info should be removed).
+    val toggleAiRatingSelection: () -> Unit = {
+        val alreadySelected = selectedImageUris.intersect(aiSelectedUris)
+        val newlySelected = selectedImageUris - aiSelectedUris
+        if (newlySelected.isEmpty() && alreadySelected.isNotEmpty()) {
+            // All selected images are already AI-selected → deselect them
+            aiSelectedUris = aiSelectedUris - alreadySelected
+        } else {
+            // Add newly selected, keep existing ones
+            aiSelectedUris = aiSelectedUris + newlySelected
+        }
+        saveAiSelectedUris(context, aiSelectedUris)
+    }
+
     // Favourite image URIs (MediaStore IS_FAVORITE flag, Android 13+)
     var favouriteUris by remember { mutableStateOf<Set<String>>(emptySet()) }
 
@@ -142,6 +158,9 @@ fun AlbumScreen(
     var showTagDialog by remember { mutableStateOf(false) }
     var showRateDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    // "AI Rating" batch menu: when the selection already has AI scores, ask the
+    // user whether they want to toggle the queue or remove the stored AI info.
+    var showAiRatingChoiceDialog by remember { mutableStateOf(false) }
     // Tags that exist on the currently selected images (for the Tag dialog's remove mode)
     var selectedImageTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
 
@@ -1287,12 +1306,30 @@ fun AlbumScreen(
                     BatchMultiSelectBar(
                         selectedCount = selectedImageUris.size,
                         allContextSelected = allContextSelected,
+                        isRecycleBin = selectedBrowseMode == BrowseMode.RECYCLE_BIN,
                         onCancel = {
                             isMultiSelectMode = false
                             selectedImageUris = emptySet()
                         },
                         onSelectAll = {
                             selectedImageUris = if (allContextSelected) emptySet() else selectedImageUris + contextUris.toSet()
+                        },
+                        onRestore = {
+                            val uris = selectedImageUris.toList()
+                            scope.launch {
+                                val restored = FileOperationHelper.restoreFromTrash(context, uris)
+                                if (restored > 0) {
+                                    viewModel.refreshImages()
+                                    trashedImages = withContext(Dispatchers.IO) {
+                                        repository.getTrashedImages()
+                                    }
+                                    snackbarHostState.showSnackbar("Restored $restored image(s)")
+                                } else {
+                                    snackbarHostState.showSnackbar("Could not restore the selected images")
+                                }
+                                isMultiSelectMode = false
+                                selectedImageUris = emptySet()
+                            }
                         },
                         onCollage = { openCollageDialog() },
                         onTag = {
@@ -1302,24 +1339,17 @@ fun AlbumScreen(
                             showRateDialog = true
                         },
                         onSelectForAi = {
-                            // Toggle: remove already-selected URIs, add the rest.
-                            // Images newly added to the rating queue also get
-                            // their stale AI info cleared (the merged "AI Rating"
-                            // button = old "AI Rating" + "Remove AI Info") so
-                            // they are ranked again.
-                            val alreadySelected = selectedImageUris.intersect(aiSelectedUris)
-                            val newlySelected = selectedImageUris - aiSelectedUris
-                            if (newlySelected.isEmpty() && alreadySelected.isNotEmpty()) {
-                                // All selected images are already AI-selected → deselect them
-                                aiSelectedUris = aiSelectedUris - alreadySelected
-                            } else {
-                                // Add newly selected, keep existing ones
-                                aiSelectedUris = aiSelectedUris + newlySelected
-                                if (newlySelected.isNotEmpty()) {
-                                    viewModel.batchRemoveAiInfo(newlySelected.toList())
-                                }
+                            // If any selected image already has an AI score, ask
+                            // what the user wants: toggle the AI Rating queue, or
+                            // remove the stored AI info. No scores → plain toggle.
+                            val hasAiScore = contextImages.any {
+                                it.uri in selectedImageUris && (it.aiScore ?: 0f) > 0f
                             }
-                            saveAiSelectedUris(context, aiSelectedUris)
+                            if (hasAiScore) {
+                                showAiRatingChoiceDialog = true
+                            } else {
+                                toggleAiRatingSelection()
+                            }
                         },
                         onCopyTo = {
                             destinationDialogOp = "copy"
@@ -1391,7 +1421,7 @@ fun AlbumScreen(
                         onFavourite = {
                             scope.launch {
                                 if (!FavouriteStore.supported) {
-                                    snackbarHostState.showSnackbar("Favourite requires Android 13+")
+                                    snackbarHostState.showSnackbar("Favourite requires Android 11+")
                                     return@launch
                                 }
                                 val contextUris = selectedImageUris
@@ -2362,6 +2392,32 @@ fun AlbumScreen(
                     }
                 )
             }
+            // AI Rating choice — the batch menu was pressed while the selection
+            // already has AI scores; let the user pick between toggling the AI
+            // Rating queue and removing the stored AI info.
+            if (showAiRatingChoiceDialog) {
+                AlertDialog(
+                    onDismissRequest = { showAiRatingChoiceDialog = false },
+                    title = { Text("AI Rating") },
+                    text = { Text("Some selected images already have an AI score. What do you want to do?") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showAiRatingChoiceDialog = false
+                            toggleAiRatingSelection()
+                        }) { Text("Toggle AI Rating") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            showAiRatingChoiceDialog = false
+                            scope.launch {
+                                val uris = selectedImageUris.toList()
+                                viewModel.batchRemoveAiInfo(uris)
+                                snackbarHostState.showSnackbar("Removed AI info from ${uris.size} image(s)")
+                            }
+                        }) { Text("Remove AI Info") }
+                    }
+                )
+            }
             // Delete confirmation dialog (Android 9 and below — no system delete dialog)
             if (showDeleteDialog) {
                 AlertDialog(
@@ -2407,8 +2463,10 @@ private fun DrawerItem(
 private fun BatchMultiSelectBar(
     selectedCount: Int,
     allContextSelected: Boolean,
+    isRecycleBin: Boolean = false,
     onCancel: () -> Unit,
     onSelectAll: () -> Unit,
+    onRestore: () -> Unit = {},
     onCollage: () -> Unit,
     onTag: () -> Unit,
     onRate: () -> Unit,
@@ -2453,6 +2511,27 @@ private fun BatchMultiSelectBar(
                         text = { Text(if (allContextSelected) "Deselect All" else "Select All") },
                         leadingIcon = { Icon(Icons.Default.SelectAll, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
+                    if (isRecycleBin) {
+                        // Inside the recycle bin only Restore + permanent Delete apply
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            onClick = { showMenu = false; onRestore() },
+                            text = { Text("Restore") },
+                            leadingIcon = { Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                        )
+                        DropdownMenuItem(
+                            onClick = { showMenu = false; onDelete() },
+                            text = { Text("Delete permanently", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        )
+                    } else {
                     DropdownMenuItem(
                         onClick = { showMenu = false; onCollage() },
                         text = { Text("Collage") },
@@ -2519,6 +2598,7 @@ private fun BatchMultiSelectBar(
                             )
                         }
                     )
+                    }
                 }
             }
 
