@@ -12,12 +12,19 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitPointerEvent
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,12 +34,18 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -115,6 +128,24 @@ fun VaultScreen(onBack: () -> Unit) {
     var motionVideoPath by remember { mutableStateOf<String?>(null) }
     var showMotionVideo by remember { mutableStateOf(false) }
 
+    // Folder drill-down state: null = vault folder list, otherwise one folder
+    var currentFolder by remember { mutableStateOf<String?>(null) }
+
+    // Full-screen viewer state (pinch-zoom + pan, swipe-up actions panel)
+    val viewingId = viewingEntry?.id
+    var viewerScale by remember(viewingId) { mutableFloatStateOf(1f) }
+    var viewerOffset by remember(viewingId) { mutableStateOf(Offset.Zero) }
+    var viewerSize by remember(viewingId) { mutableStateOf(Size.Zero) }
+    var showVaultActions by remember(viewingId) { mutableStateOf(false) }
+
+    // Vault-wide password gate: the vault itself is locked (not just encrypted
+    // entries), and the password can be changed from the top bar.
+    var showUnlockDialog by remember { mutableStateOf(false) }
+    var showChangePasswordDialog by remember { mutableStateOf(false) }
+    var oldVaultPassword by remember { mutableStateOf("") }
+    var newVaultPassword by remember { mutableStateOf("") }
+    var newVaultPasswordConfirm by remember { mutableStateOf("") }
+
     val scope = rememberCoroutineScope()
 
     // Originals of moved images leave the gallery — recycle bin first (API 30+,
@@ -161,6 +192,67 @@ fun VaultScreen(onBack: () -> Unit) {
         refreshEntries()
     }
 
+    // Vault-wide password gate: the whole vault is locked behind the password
+    // (first run asks you to create one, later runs ask for the existing one).
+    LaunchedEffect(Unit) {
+        if (!VaultStorage.hasPassword(context)) {
+            newPassword = ""
+            newPasswordConfirm = ""
+            dialogError = null
+            showCreatePasswordDialog = true
+        } else {
+            enteredPassword = ""
+            dialogError = null
+            showUnlockDialog = true
+        }
+    }
+
+    /** Show the right password prompt for the current auth state. */
+    val promptForAuth: () -> Unit = {
+        if (!authed) {
+            if (VaultStorage.hasPassword(context)) {
+                enteredPassword = ""
+                dialogError = null
+                showUnlockDialog = true
+            } else {
+                newPassword = ""
+                newPasswordConfirm = ""
+                dialogError = null
+                showCreatePasswordDialog = true
+            }
+        }
+    }
+
+    /** Close the full-screen viewer and reset its transform. */
+    fun closeViewer() {
+        viewingEntry = null
+        viewPath = null
+        viewError = null
+        showVaultActions = false
+        viewerScale = 1f
+        viewerOffset = Offset.Zero
+    }
+
+    /**
+     * Clamp a pan offset so the zoomed viewer image stays within the viewport
+     * (same geometry as the folder-view full-screen image: at scale [s] the
+     * displayed image is `intrinsic * fit * s`, so the maximum translation is
+     * half the overflow per axis; the viewport size bounds it when the
+     * intrinsic size is unknown).
+     */
+    fun clampViewerOffset(candidate: Offset, s: Float, size: Size): Offset {
+        if (s <= 1f) return Offset.Zero
+        val viewW = size.width
+        val viewH = size.height
+        if (viewW <= 0f || viewH <= 0f) return candidate
+        val maxX = ((s - 1f) * viewW / 2f).coerceAtLeast(0f)
+        val maxY = ((s - 1f) * viewH / 2f).coerceAtLeast(0f)
+        return Offset(
+            candidate.x.coerceIn(-maxX, maxX),
+            candidate.y.coerceIn(-maxY, maxY)
+        )
+    }
+
     // Resolve the viewable path for [entry]: the plaintext path directly, or
     // the decrypted cache file when the entry is encrypted (needs [pwd]).
     val resolveViewPath: (VaultEntry, String?) -> String? = { entry, pwd ->
@@ -177,6 +269,9 @@ fun VaultScreen(onBack: () -> Unit) {
         viewingEntry = entry
         viewPath = null
         viewError = null
+        showVaultActions = false
+        viewerScale = 1f
+        viewerOffset = Offset.Zero
         if (entry.encrypted && !authed) {
             pendingAction = VaultAction.VIEW to entry
             enteredPassword = ""
@@ -227,7 +322,7 @@ fun VaultScreen(onBack: () -> Unit) {
                     when (result) {
                         "encrypted" -> "Encrypted — password required to view now"
                         "decrypted" -> "Decrypted — visible without a password"
-                        "moved" -> "Moved out of the vault to Pictures/PYQAlbum"
+                        "moved" -> "Moved back to its original folder"
                         else -> "Operation failed — wrong password?"
                     },
                     Toast.LENGTH_SHORT
@@ -258,10 +353,32 @@ fun VaultScreen(onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Photo Vault") },
+                title = { Text(currentFolder ?: "Photo Vault") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = {
+                        if (currentFolder != null) {
+                            currentFolder = null
+                        } else {
+                            onBack()
+                        }
+                    }) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    if (authed) {
+                        IconButton(onClick = {
+                            oldVaultPassword = ""
+                            newVaultPassword = ""
+                            newVaultPasswordConfirm = ""
+                            dialogError = null
+                            showChangePasswordDialog = true
+                        }) {
+                            Icon(
+                                Icons.Default.Settings,
+                                contentDescription = "Change vault password"
+                            )
+                        }
                     }
                 }
             )
@@ -272,93 +389,155 @@ fun VaultScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // The vault is a normal private gallery: unencrypted entries are
-            // always visible and need no password. The vault password (created
-            // on first Encrypt) only protects entries the user explicitly
-            // encrypts — it is re-entered to view / decrypt / move them out.
-            Column(modifier = Modifier.fillMaxSize()) {
-                        // Toolbar row
-                        Row(
+            if (!authed) {
+                // Lock screen — the vault itself is password-protected
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Photo Vault is locked",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Enter your vault password to see the images",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = promptForAuth) {
+                        Text("Unlock vault")
+                    }
+                }
+            } else {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // Toolbar row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = {
+                                showImportPicker = true
+                                importSelection = emptySet()
+                                importFolderFilter = null
+                            },
+                            enabled = !importing
+                        ) {
+                            Icon(
+                                Icons.Default.Image,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Move from Gallery")
+                        }
+                    }
+
+                    val encryptedCount = entries.count { it.encrypted }
+
+                    Text(
+                        text = if (currentFolder == null) {
+                            "${entries.size} in vault · $encryptedCount encrypted"
+                        } else {
+                            "${currentFolder ?: ""} · ${
+                                entries.count { it.folder == currentFolder }
+                            } images"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+
+                    if (entries.isEmpty()) {
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .weight(1f),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Button(
-                                onClick = {
-                                    showImportPicker = true
-                                    importSelection = emptySet()
-                                    importFolderFilter = null
-                                },
-                                enabled = !importing
-                            ) {
-                                Icon(
-                                    Icons.Default.Image,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "No images in the vault yet",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                                Spacer(Modifier.width(6.dp))
-                                Text("Move from Gallery")
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    text = "Move images from your gallery into this " +
+                                        "password-protected private area. The gallery " +
+                                        "originals go to the recycle bin.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 32.dp)
+                                )
                             }
                         }
-
-                        val encryptedCount = entries.count { it.encrypted }
-
-                        Text(
-                            text = "${entries.size} in vault · $encryptedCount encrypted",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 16.dp)
-                        )
-
-                        if (entries.isEmpty()) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text(
-                                        text = "No images in the vault yet",
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(Modifier.height(8.dp))
-                                    Text(
-                                        text = "Move images from your gallery into this " +
-                                            "private area (hidden from other apps — encrypt " +
-                                            "later if you want). The gallery originals go to " +
-                                            "the recycle bin.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        textAlign = TextAlign.Center,
-                                        modifier = Modifier.padding(horizontal = 32.dp)
-                                    )
-                                }
+                    } else if (currentFolder == null) {
+                        // Vault folder list — mirrors the gallery's folder structure
+                        val grouped = remember(entries) {
+                            entries.groupBy { it.folder.ifBlank { "Uncategorised" } }
+                        }
+                        val folderNames = remember(grouped) { grouped.keys.sorted() }
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(3),
+                            contentPadding = PaddingValues(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                                .background(Color.White)
+                        ) {
+                            gridItems(folderNames, key = { it }) { folderName ->
+                                FolderCell(
+                                    folderName = folderName,
+                                    previewEntry = grouped[folderName]
+                                        ?.firstOrNull { !it.encrypted },
+                                    count = grouped[folderName]?.size ?: 0,
+                                    onTap = { currentFolder = folderName }
+                                )
                             }
-                        } else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
-                                contentPadding = PaddingValues(4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f)
-                                    .background(Color.White)
-                            ) {
-                                gridItems(entries, key = { it.id }) { entry ->
-                                    VaultCell(
-                                        entry = entry,
-                                        previewPath = if (entry.encrypted) null
-                                        else VaultStorage.entryFile(context, entry).absolutePath,
-                                        onTap = { openViewer(entry) }
-                                    )
-                                }
+                        }
+                    } else {
+                        // Entries inside one folder
+                        val folderEntries = remember(entries, currentFolder) {
+                            entries.filter { it.folder.ifBlank { "Uncategorised" } == currentFolder }
+                        }
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(3),
+                            contentPadding = PaddingValues(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                                .background(Color.White)
+                        ) {
+                            gridItems(folderEntries, key = { it.id }) { entry ->
+                                VaultCell(
+                                    entry = entry,
+                                    previewPath = if (entry.encrypted) null
+                                    else VaultStorage.entryFile(context, entry).absolutePath,
+                                    onTap = { openViewer(entry) }
+                                )
                             }
                         }
                     }
+                }
+            }
         }
     }
 
@@ -409,10 +588,10 @@ fun VaultScreen(onBack: () -> Unit) {
                         }
                     }
                     Text(
-                        text = "Moved as-is into app-private storage — no password needed, " +
-                            "and hidden from other gallery apps. The gallery originals go to " +
-                            "the recycle bin. Encrypt later from the viewer if you want " +
-                            "password protection.",
+                        text = "Moved as-is into the password-protected vault (app-private " +
+                            "storage, hidden from other gallery apps). The gallery originals " +
+                            "go to the recycle bin. Encrypt later from the viewer if you want " +
+                            "extra protection.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -568,35 +747,145 @@ fun VaultScreen(onBack: () -> Unit) {
         }
     }
 
-    // ===================== Viewer dialog =====================
+    // ===================== Full-screen viewer (pinch-zoom, swipe-up actions) =====================
     viewingEntry?.let { entry ->
-        AlertDialog(
-            onDismissRequest = {
-                viewingEntry = null
-                viewPath = null
-                viewError = null
-            },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = entry.displayName,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            },
-            text = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    val currentPath = viewPath
-                    if (currentPath != null) {
-                        // GIF / animated WebP play directly through Coil; motion
-                        // photos get a ▶ chip that overlays the embedded video.
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 320.dp)
-                        ) {
+        Dialog(
+            onDismissRequest = { closeViewer() },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = Color.Black
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .systemBarsPadding()
+                ) {
+                    // Top bar
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { closeViewer() }) {
+                            Icon(
+                                Icons.Default.ArrowBack,
+                                contentDescription = "Back",
+                                tint = Color.White
+                            )
+                        }
+                        Text(
+                            text = entry.displayName,
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (entry.encrypted) {
+                            Text(
+                                text = "🔒",
+                                color = Color.White,
+                                modifier = Modifier.padding(end = 16.dp)
+                            )
+                        }
+                    }
+
+                    // Image area: pinch to zoom, drag to pan while zoomed; at
+                    // normal zoom a swipe up reveals the action panel below.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .clipToBounds()
+                            .onSizeChanged {
+                                viewerSize = Size(it.width.toFloat(), it.height.toFloat())
+                            }
+                            .graphicsLayer {
+                                scaleX = viewerScale
+                                scaleY = viewerScale
+                                translationX = viewerOffset.x
+                                translationY = viewerOffset.y
+                            }
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    var transformMode = viewerScale > 1f
+                                    var verticalAccum = 0f
+                                    var horizontalAccum = 0f
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        val pressedCount = event.changes.count { it.pressed }
+                                        if (pressedCount >= 2) transformMode = true
+                                        if (transformMode) {
+                                            if (pressedCount >= 2) {
+                                                val zoomChange = event.calculateZoom()
+                                                val panChange = event.calculatePan()
+                                                val newScale =
+                                                    (viewerScale * zoomChange).coerceIn(1f, 5f)
+                                                viewerScale = newScale
+                                                viewerOffset = if (newScale > 1f) {
+                                                    clampViewerOffset(
+                                                        viewerOffset + panChange * newScale,
+                                                        newScale,
+                                                        viewerSize
+                                                    )
+                                                } else {
+                                                    Offset.Zero
+                                                }
+                                            } else if (pressedCount == 1) {
+                                                val single = event.changes.first { it.pressed }
+                                                viewerOffset = clampViewerOffset(
+                                                    viewerOffset + single.positionChange() * viewerScale,
+                                                    viewerScale,
+                                                    viewerSize
+                                                )
+                                            }
+                                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                        } else {
+                                            val single = event.changes.firstOrNull { it.pressed }
+                                                ?: continue
+                                            if (single.positionChanged()) {
+                                                verticalAccum += single.positionChange().y
+                                                horizontalAccum += single.positionChange().x
+                                                single.consume()
+                                            }
+                                        }
+                                    } while (event.changes.any { it.pressed })
+                                    // Gesture ended at scale 1 — swipe up/down
+                                    if (!transformMode) {
+                                        if (verticalAccum < -80f) {
+                                            showVaultActions = true
+                                        } else if (verticalAccum > 80f) {
+                                            showVaultActions = false
+                                        }
+                                    }
+                                }
+                            }
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onDoubleTap = {
+                                        if (viewerScale > 1f) {
+                                            viewerScale = 1f
+                                            viewerOffset = Offset.Zero
+                                        } else {
+                                            viewerScale = 3f
+                                            viewerOffset = Offset.Zero
+                                        }
+                                    }
+                                )
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val currentPath = viewPath
+                        if (currentPath != null) {
+                            // GIF / animated WebP play directly through Coil; motion
+                            // photos get a ▶ chip that overlays the embedded video.
                             AsyncImage(
                                 model = ImageRequest.Builder(context)
                                     .data(currentPath)
@@ -624,79 +913,103 @@ fun VaultScreen(onBack: () -> Unit) {
                                     onClose = { showMotionVideo = false }
                                 )
                             }
-                        }
-                    } else if (viewError != null) {
-                        Text(
-                            text = viewError!!,
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    } else {
-                        CircularProgressIndicator()
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    if (entry.encrypted) {
-                        Text(
-                            text = "🔒 Encrypted",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (!entry.encrypted) {
-                        // Password-protect this entry (first Encrypt sets the password)
-                        TextButton(onClick = {
-                            requirePasswordOrRun(VaultAction.ENCRYPT, entry)
-                        }) {
-                            Text("Encrypt")
-                        }
-                    } else {
-                        // Remove the password protection (needs the vault password)
-                        TextButton(onClick = {
-                            requirePasswordOrRun(VaultAction.DECRYPT, entry)
-                        }) {
-                            Text("Decrypt")
+                            if (!showVaultActions) {
+                                Text(
+                                    text = "Swipe up for actions",
+                                    color = Color.White.copy(alpha = 0.75f),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .padding(bottom = 8.dp)
+                                )
+                            }
+                        } else if (viewError != null) {
+                            Text(
+                                text = viewError!!,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        } else {
+                            CircularProgressIndicator(color = Color.White)
                         }
                     }
-                    TextButton(onClick = {
-                        requirePasswordOrRun(VaultAction.MOVE_OUT, entry)
-                    }) {
-                        Text("Move out")
-                    }
-                    TextButton(
-                        onClick = {
-                            VaultStorage.deleteEntry(context, entry)
-                            refreshEntries()
-                            viewingEntry = null
-                            viewPath = null
-                            viewError = null
-                            Toast.makeText(context, "Removed from vault", Toast.LENGTH_SHORT).show()
+
+                    // Swipe-up actions panel: encrypt / decrypt / move out / delete
+                    if (showVaultActions) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xE6202020))
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.CenterHorizontally)
+                                    .width(36.dp)
+                                    .height(4.dp)
+                                    .background(Color.White.copy(alpha = 0.4f), RoundedCornerShape(2.dp))
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (!entry.encrypted) {
+                                    TextButton(onClick = {
+                                        requirePasswordOrRun(VaultAction.ENCRYPT, entry)
+                                    }) {
+                                        Text("Encrypt", color = Color.White)
+                                    }
+                                } else {
+                                    TextButton(onClick = {
+                                        requirePasswordOrRun(VaultAction.DECRYPT, entry)
+                                    }) {
+                                        Text("Decrypt", color = Color.White)
+                                    }
+                                }
+                                TextButton(onClick = {
+                                    requirePasswordOrRun(VaultAction.MOVE_OUT, entry)
+                                }) {
+                                    Text("Move out", color = Color.White)
+                                }
+                                Spacer(Modifier.weight(1f))
+                                TextButton(onClick = { showVaultActions = false }) {
+                                    Text("Hide", color = Color.White.copy(alpha = 0.7f))
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(onClick = {
+                                    VaultStorage.deleteEntry(context, entry)
+                                    refreshEntries()
+                                    closeViewer()
+                                    Toast.makeText(
+                                        context,
+                                        "Removed from vault",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                            if (entry.encrypted) {
+                                Text(
+                                    text = "🔒 Encrypted — password required to view",
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
                         }
-                    ) {
-                        Icon(
-                            Icons.Default.Delete,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text("Delete", color = MaterialTheme.colorScheme.error)
                     }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    viewingEntry = null
-                    viewPath = null
-                    viewError = null
-                }) {
-                    Text("Close")
                 }
             }
-        )
+        }
     }
 
     // ===================== Vault password prompt (existing password) =====================
@@ -812,7 +1125,6 @@ fun VaultScreen(onBack: () -> Unit) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val (action, entry) = pendingAction ?: return@TextButton
                     when {
                         newPassword.length < 4 -> {
                             dialogError = "Password must be at least 4 characters"
@@ -825,8 +1137,14 @@ fun VaultScreen(onBack: () -> Unit) {
                             password = newPassword
                             authed = true
                             showCreatePasswordDialog = false
+                            dialogError = null
+                            val pending = pendingAction
                             pendingAction = null
-                            runVaultAction(action, entry, newPassword)
+                            if (pending != null) {
+                                runVaultAction(pending.first, pending.second, newPassword)
+                            } else {
+                                refreshEntries()
+                            }
                         }
                     }
                 }) {
@@ -837,6 +1155,183 @@ fun VaultScreen(onBack: () -> Unit) {
                 TextButton(onClick = {
                     showCreatePasswordDialog = false
                     pendingAction = null
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // ===================== Vault unlock gate (existing password) =====================
+    if (showUnlockDialog) {
+        AlertDialog(
+            onDismissRequest = { onBack() },
+            title = { Text("Enter vault password") },
+            text = {
+                Column {
+                    Text(
+                        text = "Photo Vault is password-protected.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = enteredPassword,
+                        onValueChange = {
+                            enteredPassword = it
+                            dialogError = null
+                        },
+                        label = { Text("Password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    if (dialogError != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = dialogError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (VaultStorage.verifyPassword(context, enteredPassword)) {
+                        password = enteredPassword
+                        authed = true
+                        showUnlockDialog = false
+                        dialogError = null
+                        refreshEntries()
+                    } else {
+                        dialogError = "Wrong password"
+                    }
+                }) {
+                    Text("Unlock")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { onBack() }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // ===================== Change vault password =====================
+    if (showChangePasswordDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showChangePasswordDialog = false
+                dialogError = null
+            },
+            title = { Text("Change vault password") },
+            text = {
+                Column {
+                    Text(
+                        text = "Encrypted entries are re-encrypted with the new " +
+                            "password automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = oldVaultPassword,
+                        onValueChange = {
+                            oldVaultPassword = it
+                            dialogError = null
+                        },
+                        label = { Text("Current password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newVaultPassword,
+                        onValueChange = {
+                            newVaultPassword = it
+                            dialogError = null
+                        },
+                        label = { Text("New password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newVaultPasswordConfirm,
+                        onValueChange = {
+                            newVaultPasswordConfirm = it
+                            dialogError = null
+                        },
+                        label = { Text("Confirm new password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    if (dialogError != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = dialogError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    when {
+                        oldVaultPassword.isBlank() -> {
+                            dialogError = "Enter your current password"
+                        }
+                        newVaultPassword.length < 4 -> {
+                            dialogError = "Password must be at least 4 characters"
+                        }
+                        newVaultPassword != newVaultPasswordConfirm -> {
+                            dialogError = "Passwords do not match"
+                        }
+                        else -> {
+                            val oldPwd = oldVaultPassword
+                            val newPwd = newVaultPassword
+                            showChangePasswordDialog = false
+                            dialogError = null
+                            scope.launch {
+                                val reEncrypted = withContext(Dispatchers.IO) {
+                                    VaultStorage.changePassword(context, oldPwd, newPwd)
+                                }
+                                when {
+                                    reEncrypted == -1 -> {
+                                        dialogError = "Wrong current password"
+                                        showChangePasswordDialog = true
+                                    }
+                                    reEncrypted == -2 -> {
+                                        dialogError = "Some encrypted entries could not be " +
+                                            "re-encrypted — password unchanged"
+                                        showChangePasswordDialog = true
+                                    }
+                                    else -> {
+                                        password = newPwd
+                                        Toast.makeText(
+                                            context,
+                                            if (reEncrypted == 0) {
+                                                "Password changed — no encrypted entries"
+                                            } else {
+                                                "Password changed — $reEncrypted entry(ies) re-encrypted"
+                                            },
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }) {
+                    Text("Change")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showChangePasswordDialog = false
+                    dialogError = null
                 }) {
                     Text("Cancel")
                 }
@@ -897,6 +1392,72 @@ private fun VaultCell(
     }
 }
 
+/** One folder tile in the vault's folder list (mirrors the gallery structure). */
+@Composable
+private fun FolderCell(
+    folderName: String,
+    previewEntry: VaultEntry?,
+    count: Int,
+    onTap: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .aspectRatio(1f)
+            .clickable(onClick = onTap)
+            .background(Color.White)
+    ) {
+        if (previewEntry != null) {
+            ImageThumbnail(
+                imageUri = VaultStorage.entryFile(LocalContext.current, previewEntry).absolutePath,
+                modifier = Modifier.fillMaxSize(),
+                backgroundColor = Color.White
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF37474F)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.Lock,
+                    contentDescription = "Encrypted",
+                    tint = Color(0xFFFFD740),
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        }
+        // Folder name badge
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .background(Color(0xCC000000), RoundedCornerShape(2.dp))
+                .padding(horizontal = 3.dp, vertical = 1.dp)
+        ) {
+            Text(
+                text = folderName,
+                color = Color.White,
+                fontSize = MaterialTheme.typography.labelSmall.fontSize,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        // Count badge
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .background(Color(0xCC000000), RoundedCornerShape(2.dp))
+                .padding(horizontal = 4.dp, vertical = 1.dp)
+        ) {
+            Text(
+                text = count.toString(),
+                color = Color.White,
+                fontSize = MaterialTheme.typography.labelSmall.fontSize
+            )
+        }
+    }
+}
+
 // ===================== Vault domain model =====================
 
 /** What the user is trying to do when the vault password is requested. */
@@ -906,14 +1467,23 @@ private enum class VaultAction { VIEW, ENCRYPT, DECRYPT, MOVE_OUT }
 data class VaultEntry(
     val id: String,
     val displayName: String,
+    val folder: String,
+    val relPath: String,
     val encrypted: Boolean,
     val hidden: Boolean,
     val dateAdded: Long
 )
 
-/** Per-entry metadata persisted as <id>.meta next to the data file. */
+/**
+ * Per-entry metadata persisted as <id>.meta next to the data file.
+ * [folder] is the source gallery folder name (BUCKET_DISPLAY_NAME) shown in
+ * the vault's folder list; [relPath] is the source MediaStore RELATIVE_PATH
+ * used to restore the entry to its original folder on move-out.
+ */
 data class VaultMeta(
     val name: String = "",
+    val folder: String = "",
+    val relPath: String = "",
     val encrypted: Boolean = false,
     val hidden: Boolean = false,
     val dateAdded: Long = 0L
@@ -1088,6 +1658,8 @@ object VaultStorage {
             VaultEntry(
                 id = id,
                 displayName = meta.name,
+                folder = meta.folder,
+                relPath = meta.relPath,
                 encrypted = meta.encrypted,
                 hidden = meta.hidden,
                 dateAdded = meta.dateAdded
@@ -1115,8 +1687,9 @@ object VaultStorage {
     /**
      * Copy [uri] from the gallery into the vault in its ORIGINAL form
      * (unencrypted — the vault's app-private storage already keeps it hidden
-     * from other gallery apps). Password protection is applied later with
-     * [encryptEntry] on the user's explicit choice. Returns true on success.
+     * from other gallery apps). The source folder is recorded so the vault can
+     * mirror the gallery's folder structure and move-out can restore the
+     * original location. Returns true on success.
      */
     fun importFromGallery(
         context: Context,
@@ -1128,6 +1701,7 @@ object VaultStorage {
                 ?.use { it.readBytes() } ?: return false
             if (bytes.isEmpty()) return false
 
+            val (folder, relPath) = sourceLocation(context, uri)
             val id = "v" + System.currentTimeMillis() + "_" + (Math.random() * 100000).toInt()
             val dataFile = File(vaultDir(context), id).apply { writeBytes(bytes) }
             if (!dataFile.exists() || dataFile.length() == 0L) {
@@ -1136,6 +1710,8 @@ object VaultStorage {
             }
             val meta = VaultMeta(
                 name = displayName,
+                folder = folder,
+                relPath = relPath,
                 encrypted = false,
                 hidden = false,
                 dateAdded = System.currentTimeMillis()
@@ -1144,6 +1720,45 @@ object VaultStorage {
             true
         } catch (e: Exception) {
             false
+        }
+    }
+
+    /**
+     * Original gallery location of a source image: the folder name shown in the
+     * vault (BUCKET_DISPLAY_NAME) and the MediaStore RELATIVE_PATH the image
+     * came from (used to restore the original folder on move-out). Falls back
+     * to the old DATA-path form on devices/rows without RELATIVE_PATH.
+     */
+    private fun sourceLocation(context: Context, uri: String): Pair<String, String> {
+        return try {
+            var bucket: String? = null
+            var relPath: String? = null
+            var data: String? = null
+            val projection = arrayOf(
+                MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+                MediaStore.Images.Media.RELATIVE_PATH,
+                MediaStore.Images.Media.DATA
+            )
+            context.contentResolver.query(Uri.parse(uri), projection, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val bIdx = c.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+                    val rIdx = c.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+                    val dIdx = c.getColumnIndex(MediaStore.Images.Media.DATA)
+                    if (bIdx >= 0) bucket = c.getString(bIdx)
+                    if (rIdx >= 0) relPath = c.getString(rIdx)
+                    if (dIdx >= 0) data = c.getString(dIdx)
+                }
+            }
+            val folder = bucket ?: ""
+            val rel = relPath?.takeIf { !it.isNullOrBlank() }
+                ?: data?.let { d ->
+                    val norm = d.removePrefix("/storage/emulated/0/")
+                    val dirPart = norm.substringBeforeLast('/')
+                    if (dirPart != norm && dirPart.isNotBlank()) dirPart + "/" else null
+                }
+            Pair(folder, rel ?: "")
+        } catch (e: Exception) {
+            Pair("", "")
         }
     }
 
@@ -1199,11 +1814,13 @@ object VaultStorage {
     }
 
     /**
-     * Move an entry OUT of the vault into the gallery (Pictures/PYQAlbum via
-     * a MediaStore insert with the IS_PENDING publish pattern — zero extra
-     * permission, exactly how the album's own copy/move writes to standard
-     * collections). Encrypted entries are decrypted with [password] in memory
-     * first. The vault copy is removed on success.
+     * Move an entry OUT of the vault back into the gallery — into its ORIGINAL
+     * folder when that folder sits under a standard media root (Pictures /
+     * DCIM / Movies / Download), otherwise Pictures/PYQAlbum. Uses a MediaStore
+     * insert with the IS_PENDING publish pattern — zero extra permission,
+     * exactly how the album's own copy/move writes to standard collections.
+     * Encrypted entries are decrypted with [password] in memory first. The
+     * vault copy is removed on success.
      */
     fun moveOut(context: Context, entry: VaultEntry, password: String?): Boolean {
         var destUri: Uri? = null
@@ -1227,7 +1844,7 @@ object VaultStorage {
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 put(MediaStore.MediaColumns.MIME_TYPE, mime)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/PYQAlbum")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, restoreRelativePath(entry.relPath))
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
@@ -1259,6 +1876,68 @@ object VaultStorage {
             }
             false
         }
+    }
+
+    /** MediaStore roots an image insert may target on API 29+ (Images volume). */
+    private val RESTORABLE_ROOTS = setOf("Download", "Pictures", "DCIM", "Movies")
+
+    /**
+     * RELATIVE_PATH used when moving an entry out of the vault: the ORIGINAL
+     * folder when it sits under a standard media root (Pictures/DCIM/Movies/
+     * Download), otherwise Pictures/PYQAlbum — MediaStore inserts cannot create
+     * files under non-standard roots without All-files access.
+     */
+    private fun restoreRelativePath(relPath: String): String {
+        val trimmed = relPath.trim('/')
+        if (trimmed.isBlank()) return "Pictures/PYQAlbum"
+        val top = trimmed.substringBefore('/')
+        return if (top in RESTORABLE_ROOTS) "$trimmed/" else "Pictures/PYQAlbum"
+    }
+
+    /**
+     * Change the vault password. AES-GCM keys are derived from the password, so
+     * every encrypted entry must be re-encrypted with the new password before
+     * the stored hash is replaced. All re-encryption happens into temp files
+     * FIRST — if any entry fails to re-encrypt the whole change is aborted and
+     * the old password stays valid.
+     *
+     * @return number of entries re-encrypted; -1 wrong current password;
+     *     -2 at least one encrypted entry could not be re-encrypted (aborted)
+     */
+    fun changePassword(context: Context, oldPassword: String, newPassword: String): Int {
+        if (!verifyVaultPassword(context, oldPassword)) return -1
+        if (newPassword.isBlank() || newPassword.length < 4) return -3
+        val dir = vaultDir(context)
+        val encryptedEntries = listEntries(context).filter { it.encrypted }
+        val temps = mutableListOf<Pair<File, File>>()
+        for (entry in encryptedEntries) {
+            try {
+                val finalFile = File(dir, "${entry.id}.vault")
+                val data = finalFile.readBytes()
+                val plain = VaultCrypto.decryptBytes(data, oldPassword) ?: return -2
+                val reEnc = VaultCrypto.encryptBytes(plain, newPassword)
+                val tempFile = File(dir, "${entry.id}.vault.tmp")
+                tempFile.writeBytes(reEnc)
+                if (!tempFile.exists() || tempFile.length() == 0L) {
+                    tempFile.delete()
+                    for ((t, _) in temps) t.delete()
+                    return -2
+                }
+                temps.add(tempFile to finalFile)
+            } catch (e: Exception) {
+                for ((t, _) in temps) t.delete()
+                return -2
+            }
+        }
+        // Phase 2: commit — temp files replace the originals in place
+        for ((temp, finalFile) in temps) {
+            if (!temp.renameTo(finalFile)) {
+                for ((t, _) in temps) t.delete()
+                return -2
+            }
+        }
+        setVaultPassword(context, newPassword)
+        return encryptedEntries.size
     }
 
     /** Rewrite one entry's meta file, applying [transform] to the stored meta. */

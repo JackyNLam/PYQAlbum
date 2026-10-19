@@ -17,6 +17,10 @@ object MotionPhotoExtractor {
     private const val SCAN_LIMIT = 64L * 1024 * 1024   // scan at most 64 MB in
     private const val WINDOW = 64 * 1024               // cross-chunk search window
     private const val MAX_VIDEO_BYTES = 256L * 1024 * 1024
+    // The JPEG SOI probe (0xFF 0xD8) reads 2 bytes before the scan starts, so
+    // offsets found by the scan are relative to byte 2 — this re-bases them to
+    // absolute file offsets (matching the fresh stream used by extractFrom).
+    private const val SOI_BYTES = 2
 
     /** The exact 4-byte pattern that starts every MP4 box header. */
     private val FTYP = byteArrayOf('f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte())
@@ -68,7 +72,13 @@ object MotionPhotoExtractor {
         }
     }
 
-    /** Byte offsets of every plausible "ftyp" MP4 signature in the stream (max [SCAN_LIMIT] bytes). */
+    /**
+     * Byte offsets of every plausible "ftyp" MP4 signature in the stream (max
+     * [SCAN_LIMIT] bytes), expressed as ABSOLUTE file offsets (the scan only
+     * sees the stream AFTER the 2-byte JPEG SOI probe, so [SOI_BYTES] is added
+     * back). extractFrom() opens a fresh stream at byte 0, so absolute offsets
+     * are required for the skip to land on the same bytes the scan found.
+     */
     private fun findFtypOffsets(input: java.io.InputStream): List<Long> {
         val offsets = mutableListOf<Long>()
         val buffer = ByteArray(64 * 1024)
@@ -87,7 +97,7 @@ object MotionPhotoExtractor {
                 val idx = indexOfFtyp(joined, from)
                 if (idx < 0) break
                 if (isPlausibleFtyp(joined, idx)) {
-                    offsets.add((totalRead - tail.size) + idx)
+                    offsets.add(SOI_BYTES + (totalRead - tail.size) + idx)
                 }
                 from = idx + 1
                 if (from > joined.size - 4) break

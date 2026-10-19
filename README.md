@@ -100,7 +100,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope; the detail-screen AI Rating toggle feeds the shared selection queue |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
-| `vault` | `VaultScreen` | **Photo Vault**: private storage hidden from other gallery apps — full-screen folder-filtered **Move from Gallery** (the originals go to the system recycle bin), optional AES-256-GCM encrypt/decrypt with the vault password, move out to the gallery |
+| `vault` | `VaultScreen` | **Photo Vault** (password-gated, changeable password): private storage hidden from other gallery apps — full-screen folder-filtered **Move from Gallery** (the originals go to the system recycle bin), keeps the source gallery folder structure, optional AES-256-GCM encrypt/decrypt, full-screen viewer with swipe-up actions, move out restores the original folder |
 
 ---
 
@@ -214,7 +214,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Swipe down on the detail panel itself** to hide it again
 - **Zoom & pan**: pinch or double-tap to zoom up to 5x; single-finger drag pans and **tracks the finger 1:1 at any zoom** (pointer deltas are multiplied by the layer scale — without this, high-DPI screens moved the image far less than the finger), and the pan is **clamped to the ContentScale.Fit bounds** so the zoomed image can't be flung out of view
 - **GIF / animated WebP**: play automatically (Coil `coil-gif` decoder registered in `PyqCrApp.newImageLoader`)
-- **Motion photos** (moving photos — JPEG with an embedded MP4, e.g. Google Pixel / Samsung): a ▶ "Motion photo" chip appears; tapping it extracts the embedded video (`MotionPhotoExtractor` validates the MP4 `ftyp` box and probes the result with `MediaMetadataRetriever`, so EXIF false positives are skipped; when no candidate verifies the last plausible region is returned anyway so exotic-but-playable clips stay visible) and plays it as a looping video over the still frame — the player automatically retries up to three times on transient decode errors, with a ✕ Close button
+- **Motion photos** (moving photos — JPEG with an embedded MP4, e.g. Google Pixel / Samsung): a ▶ "Motion photo" chip appears; tapping it extracts the embedded video (`MotionPhotoExtractor` locates the MP4 `ftyp` marker — the video actually starts at the 4-byte box-size header right before it, which is where the extraction begins — validates the box and probes the result with `MediaMetadataRetriever`, so EXIF false positives are skipped; when no candidate verifies the last plausible region is returned anyway so exotic-but-playable clips stay visible) and plays it as a looping video over the still frame — the player automatically retries up to three times on transient decode errors, with a ✕ Close button
 
 ### AI Rating Screen
 - **Single unified view** — no separate selection step
@@ -301,14 +301,16 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - The service encodes source and target images to base64, composes a multimodal request with the custom prompt, downloads the edited result image, and composites it back onto the original at the selected position
 
 ### Photo Vault
-- **Private area** reached via the left drawer 🔒 **Photo Vault** — files live in app-private storage (`externalFilesDir/vault`), **invisible to other gallery apps** and to the album's own MediaStore-backed views; no password needed to browse
-- **Import from Gallery**: **full-screen** in-app gallery grid picker with a **folder filter** (chips row: "All folders" + each gallery folder) — each imported image is **copied as-is** (its original bytes: JPEG, PNG, GIF, motion photos…) out of MediaStore into the vault; **no auto-encryption** — entries are visible without a password
-- **Encrypt** (viewer action): protects one entry with **AES-256-GCM** (per-file random salt, key derived from the vault password via PBKDF2). The first Encrypt asks you to **set the vault password**; afterwards the password is re-entered to view/decrypt encrypted entries. Encrypted entries show a 🔒 tile instead of a preview
-- **Decrypt** (viewer action): removes the password protection back to a plaintext entry (requires the vault password)
-- **Move out** (viewer action): exports the entry back to the gallery (`Pictures/PYQAlbum` via MediaStore) and removes the vault copy — encrypted entries must be unlocked first
-- **View**: tap a plaintext entry to view it directly; GIFs/animated WebP play through Coil and motion photos get a ▶ "Motion photo" chip; tap an encrypted entry to be asked for the vault password first
+- **Password-protected private area** reached via the left drawer 🔒 **Photo Vault** — files live in app-private storage (`externalFilesDir/vault`), **invisible to other gallery apps** and to the album's own MediaStore-backed views. Opening the vault asks for the vault password (the **first run** asks you to **create** one); the password can be **changed** from the top-bar ⚙ — changing it automatically re-encrypts every encrypted entry, and the change is aborted if any entry cannot be re-encrypted
+- **Gallery folder structure preserved**: the vault mirrors the source folders (e.g. an image moved from `Screenshots` appears inside a `Screenshots` folder in the vault); tap a folder to see its images
+- **Import from Gallery**: **full-screen** in-app gallery grid picker with a **folder filter** (chips row: "All folders" + each gallery folder) — each imported image is **copied as-is** (its original bytes: JPEG, PNG, GIF, motion photos…) out of MediaStore into the vault and its source folder + relative path are remembered; **no auto-encryption**
+- **Full-screen viewer**: tap an entry to view it **full screen** with pinch/double-tap zoom and drag-pan; **swipe up** reveals the action panel (Encrypt/Decrypt, Move out, Delete), swipe down hides it
+- **Encrypt** (viewer action): protects one entry with **AES-256-GCM** (per-file random salt, key derived from the vault password via PBKDF2). Encrypted entries show a 🔒 tile instead of a preview
+- **Decrypt** (viewer action): removes the password protection back to a plaintext entry
+- **Move out** (viewer action): exports the entry back to the gallery — into its **original folder** when that folder is a standard media collection (Pictures/DCIM/Movies/Download), otherwise `Pictures/PYQAlbum` — and removes the vault copy; encrypted entries are decrypted with the vault password in memory first
+- **View**: motion photos get a ▶ "Motion photo" chip and play the embedded clip; GIFs/animated WebP play directly through Coil
 - **Delete**: removes the entry from the vault (irreversible)
-- Summary line shows "N in vault · N encrypted"
+- Summary line shows "N in vault · N encrypted" (or "folder · N images" while inside a folder)
 
 ### Tag/Rating Assignment
 - **Long-press dialog** shows existing tags as selectable buttons before offering a "create new" option
