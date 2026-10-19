@@ -88,8 +88,12 @@ import java.util.*
  *
  * Long-press any image → enters multi-select mode.
  * Multi-select mode: bottom action bar (⋮) with batch operations:
- * Rating, Tag management, AI Ranking toggle, Remove AI Info, Copy to, Move to.
+ * Rating, Tag management, AI Rating queue, Remove AI Info, Copy to, Move to.
  */
+// Sentinel used by the "All Folders" pseudo-entry in folder browse: selecting it
+// shows images from EVERY folder (any real folder name can never contain NUL).
+private const val ALL_FOLDERS_SENTINEL = "\u0000__ALL_FOLDERS__\u0000"
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun AlbumScreen(
@@ -411,6 +415,8 @@ fun AlbumScreen(
     // not own through the platform request dialog (the direct IS_FAVORITE write
     // is rejected for foreign rows).
     var pendingFavouriteMessage by remember { mutableStateOf("") }
+    var pendingFavouriteUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pendingFavouriteTarget by remember { mutableStateOf(true) }
     val favouriteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
@@ -420,9 +426,22 @@ fun AlbumScreen(
             favouriteUris = withContext(Dispatchers.IO) {
                 FavouriteStore.loadFavouriteUris(context)
             }
-            if (result.resultCode == android.app.Activity.RESULT_OK) {
-                snackbarHostState.showSnackbar(pendingFavouriteMessage)
+            val pending = pendingFavouriteUris
+            val target = pendingFavouriteTarget
+            val applied = withContext(Dispatchers.IO) {
+                pending.count { FavouriteStore.isFavourite(context, it) == target }
             }
+            if (result.resultCode == android.app.Activity.RESULT_OK) {
+                if (pending.isEmpty() || applied == pending.size) {
+                    snackbarHostState.showSnackbar(pendingFavouriteMessage)
+                } else {
+                    snackbarHostState.showSnackbar(
+                        "$applied of ${pending.size} applied by this device" +
+                            " — the rest were not saved by the system"
+                    )
+                }
+            }
+            pendingFavouriteUris = emptyList()
         }
     }
 
@@ -461,13 +480,32 @@ fun AlbumScreen(
         }
     }
 
-    /** Delete the current selection — recycle bin first on API 30+. */
+    /**
+     * Delete the current selection. In the RECYCLE BIN browse this permanently
+     * deletes the trashed rows; everywhere else it is RECYCLE-BIN-FIRST on
+     * API 30+ (system trash request), permanently deleting only on older APIs.
+     */
     val performDelete: () -> Unit = {
-        trashOrDelete(
-            selectedImageUris.toList(),
-            "Moved {n} image(s) to the recycle bin",
-            "Deleted {n} image(s) permanently"
-        )
+        val uris = selectedImageUris.toList()
+        if (selectedBrowseMode == BrowseMode.RECYCLE_BIN) {
+            // Inside the bin, Delete means permanent removal.
+            scope.launch {
+                val n = FileOperationHelper.deleteMediaDirect(context, uris)
+                viewModel.deleteImages(uris)
+                trashedImages = withContext(Dispatchers.IO) {
+                    repository.getTrashedImages()
+                }
+                snackbarHostState.showSnackbar("Deleted $n image(s) permanently")
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            }
+        } else {
+            trashOrDelete(
+                uris,
+                "Moved {n} image(s) to the recycle bin",
+                "Deleted {n} image(s) permanently"
+            )
+        }
     }
 
     // Collage creation state
@@ -672,10 +710,12 @@ fun AlbumScreen(
         groupByMode = viewModel.getPersistedGroupByMode()
     }
 
-    // Re-sort folder images when folderSortMode changes
+    // Re-sort folder images when folderSortMode changes; the "All Folders"
+    // pseudo-entry (sentinel folder name) shows images from every folder.
     LaunchedEffect(folderSortMode, selectedFolder) {
-        if (selectedFolder != null) {
-            viewModel.loadImagesByFolderSorted(
+        when {
+            selectedFolder == ALL_FOLDERS_SENTINEL -> viewModel.loadAllImagesSorted(folderSortMode)
+            selectedFolder != null -> viewModel.loadImagesByFolderSorted(
                 folderName = selectedFolder!!,
                 mode = folderSortMode
             )
@@ -826,7 +866,11 @@ fun AlbumScreen(
                     title = {
                         when (selectedBrowseMode) {
                             BrowseMode.FOLDER -> Text(
-                                if (selectedFolder != null) selectedFolder!! else "pyqAlbum"
+                                when {
+                                    selectedFolder == ALL_FOLDERS_SENTINEL -> "All Folders"
+                                    selectedFolder != null -> selectedFolder!!
+                                    else -> "pyqAlbum"
+                                }
                             )
                             BrowseMode.TAG -> Text(selectedTagName ?: "Tags")
                             BrowseMode.RECYCLE_BIN -> Text("Recycle Bin")
@@ -1235,6 +1279,7 @@ fun AlbumScreen(
                     val contextImages: List<ImageItem> = when {
                         selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null -> images
                         selectedBrowseMode == BrowseMode.TAG && selectedTagName != null -> tagImages
+                        selectedBrowseMode == BrowseMode.RECYCLE_BIN -> trashedImages
                         else -> emptyList()
                     }
                     val contextUris = contextImages.map { it.uri }
@@ -1258,9 +1303,9 @@ fun AlbumScreen(
                         },
                         onSelectForAi = {
                             // Toggle: remove already-selected URIs, add the rest.
-                            // Images newly added to the ranking queue also get
-                            // their stale AI info cleared (the merged "AI Ranking"
-                            // button = old "AI Ranking" + "Remove AI Info") so
+                            // Images newly added to the rating queue also get
+                            // their stale AI info cleared (the merged "AI Rating"
+                            // button = old "AI Rating" + "Remove AI Info") so
                             // they are ranked again.
                             val alreadySelected = selectedImageUris.intersect(aiSelectedUris)
                             val newlySelected = selectedImageUris - aiSelectedUris
@@ -1369,6 +1414,8 @@ fun AlbumScreen(
                                         )
                                         if (sender != null) {
                                             pendingFavouriteMessage = "${failed.size} removed from favourites"
+                                            pendingFavouriteUris = failed.toList()
+                                            pendingFavouriteTarget = false
                                             favouriteLauncher.launch(
                                                 IntentSenderRequest.Builder(sender).build()
                                             )
@@ -1397,6 +1444,8 @@ fun AlbumScreen(
                                         )
                                         if (sender != null) {
                                             pendingFavouriteMessage = "${failed.size} marked as favourite"
+                                            pendingFavouriteUris = failed.toList()
+                                            pendingFavouriteTarget = true
                                             favouriteLauncher.launch(
                                                 IntentSenderRequest.Builder(sender).build()
                                             )
@@ -1432,6 +1481,44 @@ fun AlbumScreen(
                                 verticalArrangement = Arrangement.spacedBy(12.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
+                                // "All Folders" pseudo-entry — shows images from EVERY folder
+                                item {
+                                    ElevatedCard(
+                                        onClick = {
+                                            selectedFolder = ALL_FOLDERS_SENTINEL
+                                            folderSortMode = FolderSortMode.MODIFIED_DATE_DESC
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(20.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Folder,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(48.dp),
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                            Spacer(Modifier.height(8.dp))
+                                            Text(
+                                                text = "All Folders",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Medium,
+                                                textAlign = TextAlign.Center
+                                            )
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                text = "${folderInfos.sumOf { it.imageCount }} images",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                textAlign = TextAlign.Center
+                                            )
+                                        }
+                                    }
+                                }
                                 items(folderInfos) { folderInfo ->
                                     ElevatedCard(
                                         onClick = {
@@ -1592,7 +1679,7 @@ fun AlbumScreen(
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Column(
-                                            modifier = Modifier.padding(16.dp),
+                                            modifier = Modifier.fillMaxWidth().padding(16.dp),
                                             horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
                                             Icon(
@@ -1796,14 +1883,64 @@ fun AlbumScreen(
                                     .background(Color.Black)
                             ) {
                                 items(trashedImages, key = { it.uri }) { image ->
-                                    Box(modifier = Modifier.aspectRatio(1f)) {
+                                    val isBinSelected = image.uri in selectedImageUris
+                                    Box(
+                                        modifier = Modifier
+                                            .aspectRatio(1f)
+                                            .combinedClickable(
+                                                onClick = {
+                                                    if (isMultiSelectMode) {
+                                                        selectedImageUris = if (isBinSelected)
+                                                            selectedImageUris - image.uri
+                                                        else
+                                                            selectedImageUris + image.uri
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    if (!isMultiSelectMode) {
+                                                        isMultiSelectMode = true
+                                                        selectedImageUris = setOf(image.uri)
+                                                    }
+                                                }
+                                            )
+                                    ) {
                                         ImageThumbnail(
                                             imageUri = image.uri,
                                             modifier = Modifier.fillMaxSize(),
                                             backgroundColor = Color.Black
                                         )
-                                        // Restore button — clears the MediaStore IS_TRASHED
-                                        // flag to send the item straight back to the gallery.
+                                        // Selection overlay in multi-select mode
+                                        if (isMultiSelectMode) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .background(
+                                                        if (isBinSelected) Color(0x80000000)
+                                                        else Color(0x33000000)
+                                                    )
+                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(4.dp)
+                                                    .background(
+                                                        color = if (isBinSelected) MaterialTheme.colorScheme.primary
+                                                        else Color.White.copy(alpha = 0.6f),
+                                                        shape = CircleShape
+                                                    )
+                                                    .padding(3.dp)
+                                            ) {
+                                                if (isBinSelected) {
+                                                    Icon(
+                                                        Icons.Default.Check,
+                                                        contentDescription = "Selected",
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        // Restore + permanent Delete row
                                         Row(
                                             modifier = Modifier
                                                 .align(Alignment.BottomCenter)
@@ -1838,6 +1975,33 @@ fun AlbumScreen(
                                                 contentPadding = PaddingValues(horizontal = 8.dp)
                                             ) {
                                                 Text("Restore", color = Color.White)
+                                            }
+                                            TextButton(
+                                                onClick = {
+                                                    // Permanent delete — removes the MediaStore
+                                                    // row forever (API-agnostic direct delete).
+                                                    scope.launch {
+                                                        val n = FileOperationHelper.deleteMediaDirect(
+                                                            context, listOf(image.uri)
+                                                        )
+                                                        if (n > 0) {
+                                                            viewModel.deleteImages(listOf(image.uri))
+                                                            trashedImages = withContext(Dispatchers.IO) {
+                                                                repository.getTrashedImages()
+                                                            }
+                                                            snackbarHostState.showSnackbar(
+                                                                "Deleted permanently"
+                                                            )
+                                                        } else {
+                                                            snackbarHostState.showSnackbar(
+                                                                "Could not delete this image"
+                                                            )
+                                                        }
+                                                    }
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 8.dp)
+                                            ) {
+                                                Text("Delete", color = MaterialTheme.colorScheme.error)
                                             }
                                         }
                                     }
@@ -2327,7 +2491,7 @@ private fun BatchMultiSelectBar(
                     )
                     DropdownMenuItem(
                         onClick = { showMenu = false; onSelectForAi() },
-                        text = { Text("AI Ranking") },
+                        text = { Text("AI Rating") },
                         leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     DropdownMenuItem(

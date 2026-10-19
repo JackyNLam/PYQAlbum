@@ -151,22 +151,30 @@ fun ImageDetailScreen(
                 FavouriteStore.isFavourite(context, imageUri)
             }
             if (result.resultCode == android.app.Activity.RESULT_OK) {
-                snackbarHostState.showSnackbar(
-                    if (pendingFavouriteValue) "Marked as favourite" else "Removed from favourites"
-                )
+                if (isFavourite == pendingFavouriteValue) {
+                    snackbarHostState.showSnackbar(
+                        if (pendingFavouriteValue) "Marked as favourite" else "Removed from favourites"
+                    )
+                } else {
+                    // The ROM claimed success but the provider flag did not
+                    // change — the user deserves honest feedback.
+                    snackbarHostState.showSnackbar(
+                        "This device did not apply the favourite change"
+                    )
+                }
             }
         }
     }
 
-    // Toggle this image in/out of the AI Ranking queue (same as batch menu's
-    // "AI Ranking" item) — feedback mirrors the batch menu snackbar.
+    // Toggle this image in/out of the AI Rating queue (same as batch menu's
+    // "AI Rating" item) — feedback mirrors the batch menu snackbar.
     val toggleAiRanking: () -> Unit = {
         val wasSelected = imageUri in aiSelectedUris
         aiSelectedUris = if (wasSelected) aiSelectedUris - imageUri else aiSelectedUris + imageUri
         saveImageAiSelectedUris(context, aiSelectedUris)
         coroutineScope.launch {
             snackbarHostState.showSnackbar(
-                if (wasSelected) "Removed from AI Ranking" else "Added to AI Ranking"
+                if (wasSelected) "Removed from AI Rating" else "Added to AI Rating"
             )
         }
     }
@@ -885,7 +893,7 @@ fun ImageDetailScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // AI Ranking — toggle this image in/out of the rating queue
+                        // AI Rating — toggle this image in/out of the rating queue
                         Button(
                             onClick = toggleAiRanking,
                             modifier = Modifier.weight(1f),
@@ -903,7 +911,7 @@ fun ImageDetailScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(Modifier.width(6.dp))
-                            Text(if (imageUri in aiSelectedUris) "AI Ranking ✓" else "AI Ranking")
+                            Text(if (imageUri in aiSelectedUris) "AI Rating ✓" else "AI Rating")
                         }
                         // AI Edit — toggle source/target role via a small dialog
                         Button(
@@ -1257,7 +1265,7 @@ private fun formatFileSize(bytes: Long): String {
 }
 
 /**
- * AI Ranking queue prefs — same SharedPreferences keys as the album's batch
+ * AI Rating queue prefs — same SharedPreferences keys as the album's batch
  * menu ("pyqcr_ai_select" / "ai_selected_uris"; also read by AiSelectScreen).
  */
 private fun loadImageAiSelectedUris(context: Context): Set<String> {

@@ -36,6 +36,12 @@ class AlbumRepository(
         }
     }
 
+    fun getAllImagesDateAsc(): Flow<List<ImageItem>> {
+        return imageDao.getAllImagesDateAsc().map { entities ->
+            entities.map { it.toImageItem() }
+        }
+    }
+
     fun getImagesByFolderDateAsc(folderName: String): Flow<List<ImageItem>> {
         return imageDao.getImagesByFolderDateAsc(folderName).map { entities ->
             entities.map { it.toImageItem() }

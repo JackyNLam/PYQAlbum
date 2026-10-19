@@ -441,7 +441,7 @@ fun AiRatingScreen(
                             )
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                text = "Go to Album, long-press an image, and choose\nSelect for AI Ranking to add images here.",
+                                text = "Go to Album, long-press an image, and choose\nSelect for AI Rating to add images here.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 textAlign = TextAlign.Center,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant

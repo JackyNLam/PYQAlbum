@@ -11,17 +11,4 @@
     <path
         android:fillColor="#FFFFFF"
         android:pathData="M54,30c-13.25,0 -24,10.75 -24,24s10.75,24 24,24 24,-10.75 24,-24 -10.75,-24 -24,-24zM54,70c-8.84,0 -16,-7.16 -16,-16s7.16,-16 16,-16 16,7.16 16,16 -7.16,16 -16,16z"/>
-    <!-- Corner accents -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M40,28h4v5h-4z"/>
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M64,28h4v5h-4z"/>
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M40,75h4v5h-4z"/>
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M64,75h4v5h-4z"/>
 </vector>

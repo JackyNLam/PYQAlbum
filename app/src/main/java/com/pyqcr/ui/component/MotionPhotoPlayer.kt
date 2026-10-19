@@ -49,11 +49,11 @@ fun MotionPhotoPlayer(
     var failed by remember(videoPath) { mutableStateOf(false) }
     var attempt by remember(videoPath) { mutableIntStateOf(1) }
 
-    // One automatic retry: the first prepare can fail with a transient decoder
+    // Automatic retries: the first prepare can fail with a transient decoder
     // error on some devices; keying the AndroidView by [attempt] forces a fresh
-    // TextureView + MediaPlayer for the second try.
+    // TextureView + MediaPlayer for each retry.
     LaunchedEffect(failed, attempt, videoPath) {
-        if (failed && attempt < 2) {
+        if (failed && attempt < 3) {
             attempt += 1
             ready = false
             failed = false
@@ -154,7 +154,7 @@ fun MotionPhotoPlayer(
             )
         }
 
-        // Playback failed twice (initial + retry) → tell the user instead of
+        // Playback failed after all automatic retries → tell the user instead of
         // showing a silent black box
         if (failed && attempt >= 2) {
             Text(

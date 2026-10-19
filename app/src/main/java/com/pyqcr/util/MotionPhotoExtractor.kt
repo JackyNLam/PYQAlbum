@@ -42,17 +42,21 @@ object MotionPhotoExtractor {
                     return@use null
                 }
                 val offsets = findFtypOffsets(input)
-                var firstCandidate: File? = null
+                var lastCandidate: File? = null
                 for (offset in offsets) {
                     val extracted = extractFrom(context, uri, offset)
                     if (extracted == null) continue
-                    if (firstCandidate == null) firstCandidate = extracted
+                    // Keep the LAST plausible candidate (largest offset) as the
+                    // fallback — the real appended video starts right after the
+                    // JPEG ends, i.e. at the largest ftyp offset; EXIF false
+                    // positives appear earlier and are filtered by the size check.
+                    lastCandidate?.delete()
+                    lastCandidate = extracted
                     if (isPlayableVideo(extracted)) {
                         return@use extracted
                     }
-                    extracted.delete()
                 }
-                firstCandidate
+                lastCandidate
             }
         } catch (e: Exception) {
             null

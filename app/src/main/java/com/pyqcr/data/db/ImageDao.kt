@@ -8,6 +8,9 @@ interface ImageDao {
     @Query("SELECT * FROM images ORDER BY dateAdded DESC")
     fun getAllImages(): Flow<List<ImageEntity>>
 
+    @Query("SELECT * FROM images ORDER BY dateAdded ASC")
+    fun getAllImagesDateAsc(): Flow<List<ImageEntity>>
+
     @Query("SELECT * FROM images ORDER BY displayName ASC")
     fun getAllImagesByNameAsc(): Flow<List<ImageEntity>>
 

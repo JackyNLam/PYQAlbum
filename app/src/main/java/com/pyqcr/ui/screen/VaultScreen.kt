@@ -386,6 +386,8 @@ fun VaultScreen(onBack: () -> Unit) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
+                        .navigationBarsPadding()
+                        .imePadding()
                         .padding(8.dp)
                 ) {
                     // Header

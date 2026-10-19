@@ -83,6 +83,24 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
         }.launchIn(viewModelScope)
     }
 
+    /** All images across every folder, sorted with the same [FolderSortMode] options as a single folder. */
+    fun loadAllImagesSorted(mode: FolderSortMode) {
+        imagesJob?.cancel()
+        val flow = when (mode) {
+            FolderSortMode.MODIFIED_DATE_DESC -> repository.getAllImages()
+            FolderSortMode.MODIFIED_DATE_ASC -> repository.getAllImagesDateAsc()
+            FolderSortMode.NAME_ASC -> repository.getAllImagesByNameAsc()
+            FolderSortMode.NAME_DESC -> repository.getAllImagesByNameDesc()
+            FolderSortMode.USER_RATING_DESC -> repository.getImagesSortedByUserRatingDesc()
+            FolderSortMode.USER_RATING_ASC -> repository.getImagesSortedByUserRatingAsc()
+            FolderSortMode.AI_SCORE_DESC -> repository.getImagesSortedByAiScoreDesc()
+            FolderSortMode.AI_SCORE_ASC -> repository.getImagesSortedByAiScoreAsc()
+        }
+        imagesJob = flow.onEach { imageList ->
+            _images.value = imageList
+        }.launchIn(viewModelScope)
+    }
+
     fun loadImagesByFolderSorted(folderName: String, mode: FolderSortMode) {
         imagesJob?.cancel()
         val flow = when (mode) {
