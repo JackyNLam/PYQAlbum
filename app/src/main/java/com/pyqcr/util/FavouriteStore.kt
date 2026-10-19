@@ -37,10 +37,12 @@ object FavouriteStore {
     }
 
     /**
-     * Set (true) or clear (false) the favourite flag by writing IS_FAVORITE
-     * directly. Returns false when the provider rejects the write — the caller
-     * then falls back to the platform [createFavoriteRequest] dialog, which
-     * shows a system prompt the user approves once.
+     * FALLBACK ONLY — set (true) or clear (false) the favourite flag by writing
+     * IS_FAVORITE directly. Returns false when the provider rejects the write.
+     * Direct writes only persist on rows this app owns, so callers should use
+     * [createFavoriteRequest] (the platform dialog, which the media provider
+     * honours for ANY row) as the primary marking method and call this only
+     * when that request cannot be built.
      */
     fun setFavourite(context: Context, uri: String, favourite: Boolean): Boolean {
         if (!supported) return false
@@ -60,10 +62,12 @@ object FavouriteStore {
     }
 
     /**
-     * Platform favourite request (Android 13+): shows the system "mark as
-     * favourite?" permission/confirmation dialog for [uris] in ONE prompt —
-     * the reliable path for photos the app does not own, where a direct
-     * IS_FAVORITE write is not allowed. Returns null on older APIs / failure.
+     * PRIMARY marking method (Android 13+): builds the platform favourite
+     * request. The system shows ONE confirmation dialog for [uris]; on approval
+     * the media provider itself persists IS_FAVORITE — unlike a direct write,
+     * this works for rows this app does NOT own (e.g. photos taken by other
+     * apps), which is exactly what other gallery apps read. Returns null on
+     * older APIs / failure — the caller may then fall back to [setFavourite].
      */
     fun createFavoriteRequest(
         context: Context,

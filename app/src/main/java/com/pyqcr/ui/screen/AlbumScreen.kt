@@ -1398,65 +1398,50 @@ fun AlbumScreen(
                                 if (contextUris.isEmpty()) return@launch
                                 val alreadyFav = favouriteUris.intersect(contextUris)
                                 val toAdd = contextUris - alreadyFav
-                                if (toAdd.isEmpty() && alreadyFav.isNotEmpty()) {
-                                    // All selected are already favourites → unmark them
-                                    var okDirect = 0
-                                    val failed = mutableListOf<String>()
+                                // One of: unmark all already-favourites, or mark
+                                // the not-yet-favourited selection.
+                                val (changeUris, changeTarget) =
+                                    if (toAdd.isEmpty() && alreadyFav.isNotEmpty()) {
+                                        Pair(alreadyFav.toList(), false)
+                                    } else {
+                                        Pair(toAdd.toList(), true)
+                                    }
+                                // PRIMARY marking method: the platform favourite
+                                // request. The system shows one confirmation
+                                // dialog; the media provider itself persists
+                                // IS_FAVORITE — this works even for photos this
+                                // app does NOT own, which is what other gallery
+                                // apps read. The direct IS_FAVORITE write is only
+                                // a fallback when the request cannot be built.
+                                val sender = FavouriteStore.createFavoriteRequest(
+                                    context, changeUris, changeTarget
+                                )
+                                if (sender != null && changeUris.isNotEmpty()) {
+                                    pendingFavouriteMessage = if (changeTarget)
+                                        "${changeUris.size} marked as favourite"
+                                    else "${changeUris.size} removed from favourites"
+                                    pendingFavouriteUris = changeUris
+                                    pendingFavouriteTarget = changeTarget
+                                    favouriteLauncher.launch(
+                                        IntentSenderRequest.Builder(sender).build()
+                                    )
+                                } else if (changeUris.isNotEmpty()) {
+                                    // Last resort: direct write (persists only on
+                                    // rows this app owns)
+                                    var ok = 0
                                     withContext(Dispatchers.IO) {
-                                        alreadyFav.forEach {
-                                            if (FavouriteStore.setFavourite(context, it, false)) okDirect++
-                                            else failed.add(it)
-                                        }
-                                    }
-                                    if (failed.isNotEmpty()) {
-                                        val sender = FavouriteStore.createFavoriteRequest(
-                                            context, failed, false
-                                        )
-                                        if (sender != null) {
-                                            pendingFavouriteMessage = "${failed.size} removed from favourites"
-                                            pendingFavouriteUris = failed.toList()
-                                            pendingFavouriteTarget = false
-                                            favouriteLauncher.launch(
-                                                IntentSenderRequest.Builder(sender).build()
-                                            )
-                                        }
-                                    }
-                                    // Reload so the hearts reflect the direct writes
-                                    favouriteUris = withContext(Dispatchers.IO) {
-                                        FavouriteStore.loadFavouriteUris(context)
-                                    }
-                                    if (okDirect > 0) {
-                                        snackbarHostState.showSnackbar("$okDirect removed from favourites")
-                                    }
-                                } else {
-                                    // Mark the not-yet-favourited images
-                                    var okDirect = 0
-                                    val failed = mutableListOf<String>()
-                                    withContext(Dispatchers.IO) {
-                                        toAdd.forEach {
-                                            if (FavouriteStore.setFavourite(context, it, true)) okDirect++
-                                            else failed.add(it)
-                                        }
-                                    }
-                                    if (failed.isNotEmpty()) {
-                                        val sender = FavouriteStore.createFavoriteRequest(
-                                            context, failed, true
-                                        )
-                                        if (sender != null) {
-                                            pendingFavouriteMessage = "${failed.size} marked as favourite"
-                                            pendingFavouriteUris = failed.toList()
-                                            pendingFavouriteTarget = true
-                                            favouriteLauncher.launch(
-                                                IntentSenderRequest.Builder(sender).build()
-                                            )
+                                        changeUris.forEach {
+                                            if (FavouriteStore.setFavourite(context, it, changeTarget)) ok++
                                         }
                                     }
                                     favouriteUris = withContext(Dispatchers.IO) {
                                         FavouriteStore.loadFavouriteUris(context)
                                     }
-                                    if (okDirect > 0) {
-                                        snackbarHostState.showSnackbar("$okDirect marked as favourite")
-                                    }
+                                    snackbarHostState.showSnackbar(
+                                        if (ok > 0)
+                                            "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}"
+                                        else "Could not update favourites"
+                                    )
                                 }
                             }
                         }

@@ -137,9 +137,10 @@ fun ImageDetailScreen(
     var showAiEditRoleDialog by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Favourite fallback: when the direct IS_FAVORITE write is rejected (foreign
-    // row the app does not own), the platform favourite-request dialog takes
-    // over — a system prompt the user approves once.
+    // Favourite marking: the platform favourite-request dialog is the PRIMARY
+    // method — the media provider itself persists IS_FAVORITE (works even for
+    // rows the app does not own). The direct IS_FAVORITE write is only a
+    // last-resort fallback when the request cannot be built.
     var pendingFavouriteValue by remember { mutableStateOf(false) }
     val favouriteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -180,29 +181,31 @@ fun ImageDetailScreen(
     }
 
     // Toggle the platform favourite flag (MediaStore IS_FAVORITE, API 33+).
+    // PRIMARY marking method: the platform favourite-request dialog — the
+    // media provider itself persists IS_FAVORITE, which works even for photos
+    // this app does not own. The direct write is only a last-resort fallback
+    // when the request cannot be built.
     val toggleFavourite: () -> Unit = {
         if (!FavouriteStore.supported) {
             coroutineScope.launch { snackbarHostState.showSnackbar("Favourite requires Android 13+") }
         } else {
             val newValue = !isFavourite
-            coroutineScope.launch {
-                val ok = withContext(Dispatchers.IO) {
-                    FavouriteStore.setFavourite(context, imageUri, newValue)
-                }
-                if (ok) {
-                    isFavourite = newValue
-                    snackbarHostState.showSnackbar(
-                        if (newValue) "Marked as favourite" else "Removed from favourites"
-                    )
-                } else {
-                    // Direct write rejected (row the app does not own) — hand the
-                    // toggle over to the platform favourite-request dialog.
-                    val sender = FavouriteStore.createFavoriteRequest(
-                        context, listOf(imageUri), newValue
-                    )
-                    if (sender != null) {
-                        pendingFavouriteValue = newValue
-                        favouriteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            val sender = FavouriteStore.createFavoriteRequest(
+                context, listOf(imageUri), newValue
+            )
+            if (sender != null) {
+                pendingFavouriteValue = newValue
+                favouriteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            } else {
+                coroutineScope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        FavouriteStore.setFavourite(context, imageUri, newValue)
+                    }
+                    if (ok) {
+                        isFavourite = newValue
+                        snackbarHostState.showSnackbar(
+                            if (newValue) "Marked as favourite" else "Removed from favourites"
+                        )
                     } else {
                         snackbarHostState.showSnackbar("Could not update favourite")
                     }

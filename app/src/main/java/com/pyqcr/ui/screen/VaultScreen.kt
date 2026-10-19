@@ -377,7 +377,14 @@ fun VaultScreen(onBack: () -> Unit) {
         }
         Dialog(
             onDismissRequest = { showImportPicker = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                // Draw edge-to-edge so the content receives real window insets —
+                // only then can the bottom action row be padded above the system
+                // navigation bar. Without this, some ROMs clip the "Move" button
+                // behind the gesture bar.
+                decorFitsSystemWindows = false
+            )
         ) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
@@ -386,7 +393,7 @@ fun VaultScreen(onBack: () -> Unit) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .navigationBarsPadding()
+                        .systemBarsPadding()
                         .imePadding()
                         .padding(8.dp)
                 ) {
