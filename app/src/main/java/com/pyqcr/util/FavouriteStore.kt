@@ -95,6 +95,27 @@ object FavouriteStore {
         }
     }
 
+    /**
+     * Android 11/12 bridge for marking favourites on rows this app does not
+     * own: builds the platform WRITE-ACCESS request (API 30+). The system shows
+     * one dialog; once the user grants access, a direct [setFavourite] write on
+     * those rows is persisted by the media provider even though the app is not
+     * their owner — which is what other gallery apps read. Returns null on
+     * older APIs / failure; callers then fall back to [setFavourite] alone
+     * (persists only on rows this app owns).
+     */
+    fun createWriteAccessRequest(context: Context, uris: List<String>): IntentSender? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            MediaStore.createWriteRequest(
+                context.contentResolver,
+                uris.map { Uri.parse(it) }
+            ).intentSender
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     /** Content URIs of every image currently marked favourite in MediaStore. */
     fun loadFavouriteUris(context: Context): Set<String> {
         if (!supported) return emptySet()

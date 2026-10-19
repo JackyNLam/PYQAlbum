@@ -436,31 +436,65 @@ fun AlbumScreen(
     var pendingFavouriteMessage by remember { mutableStateOf("") }
     var pendingFavouriteUris by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingFavouriteTarget by remember { mutableStateOf(true) }
+    // True while the launched intent-sender was a WRITE-ACCESS request
+    // (Android 11/12 bridge) instead of the favourite request itself — the
+    // direct IS_FAVORITE write happens after the provider grants access.
+    var pendingFavouriteNeedsWriteGrant by remember { mutableStateOf(false) }
     val favouriteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         scope.launch {
-            // Reload on ANY result — some ROMs report RESULT_CANCELED even
-            // though the platform dialog applied the flag.
-            favouriteUris = withContext(Dispatchers.IO) {
-                FavouriteStore.loadFavouriteUris(context)
-            }
-            val pending = pendingFavouriteUris
-            val target = pendingFavouriteTarget
-            val applied = withContext(Dispatchers.IO) {
-                pending.count { FavouriteStore.isFavourite(context, it) == target }
-            }
-            if (result.resultCode == android.app.Activity.RESULT_OK) {
-                if (pending.isEmpty() || applied == pending.size) {
-                    snackbarHostState.showSnackbar(pendingFavouriteMessage)
-                } else {
+            if (pendingFavouriteNeedsWriteGrant) {
+                // Android 11/12 path: the dialog granted write access to the
+                // selected rows — now the direct flag write persists even for
+                // rows this app does not own.
+                pendingFavouriteNeedsWriteGrant = false
+                val pending = pendingFavouriteUris
+                val target = pendingFavouriteTarget
+                if (result.resultCode == android.app.Activity.RESULT_OK && pending.isNotEmpty()) {
+                    var ok = 0
+                    withContext(Dispatchers.IO) {
+                        pending.forEach {
+                            if (FavouriteStore.setFavourite(context, it, target)) ok++
+                        }
+                    }
+                    favouriteUris = withContext(Dispatchers.IO) {
+                        FavouriteStore.loadFavouriteUris(context)
+                    }
                     snackbarHostState.showSnackbar(
-                        "$applied of ${pending.size} applied by this device" +
-                            " — the rest were not saved by the system"
+                        if (ok > 0) {
+                            "$ok ${if (target) "marked as favourite" else "removed from favourites"}"
+                        } else {
+                            "Could not update favourites"
+                        }
                     )
+                } else {
+                    snackbarHostState.showSnackbar("Write access was not granted")
                 }
+                pendingFavouriteUris = emptyList()
+            } else {
+                // Reload on ANY result — some ROMs report RESULT_CANCELED even
+                // though the platform dialog applied the flag.
+                favouriteUris = withContext(Dispatchers.IO) {
+                    FavouriteStore.loadFavouriteUris(context)
+                }
+                val pending = pendingFavouriteUris
+                val target = pendingFavouriteTarget
+                val applied = withContext(Dispatchers.IO) {
+                    pending.count { FavouriteStore.isFavourite(context, it) == target }
+                }
+                if (result.resultCode == android.app.Activity.RESULT_OK) {
+                    if (pending.isEmpty() || applied == pending.size) {
+                        snackbarHostState.showSnackbar(pendingFavouriteMessage)
+                    } else {
+                        snackbarHostState.showSnackbar(
+                            "$applied of ${pending.size} applied by this device" +
+                                " — the rest were not saved by the system"
+                        )
+                    }
+                }
+                pendingFavouriteUris = emptyList()
             }
-            pendingFavouriteUris = emptyList()
         }
     }
 
@@ -1456,22 +1490,43 @@ fun AlbumScreen(
                                         IntentSenderRequest.Builder(sender).build()
                                     )
                                 } else if (changeUris.isNotEmpty()) {
-                                    // Last resort: direct write (persists only on
-                                    // rows this app owns)
-                                    var ok = 0
-                                    withContext(Dispatchers.IO) {
-                                        changeUris.forEach {
-                                            if (FavouriteStore.setFavourite(context, it, changeTarget)) ok++
-                                        }
-                                    }
-                                    favouriteUris = withContext(Dispatchers.IO) {
-                                        FavouriteStore.loadFavouriteUris(context)
-                                    }
-                                    snackbarHostState.showSnackbar(
-                                        if (ok > 0)
-                                            "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}"
-                                        else "Could not update favourites"
+                                    // Android 11/12: no favourite-request dialog
+                                    // exists, so ask the media provider for WRITE
+                                    // ACCESS to these rows first — once granted,
+                                    // the direct IS_FAVORITE write persists even
+                                    // for rows this app does not own. On devices
+                                    // or providers that reject even the write
+                                    // request, fall back to the plain direct
+                                    // write (persists only on rows this app owns).
+                                    val writeSender = FavouriteStore.createWriteAccessRequest(
+                                        context, changeUris
                                     )
+                                    if (writeSender != null) {
+                                        pendingFavouriteMessage = if (changeTarget)
+                                            "${changeUris.size} marked as favourite"
+                                        else "${changeUris.size} removed from favourites"
+                                        pendingFavouriteUris = changeUris
+                                        pendingFavouriteTarget = changeTarget
+                                        pendingFavouriteNeedsWriteGrant = true
+                                        favouriteLauncher.launch(
+                                            IntentSenderRequest.Builder(writeSender).build()
+                                        )
+                                    } else {
+                                        var ok = 0
+                                        withContext(Dispatchers.IO) {
+                                            changeUris.forEach {
+                                                if (FavouriteStore.setFavourite(context, it, changeTarget)) ok++
+                                            }
+                                        }
+                                        favouriteUris = withContext(Dispatchers.IO) {
+                                            FavouriteStore.loadFavouriteUris(context)
+                                        }
+                                        snackbarHostState.showSnackbar(
+                                            if (ok > 0)
+                                                "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}"
+                                            else "Could not update favourites"
+                                        )
+                                    }
                                 }
                             }
                         }

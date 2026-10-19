@@ -139,29 +139,57 @@ fun ImageDetailScreen(
 
     // Favourite marking: the platform favourite-request dialog is the PRIMARY
     // method — the media provider itself persists IS_FAVORITE (works even for
-    // rows the app does not own). The direct IS_FAVORITE write is only a
-    // last-resort fallback when the request cannot be built.
+    // rows the app does not own). On Android 11/12 (no favourite-request
+    // dialog) a WRITE-ACCESS request is launched first, and the direct
+    // IS_FAVORITE write runs only after the provider grants access — so the
+    // flag persists even for rows this app does not own. The plain direct
+    // write remains the last-resort fallback.
     var pendingFavouriteValue by remember { mutableStateOf(false) }
+    var pendingFavouriteNeedsWriteGrant by remember { mutableStateOf(false) }
     val favouriteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         coroutineScope.launch {
-            // Re-read the real flag on ANY result — some ROMs report
-            // RESULT_CANCELED even though the platform dialog applied it.
-            isFavourite = withContext(Dispatchers.IO) {
-                FavouriteStore.isFavourite(context, imageUri)
-            }
-            if (result.resultCode == android.app.Activity.RESULT_OK) {
-                if (isFavourite == pendingFavouriteValue) {
+            if (pendingFavouriteNeedsWriteGrant) {
+                // Android 11/12 path: the dialog granted write access to this
+                // row — now the direct flag write persists even for photos this
+                // app does not own.
+                pendingFavouriteNeedsWriteGrant = false
+                if (result.resultCode == android.app.Activity.RESULT_OK) {
+                    val ok = withContext(Dispatchers.IO) {
+                        FavouriteStore.setFavourite(context, imageUri, pendingFavouriteValue)
+                    }
+                    isFavourite = withContext(Dispatchers.IO) {
+                        FavouriteStore.isFavourite(context, imageUri)
+                    }
                     snackbarHostState.showSnackbar(
-                        if (pendingFavouriteValue) "Marked as favourite" else "Removed from favourites"
+                        if (ok) {
+                            if (pendingFavouriteValue) "Marked as favourite" else "Removed from favourites"
+                        } else {
+                            "Could not update favourite"
+                        }
                     )
                 } else {
-                    // The ROM claimed success but the provider flag did not
-                    // change — the user deserves honest feedback.
-                    snackbarHostState.showSnackbar(
-                        "This device did not apply the favourite change"
-                    )
+                    snackbarHostState.showSnackbar("Write access was not granted")
+                }
+            } else {
+                // Re-read the real flag on ANY result — some ROMs report
+                // RESULT_CANCELED even though the platform dialog applied it.
+                isFavourite = withContext(Dispatchers.IO) {
+                    FavouriteStore.isFavourite(context, imageUri)
+                }
+                if (result.resultCode == android.app.Activity.RESULT_OK) {
+                    if (isFavourite == pendingFavouriteValue) {
+                        snackbarHostState.showSnackbar(
+                            if (pendingFavouriteValue) "Marked as favourite" else "Removed from favourites"
+                        )
+                    } else {
+                        // The ROM claimed success but the provider flag did not
+                        // change — the user deserves honest feedback.
+                        snackbarHostState.showSnackbar(
+                            "This device did not apply the favourite change"
+                        )
+                    }
                 }
             }
         }
@@ -197,17 +225,30 @@ fun ImageDetailScreen(
                 pendingFavouriteValue = newValue
                 favouriteLauncher.launch(IntentSenderRequest.Builder(sender).build())
             } else {
-                coroutineScope.launch {
-                    val ok = withContext(Dispatchers.IO) {
-                        FavouriteStore.setFavourite(context, imageUri, newValue)
-                    }
-                    if (ok) {
-                        isFavourite = newValue
-                        snackbarHostState.showSnackbar(
-                            if (newValue) "Marked as favourite" else "Removed from favourites"
-                        )
-                    } else {
-                        snackbarHostState.showSnackbar("Could not update favourite")
+                // Android 11/12: no favourite-request dialog — ask the media
+                // provider for WRITE ACCESS to this row first. Once granted,
+                // the direct IS_FAVORITE write persists even for photos this
+                // app does not own.
+                val writeSender = FavouriteStore.createWriteAccessRequest(
+                    context, listOf(imageUri)
+                )
+                if (writeSender != null) {
+                    pendingFavouriteValue = newValue
+                    pendingFavouriteNeedsWriteGrant = true
+                    favouriteLauncher.launch(IntentSenderRequest.Builder(writeSender).build())
+                } else {
+                    coroutineScope.launch {
+                        val ok = withContext(Dispatchers.IO) {
+                            FavouriteStore.setFavourite(context, imageUri, newValue)
+                        }
+                        if (ok) {
+                            isFavourite = newValue
+                            snackbarHostState.showSnackbar(
+                                if (newValue) "Marked as favourite" else "Removed from favourites"
+                            )
+                        } else {
+                            snackbarHostState.showSnackbar("Could not update favourite")
+                        }
                     }
                 }
             }

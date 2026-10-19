@@ -230,13 +230,16 @@ class AlbumRepository(
     }
 
     /**
-     * Images currently marked as favourite (MediaStore IS_FAVORITE, API 33+).
+     * Images currently marked as favourite (MediaStore IS_FAVORITE, API 30+).
      * Empty on older APIs. Used by the "Favourite" pseudo-tag in Tag browse.
+     * Trashed rows are excluded — a recycled image belongs in the recycle bin,
+     * not the favourites browse.
      */
     suspend fun getFavouriteImages(): List<ImageItem> = withContext(ioDispatcher) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return@withContext emptyList()
-        loadImagesFromMediaStore("${MediaStore.MediaColumns.IS_FAVORITE} = 1")
-            .map { it.toImageItem() }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext emptyList()
+        loadImagesFromMediaStore(
+            "${MediaStore.MediaColumns.IS_FAVORITE} = 1 AND ${MediaStore.MediaColumns.IS_TRASHED} = 0"
+        ).map { it.toImageItem() }
     }
 
     private fun loadImagesFromMediaStore(selection: String?): List<ImageEntity> {

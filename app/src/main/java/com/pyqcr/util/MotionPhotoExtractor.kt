@@ -44,7 +44,12 @@ object MotionPhotoExtractor {
                 val offsets = findFtypOffsets(input)
                 var lastCandidate: File? = null
                 for (offset in offsets) {
-                    val extracted = extractFrom(context, uri, offset)
+                    // Every MP4 box starts with its 4-byte size field, so the
+                    // appended video actually begins 4 bytes BEFORE the "ftyp"
+                    // signature. Copying from the "ftyp" bytes themselves drops
+                    // that header and MediaPlayer refuses to parse the file.
+                    if (offset < 4) continue
+                    val extracted = extractFrom(context, uri, offset - 4)
                     if (extracted == null) continue
                     // Keep the LAST plausible candidate (largest offset) as the
                     // fallback — the real appended video starts right after the
