@@ -583,7 +583,20 @@ object FileOperationHelper {
     fun createTrashRequest(context: Context, uris: List<String>): IntentSender? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         return try {
-            val contentUris = uris.map { Uri.parse(it) }
+            // Volume-qualify each URI (content://media/<volume>/...). With the
+            // generic content://media/external/... form the system dialog appears
+            // to succeed but the provider silently leaves IS_TRASHED = 0 for items
+            // on secondary volumes (e.g. an SD card) — the photo vanishes from the
+            // album yet never shows up in the recycle bin. getMediaUri resolves the
+            // URI to the volume the item actually lives on.
+            val contentUris = uris.map { raw ->
+                val parsed = Uri.parse(raw)
+                try {
+                    MediaStore.getMediaUri(context, parsed)
+                } catch (e: Exception) {
+                    parsed
+                }
+            }
             MediaStore.createTrashRequest(context.contentResolver, contentUris.toMutableList(), true)
                 .intentSender
         } catch (e: Exception) {

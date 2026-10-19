@@ -1,8 +1,10 @@
 package com.pyqcr.data.repository
 
 import android.content.Context
+import android.database.Cursor
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
 import com.pyqcr.data.db.AppDatabase
 import com.pyqcr.data.db.FolderInfo
@@ -225,8 +227,44 @@ class AlbumRepository(
      */
     suspend fun getTrashedImages(): List<ImageItem> = withContext(ioDispatcher) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext emptyList()
-        loadImagesFromMediaStore("${MediaStore.MediaColumns.IS_TRASHED} = 1")
-            .map { it.toImageItem() }
+        loadTrashedImagesFromMediaStore().map { it.toImageItem() }
+    }
+
+    /**
+     * Read the recycle bin. On Android 11+ the MediaProvider HIDES trashed rows
+     * from plain external-volume queries — an "IS_TRASHED = 1" selection alone
+     * returns nothing, so the recycle-bin grid reads empty even though the
+     * delete really did move the images to the trash. Trashed items are only
+     * returned when the query opts in via QUERY_ARG_MATCH_TRASHED (or when the
+     * trash volume is queried). The rows come back with their normal external
+     * content URIs, so thumbnails / restore / permanent delete keep working.
+     */
+    private fun loadTrashedImagesFromMediaStore(): List<ImageEntity> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
+        return try {
+            val queryArgs = Bundle().apply {
+                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, 1)
+                putString(
+                    MediaStore.QUERY_ARG_SQL_SELECTION,
+                    "${MediaStore.MediaColumns.IS_TRASHED} = 1"
+                )
+                putString(
+                    MediaStore.QUERY_ARG_SQL_SORT_ORDER,
+                    "${MediaStore.Images.Media.DATE_ADDED} DESC"
+                )
+            }
+            val cursor = context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                imageProjection,
+                queryArgs,
+                null
+            )
+            readImageEntities(cursor)
+        } catch (e: Exception) {
+            // Provider rejected the match-trashed argument — fall back to the
+            // plain selection form (works where trashed rows stay visible).
+            loadImagesFromMediaStore("${MediaStore.MediaColumns.IS_TRASHED} = 1")
+        }
     }
 
     /**
@@ -242,24 +280,27 @@ class AlbumRepository(
         ).map { it.toImageItem() }
     }
 
-    private fun loadImagesFromMediaStore(selection: String?): List<ImageEntity> {
-        val projection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DISPLAY_NAME,
-            MediaStore.Images.Media.DATA,
-            MediaStore.Images.Media.WIDTH,
-            MediaStore.Images.Media.HEIGHT,
-            MediaStore.Images.Media.SIZE,
-            MediaStore.Images.Media.DATE_ADDED,
-            MediaStore.Images.Media.BUCKET_DISPLAY_NAME
-        )
+    private val imageProjection = arrayOf(
+        MediaStore.Images.Media._ID,
+        MediaStore.Images.Media.DISPLAY_NAME,
+        MediaStore.Images.Media.DATA,
+        MediaStore.Images.Media.WIDTH,
+        MediaStore.Images.Media.HEIGHT,
+        MediaStore.Images.Media.SIZE,
+        MediaStore.Images.Media.DATE_ADDED,
+        MediaStore.Images.Media.BUCKET_DISPLAY_NAME
+    )
 
+    private fun loadImagesFromMediaStore(selection: String?): List<ImageEntity> {
         val uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val cursor = context.contentResolver.query(
-            uri, projection, selection, null,
+            uri, imageProjection, selection, null,
             "${MediaStore.Images.Media.DATE_ADDED} DESC"
         )
+        return readImageEntities(cursor)
+    }
 
+    private fun readImageEntities(cursor: Cursor?): List<ImageEntity> {
         val images = mutableListOf<ImageEntity>()
 
         cursor?.use { c ->
