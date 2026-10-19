@@ -244,12 +244,15 @@ class AlbumRepository(
         return try {
             val queryArgs = Bundle().apply {
                 putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, 1)
+                // QUERY_ARG_SQL_SELECTION / QUERY_ARG_SQL_SORT_ORDER are not
+                // exposed by this build's android.jar, so use the stable
+                // platform string values they map to (runtime-identical).
                 putString(
-                    MediaStore.QUERY_ARG_SQL_SELECTION,
+                    "android:query-arg-sql-selection",
                     "${MediaStore.MediaColumns.IS_TRASHED} = 1"
                 )
                 putString(
-                    MediaStore.QUERY_ARG_SQL_SORT_ORDER,
+                    "android:query-arg-sql-sort-order",
                     "${MediaStore.Images.Media.DATE_ADDED} DESC"
                 )
             }
