@@ -44,12 +44,14 @@ object FavouriteStore {
     }
 
     /**
-     * FALLBACK ONLY — set (true) or clear (false) the favourite flag by writing
-     * IS_FAVORITE directly. Returns false when the provider rejects the write.
-     * Direct writes only persist on rows this app owns, so callers should use
-     * [createFavoriteRequest] (the platform dialog, which the media provider
-     * honours for ANY row) as the primary marking method and call this only
-     * when that request cannot be built.
+     * PRIMARY marking method — set (true) or clear (false) the favourite flag
+     * by writing IS_FAVORITE directly. Returns false when the provider rejects
+     * the write. The flag does NOT need to be visible in other apps, so the
+     * plain verified write is the preferred path: it is silent (no system
+     * dialog) and persists on rows this app owns (and, with All-files access,
+     * on foreign rows too). Callers fall back to the platform
+     * favourite-request dialog ([createFavoriteRequest]) only when this
+     * returns false.
      */
     fun setFavourite(context: Context, uri: String, favourite: Boolean): Boolean {
         if (!supported) return false
@@ -69,16 +71,15 @@ object FavouriteStore {
     }
 
     /**
-     * PRIMARY marking method (Android 13+): builds the platform favourite
-     * request exactly as the system API intends — one confirmation dialog for
-     * [imageUris]; on approval the media provider itself persists IS_FAVORITE,
-     * which works for rows this app does NOT own (e.g. photos taken by other
-     * apps), i.e. what other gallery apps read. Returns the platform
-     * PendingIntent so callers can build a launcher from it; null below
-     * Android 13 (the favourite-request DIALOG itself is API 33+, even though
-     * the IS_FAVORITE column exists from API 30) or on failure — callers then
-     * fall back to the WRITE-ACCESS request ([createWriteAccessRequest]) or the
-     * verified direct write ([setFavourite]).
+     * FALLBACK ONLY (Android 13+): builds the platform favourite request — one
+     * confirmation dialog for [imageUris]; on approval the media provider
+     * itself persists IS_FAVORITE, which works for rows this app does NOT own
+     * (e.g. photos taken by other apps). Used when the direct verified write
+     * ([setFavourite]) fails. Returns the platform PendingIntent so callers
+     * can build a launcher from it; null below Android 13 (the
+     * favourite-request DIALOG itself is API 33+, even though the IS_FAVORITE
+     * column exists from API 30) or on failure — callers then try the
+     * WRITE-ACCESS request ([createWriteAccessRequest]) or give up.
      */
     fun setMediaFavoriteStatus(
         context: Context,

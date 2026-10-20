@@ -7,6 +7,7 @@ import android.view.Surface
 import android.view.TextureView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
@@ -43,6 +44,9 @@ fun VideoPlayer(
     var ready by remember(data) { mutableStateOf(false) }
     var failed by remember(data) { mutableStateOf(false) }
     var attempt by remember(data) { mutableIntStateOf(1) }
+    // Native video frame size (null until the first onPrepared) — the view is
+    // sized to this ratio so the video is never stretched across the screen.
+    var videoSize by remember(data) { mutableStateOf<Pair<Int, Int>?>(null) }
 
     // Automatic retries: keying the AndroidView by [attempt] forces a fresh
     // TextureView + MediaPlayer for each retry.
@@ -56,7 +60,19 @@ fun VideoPlayer(
 
     val isContentUri = data.startsWith("content://")
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // Fit the video frame: size the TextureView to the video's native aspect
+    // ratio (ContentScale.Fit-style framing) instead of stretching it across
+    // the whole screen, which distorts the video.
+    val videoModifier = run {
+        val size = videoSize
+        if (size == null) {
+            Modifier.fillMaxSize()
+        } else {
+            Modifier.aspectRatio(size.first.toFloat() / size.second.toFloat())
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         key(attempt) {
             AndroidView(
                 factory = { ctx ->
@@ -79,6 +95,11 @@ fun VideoPlayer(
                                         setVolume(1f, 1f)
                                         setOnPreparedListener { p ->
                                             if (tag == p) {
+                                                val w = p.videoWidth
+                                                val h = p.videoHeight
+                                                if (w > 0 && h > 0) {
+                                                    videoSize = w to h
+                                                }
                                                 ready = true
                                                 p.start()
                                             }
@@ -123,7 +144,7 @@ fun VideoPlayer(
                         }
                     }
                 },
-                modifier = Modifier.fillMaxSize(),
+                modifier = videoModifier,
                 onRelease = {
                     val mp = it.tag as? MediaPlayer
                     try {

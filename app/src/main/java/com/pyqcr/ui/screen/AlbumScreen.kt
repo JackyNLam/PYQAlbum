@@ -529,6 +529,30 @@ fun AlbumScreen(
     var binFolder by remember { mutableStateOf<String?>(null) }
     var binViewerIndex by remember { mutableIntStateOf(-1) }
 
+    // Bin permanent-delete fallback: when the direct trash-volume delete cannot
+    // remove a row (rows this app does not own, without All-files access), the
+    // system delete-request dialog performs the permanent delete on approval.
+    var pendingBinDeleteUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    val binDeleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val pending = pendingBinDeleteUris
+        pendingBinDeleteUris = emptyList()
+        if (result.resultCode == android.app.Activity.RESULT_OK && pending.isNotEmpty()) {
+            scope.launch {
+                viewModel.deleteImages(pending)
+                trashedMedia = withContext(Dispatchers.IO) {
+                    repository.getTrashedMedia()
+                }
+                binFolder = null
+                binViewerIndex = -1
+                snackbarHostState.showSnackbar("Deleted ${pending.size} item(s) permanently")
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            }
+        }
+    }
+
     /**
      * Remove [uris] from the gallery — RECYCLE BIN FIRST on API 30+ (the system
      * trash request, recoverable), falling back to a permanent delete on older
@@ -571,18 +595,49 @@ fun AlbumScreen(
         if (selectedBrowseMode == BrowseMode.RECYCLE_BIN) {
             // Inside the bin, Delete means permanent removal — via the trash
             // volume URI (a plain external-volume delete silently no-ops for
-            // trashed rows on Android 11+).
+            // trashed rows on Android 11+). Rows the direct delete cannot
+            // remove (not owned by this app, without All-files access) go
+            // through the system delete-request dialog instead.
             scope.launch {
-                val n = FileOperationHelper.deletePermanentlyFromTrash(context, uris)
-                viewModel.deleteImages(uris)
-                trashedMedia = withContext(Dispatchers.IO) {
-                    repository.getTrashedMedia()
+                val failed = FileOperationHelper.deletePermanentlyFromTrash(context, uris)
+                val failedCount = failed.size
+                if (failed.isEmpty()) {
+                    viewModel.deleteImages(uris)
+                    trashedMedia = withContext(Dispatchers.IO) {
+                        repository.getTrashedMedia()
+                    }
+                    binFolder = null
+                    binViewerIndex = -1
+                    snackbarHostState.showSnackbar("Deleted ${uris.size} item(s) permanently")
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                } else {
+                    val deletedCount = uris.size - failedCount
+                    if (deletedCount > 0) {
+                        viewModel.deleteImages(uris - failed.toSet())
+                        trashedMedia = withContext(Dispatchers.IO) {
+                            repository.getTrashedMedia()
+                        }
+                        isMultiSelectMode = false
+                        selectedImageUris = emptySet()
+                    }
+                    val sender = FileOperationHelper.createBinPermanentDeleteRequest(
+                        context, failed
+                    )
+                    if (sender != null) {
+                        pendingBinDeleteUris = failed
+                        snackbarHostState.showSnackbar(
+                            if (deletedCount > 0) {
+                                "Deleted $deletedCount item(s), $failedCount need confirmation"
+                            } else {
+                                "$failedCount item(s) need confirmation to delete permanently"
+                            }
+                        )
+                        binDeleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                    } else {
+                        snackbarHostState.showSnackbar("Could not delete $failedCount item(s)")
+                    }
                 }
-                binFolder = null
-                binViewerIndex = -1
-                snackbarHostState.showSnackbar("Deleted $n item(s) permanently")
-                isMultiSelectMode = false
-                selectedImageUris = emptySet()
             }
         } else {
             trashOrDelete(
@@ -1502,76 +1557,92 @@ fun AlbumScreen(
                             scope.launch {
                                 if (!FavouriteStore.supported) {
                                     snackbarHostState.showSnackbar("Favourite requires Android 11+")
-                                    return@launch
-                                }
-                                val contextUris = selectedImageUris
-                                if (contextUris.isEmpty()) return@launch
-                                val alreadyFav = favouriteUris.intersect(contextUris)
-                                val toAdd = contextUris - alreadyFav
-                                // One of: unmark all already-favourites, or mark
-                                // the not-yet-favourited selection.
-                                val (changeUris, changeTarget) =
-                                    if (toAdd.isEmpty() && alreadyFav.isNotEmpty()) {
-                                        Pair(alreadyFav.toList(), false)
-                                    } else {
-                                        Pair(toAdd.toList(), true)
-                                    }
-                                // PRIMARY marking method: the platform favourite
-                                // request. The system shows one confirmation
-                                // dialog; the media provider itself persists
-                                // IS_FAVORITE — this works even for photos this
-                                // app does NOT own, which is what other gallery
-                                // apps read. The direct IS_FAVORITE write is only
-                                // a fallback when the request cannot be built.
-                                val sender = FavouriteStore.createFavoriteRequest(
-                                    context, changeUris, changeTarget
-                                )
-                                if (sender != null && changeUris.isNotEmpty()) {
-                                    pendingFavouriteMessage = if (changeTarget)
-                                        "${changeUris.size} marked as favourite"
-                                    else "${changeUris.size} removed from favourites"
-                                    pendingFavouriteUris = changeUris
-                                    pendingFavouriteTarget = changeTarget
-                                    favouriteLauncher.launch(
-                                        IntentSenderRequest.Builder(sender).build()
-                                    )
-                                } else if (changeUris.isNotEmpty()) {
-                                    // Android 11/12: no favourite-request dialog
-                                    // exists, so ask the media provider for WRITE
-                                    // ACCESS to these rows first — once granted,
-                                    // the direct IS_FAVORITE write persists even
-                                    // for rows this app does not own. On devices
-                                    // or providers that reject even the write
-                                    // request, fall back to the plain direct
-                                    // write (persists only on rows this app owns).
-                                    val writeSender = FavouriteStore.createWriteAccessRequest(
-                                        context, changeUris
-                                    )
-                                    if (writeSender != null) {
-                                        pendingFavouriteMessage = if (changeTarget)
-                                            "${changeUris.size} marked as favourite"
-                                        else "${changeUris.size} removed from favourites"
-                                        pendingFavouriteUris = changeUris
-                                        pendingFavouriteTarget = changeTarget
-                                        pendingFavouriteNeedsWriteGrant = true
-                                        favouriteLauncher.launch(
-                                            IntentSenderRequest.Builder(writeSender).build()
-                                        )
-                                    } else {
-                                        var ok = 0
-                                        withContext(Dispatchers.IO) {
-                                            changeUris.forEach {
-                                                if (FavouriteStore.setFavourite(context, it, changeTarget)) ok++
+                                } else {
+                                    val contextUris = selectedImageUris
+                                    if (contextUris.isNotEmpty()) {
+                                        val alreadyFav = favouriteUris.intersect(contextUris)
+                                        val toAdd = contextUris - alreadyFav
+                                        // One of: unmark all already-favourites, or mark
+                                        // the not-yet-favourited selection.
+                                        val (changeUris, changeTarget) =
+                                            if (toAdd.isEmpty() && alreadyFav.isNotEmpty()) {
+                                                Pair(alreadyFav.toList(), false)
+                                            } else {
+                                                Pair(toAdd.toList(), true)
+                                            }
+                                        if (changeUris.isNotEmpty()) {
+                                            // PRIMARY marking method: the direct verified
+                                            // IS_FAVORITE write — in-app, no system dialog,
+                                            // and the flag does not need to show in other
+                                            // apps. Only rows the provider rejects fall
+                                            // back to the platform favourite-request dialog.
+                                            var ok = 0
+                                            val failed = mutableListOf<String>()
+                                            withContext(Dispatchers.IO) {
+                                                changeUris.forEach {
+                                                    if (FavouriteStore.setFavourite(
+                                                            context, it, changeTarget
+                                                        )
+                                                    ) {
+                                                        ok++
+                                                    } else {
+                                                        failed += it
+                                                    }
+                                                }
+                                            }
+                                            favouriteUris = withContext(Dispatchers.IO) {
+                                                FavouriteStore.loadFavouriteUris(context)
+                                            }
+                                            if (failed.isEmpty()) {
+                                                snackbarHostState.showSnackbar(
+                                                    "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}"
+                                                )
+                                            } else {
+                                                if (ok > 0) {
+                                                    snackbarHostState.showSnackbar(
+                                                        "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}" +
+                                                            " — ${failed.size} need confirmation"
+                                                    )
+                                                }
+                                                // Fallback for rows the direct write could
+                                                // not touch: the platform favourite-request
+                                                // dialog (Android 13+), or a WRITE-ACCESS
+                                                // request (Android 11/12).
+                                                val sender = FavouriteStore.createFavoriteRequest(
+                                                    context, failed, changeTarget
+                                                )
+                                                if (sender != null) {
+                                                    pendingFavouriteMessage = if (changeTarget)
+                                                        "${failed.size} marked as favourite"
+                                                    else "${failed.size} removed from favourites"
+                                                    pendingFavouriteUris = failed
+                                                    pendingFavouriteTarget = changeTarget
+                                                    pendingFavouriteNeedsWriteGrant = false
+                                                    favouriteLauncher.launch(
+                                                        IntentSenderRequest.Builder(sender).build()
+                                                    )
+                                                } else {
+                                                    val writeSender = FavouriteStore.createWriteAccessRequest(
+                                                        context, failed
+                                                    )
+                                                    if (writeSender != null) {
+                                                        pendingFavouriteMessage = if (changeTarget)
+                                                            "${failed.size} marked as favourite"
+                                                        else "${failed.size} removed from favourites"
+                                                        pendingFavouriteUris = failed
+                                                        pendingFavouriteTarget = changeTarget
+                                                        pendingFavouriteNeedsWriteGrant = true
+                                                        favouriteLauncher.launch(
+                                                            IntentSenderRequest.Builder(writeSender).build()
+                                                        )
+                                                    } else {
+                                                        snackbarHostState.showSnackbar(
+                                                            "Could not update ${failed.size} favourite(s)"
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
-                                        favouriteUris = withContext(Dispatchers.IO) {
-                                            FavouriteStore.loadFavouriteUris(context)
-                                        }
-                                        snackbarHostState.showSnackbar(
-                                            if (ok > 0)
-                                                "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}"
-                                            else "Could not update favourites"
-                                        )
                                     }
                                 }
                             }
@@ -2162,19 +2233,36 @@ fun AlbumScreen(
                                 },
                                 onDeletePermanent = { media ->
                                     scope.launch {
-                                        val n = FileOperationHelper.deletePermanentlyFromTrash(
+                                        val failed = FileOperationHelper.deletePermanentlyFromTrash(
                                             context, listOf(media.uri)
                                         )
-                                        if (n > 0) {
+                                        if (failed.isEmpty()) {
                                             viewModel.deleteImages(listOf(media.uri))
                                             trashedMedia = withContext(Dispatchers.IO) {
                                                 repository.getTrashedMedia()
                                             }
                                             snackbarHostState.showSnackbar("Deleted permanently")
                                         } else {
-                                            snackbarHostState.showSnackbar(
-                                                "Could not delete this item"
+                                            // Direct trash-volume delete failed
+                                            // (row not owned, no All-files
+                                            // access) — let the system dialog
+                                            // perform the permanent delete.
+                                            val sender = FileOperationHelper.createBinPermanentDeleteRequest(
+                                                context, failed
                                             )
+                                            if (sender != null) {
+                                                pendingBinDeleteUris = failed
+                                                snackbarHostState.showSnackbar(
+                                                    "Confirm with the system to delete this item"
+                                                )
+                                                binDeleteLauncher.launch(
+                                                    IntentSenderRequest.Builder(sender).build()
+                                                )
+                                            } else {
+                                                snackbarHostState.showSnackbar(
+                                                    "Could not delete this item"
+                                                )
+                                            }
                                         }
                                         binViewerIndex = -1
                                     }

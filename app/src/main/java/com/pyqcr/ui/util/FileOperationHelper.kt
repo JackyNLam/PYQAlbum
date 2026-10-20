@@ -607,19 +607,32 @@ object FileOperationHelper {
     }
 
     /**
-     * Restore trashed images by clearing their MediaStore IS_TRASHED flag
+     * Restore trashed media by clearing their MediaStore IS_TRASHED flag
      * (all API levels — the system recovery-request intent is not a public
-     * API in this build). Works for rows owned by this app, i.e. the images
-     * it trashed itself. Returns the number successfully restored.
+     * API in this build). Tries the row's own URI first (the bin now supplies
+     * volume-qualified URIs for secondary-volume rows), then the trash-volume
+     * address. Returns the number successfully restored.
      */
     suspend fun restoreFromTrash(context: Context, uris: List<String>): Int = withContext(Dispatchers.IO) {
         var restored = 0
         for (u in uris) {
             try {
+                val parsed = Uri.parse(u)
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.IS_TRASHED, 0)
                 }
-                if (context.contentResolver.update(Uri.parse(u), values, null, null) > 0) restored++
+                var n = context.contentResolver.update(parsed, values, null, null)
+                if (n <= 0) {
+                    val trashUri = trashVolumeUri(parsed)
+                    if (trashUri != null) {
+                        n = try {
+                            context.contentResolver.update(trashUri, values, null, null)
+                        } catch (e: Exception) {
+                            0
+                        }
+                    }
+                }
+                if (n > 0) restored++
             } catch (e: Exception) {
                 Log.w(TAG, "restoreFromTrash failed for $u", e)
             }
@@ -631,36 +644,106 @@ object FileOperationHelper {
      * Permanently delete trashed media. A plain delete against the generic
      * external-volume URI of a trashed row silently deletes NOTHING on many
      * devices — the provider only honours the delete when the row is addressed
-     * through the trash volume (content://media/trash/images/media/<id> /
-     * content://media/trash/video/media/<id>). The trash-volume form is tried
-     * first for every row on API 30+; the original URI is the fallback.
-     * Returns the number successfully deleted.
+     * through the trash volume (content://media/trash/...) AND the caller owns
+     * the row (or holds All-files access). Each URI is tried in turn:
+     *   1. the trash-volume URI for the guessed collection
+     *   2. the other collection's trash-volume URI (misclassification guard)
+     *   3. the row's own URI (volume-qualified when the bin query supplied one)
+     *   4. recover-then-delete: clear IS_TRASHED, then delete the row
+     * Returns the URIs that could NOT be deleted directly — the caller should
+     * show the system delete-request dialog ([createBinPermanentDeleteRequest])
+     * for those, which permanently deletes rows this app does not own too.
      */
-    suspend fun deletePermanentlyFromTrash(context: Context, uris: List<String>): Int =
+    suspend fun deletePermanentlyFromTrash(context: Context, uris: List<String>): List<String> =
         withContext(Dispatchers.IO) {
-            var deleted = 0
+            val failed = mutableListOf<String>()
             for (u in uris) {
+                var deleted = false
                 try {
                     val parsed = Uri.parse(u)
-                    val trashUri = trashVolumeUri(parsed)
-                    var n = 0
-                    if (trashUri != null) {
-                        n = try {
-                            context.contentResolver.delete(trashUri, null, null)
+                    for (tryUri in deleteCandidates(parsed)) {
+                        val n = try {
+                            context.contentResolver.delete(tryUri, null, null)
                         } catch (e: Exception) {
                             0
                         }
+                        if (n > 0) {
+                            deleted = true
+                            break
+                        }
                     }
-                    if (n <= 0) {
-                        n = context.contentResolver.delete(parsed, null, null)
+                    if (!deleted) {
+                        // Last resort: recover the row (IS_TRASHED = 0) then
+                        // delete it as a normal item — works around ROMs that
+                        // reject trash-volume deletes entirely.
+                        try {
+                            val values = ContentValues().apply {
+                                put(MediaStore.MediaColumns.IS_TRASHED, 0)
+                            }
+                            context.contentResolver.update(parsed, values, null, null)
+                            if (context.contentResolver.delete(parsed, null, null) > 0) {
+                                deleted = true
+                            }
+                        } catch (e: Exception) {
+                        }
                     }
-                    if (n > 0) deleted++
                 } catch (e: Exception) {
                     Log.w(TAG, "deletePermanentlyFromTrash failed for $u", e)
                 }
+                if (!deleted) failed += u
             }
-            deleted
+            failed
         }
+
+    /**
+     * Candidate URIs for permanently deleting one trashed row, best first.
+     * Trash-volume id namespaces are per-collection, so trying both collections
+     * is safe (an id that exists in neither table deletes 0 rows).
+     */
+    private fun deleteCandidates(parsed: Uri): List<Uri> {
+        val candidates = mutableListOf<Uri>()
+        val trash = trashVolumeUri(parsed)
+        if (trash != null) {
+            candidates.add(trash)
+            val other = if (trash.toString().contains("/images/")) {
+                Uri.parse(trash.toString().replace("/images/", "/video/"))
+            } else {
+                Uri.parse(trash.toString().replace("/video/", "/images/"))
+            }
+            candidates.add(other)
+        }
+        // The row's own address — volume-qualified when the bin query supplied
+        // a volume name, generic otherwise.
+        candidates.add(parsed)
+        return candidates
+    }
+
+    /**
+     * Build the system "delete permanently" request for trashed rows — the
+     * platform-sanctioned way to remove recycle-bin items this app does not
+     * own without All-files access. Passes the trash-volume URIs to
+     * MediaStore.createDeleteRequest; the system shows ONE confirmation dialog
+     * and the provider performs the permanent delete on confirm. Returns null
+     * on API < 30 or when no trash URI could be built (callers then report the
+     * failure directly).
+     */
+    fun createBinPermanentDeleteRequest(context: Context, uris: List<String>): IntentSender? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val trashUris = uris.mapNotNull { raw ->
+            try {
+                trashVolumeUri(Uri.parse(raw))
+            } catch (e: Exception) {
+                null
+            }
+        }
+        if (trashUris.isEmpty()) return null
+        return try {
+            MediaStore.createDeleteRequest(context.contentResolver, trashUris).intentSender
+        } catch (e: Exception) {
+            Log.w(TAG, "createBinPermanentDeleteRequest failed", e)
+            null
+        }
+    }
 
     /**
      * Trash-volume URI for a trashed media row (API 30+): the permanent-delete

@@ -267,7 +267,7 @@ class AlbumRepository(
             }
             val cursor = context.contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                imageProjection,
+                trashProjection(imageProjection),
                 queryArgs,
                 null
             )
@@ -297,7 +297,7 @@ class AlbumRepository(
             }
             val cursor = context.contentResolver.query(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                videoProjection,
+                trashProjection(videoProjection),
                 queryArgs,
                 null
             )
@@ -306,7 +306,7 @@ class AlbumRepository(
             // Same fallback as images — plain selection form.
             val uri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
             val cursor = context.contentResolver.query(
-                uri, videoProjection, "${MediaStore.MediaColumns.IS_TRASHED} = 1", null,
+                uri, trashProjection(videoProjection), "${MediaStore.MediaColumns.IS_TRASHED} = 1", null,
                 "${MediaStore.Video.Media.DATE_ADDED} DESC"
             )
             readImageEntities(cursor, uri)
@@ -363,6 +363,16 @@ class AlbumRepository(
         MediaStore.Video.Media.BUCKET_DISPLAY_NAME
     )
 
+    /**
+     * Base projection + the row's real MediaStore volume ("volume_name", API
+     * 29+). Only the recycle-bin trash queries (API 30+ — the trash exists
+     * from there, so the column is always available) request it, letting the
+     * bin build volume-qualified URIs so restore / permanent delete work for
+     * rows living on secondary storage volumes too.
+     */
+    private fun trashProjection(base: Array<String>): Array<String> =
+        base + arrayOf("volume_name")
+
     private fun loadImagesFromMediaStore(selection: String?): List<ImageEntity> {
         val uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val cursor = context.contentResolver.query(
@@ -387,15 +397,28 @@ class AlbumRepository(
             val sizeCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
             val dateCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
             val folderCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            // Only the recycle-bin trash queries (API 30+) request the row's
+            // volume; every other caller leaves the column unprojected (-1).
+            val volumeCol = c.getColumnIndex("volume_name")
 
             while (c.moveToNext()) {
                 val id = c.getLong(idCol)
                 val name = c.getString(nameCol)
                 val data = c.getString(dataCol)
-                val contentUri = Uri.withAppendedPath(
-                    collectionUri,
-                    id.toString()
-                )
+                val volumeName = if (volumeCol >= 0) c.getString(volumeCol) else null
+                val contentUri = if (!volumeName.isNullOrBlank()) {
+                    // Volume-qualified form — generic content://media/external/
+                    // URIs do not resolve trashed rows living on secondary
+                    // storage volumes (SD cards) for restore / permanent delete.
+                    val collection =
+                        if (collectionUri.toString().contains("/video/")) "video" else "images"
+                    Uri.parse("content://media/$volumeName/$collection/media/$id")
+                } else {
+                    Uri.withAppendedPath(
+                        collectionUri,
+                        id.toString()
+                    )
+                }
                 val width = c.getInt(widthCol)
                 val height = c.getInt(heightCol)
                 val size = c.getLong(sizeCol)
