@@ -2119,68 +2119,68 @@ fun AlbumScreen(
                                 }
                             }
                         }
-                    }
 
-                    // Full-screen recycle-bin viewer: swipe left/right to page
-                    // through the binned items, swipe up for restore/delete
-                    // actions, swipe down to close (like the folder-view detail
-                    // screen). Uses the same folder-filtered list as the grid.
-                    val binViewerItems =
-                        if (binFolder == null) trashedMedia
-                        else trashedMedia.filter {
-                            it.folderName.ifBlank { "Unknown" } == binFolder
-                        }
-                    val currentBinView = binViewerItems.getOrNull(binViewerIndex)
-                    if (currentBinView != null) {
-                        RecycleBinViewer(
-                            item = currentBinView,
-                            positionText = "${binViewerIndex + 1}/${binViewerItems.size}",
-                            onPrev = { if (binViewerIndex > 0) binViewerIndex = binViewerIndex - 1 },
-                            onNext = {
-                                if (binViewerIndex < binViewerItems.lastIndex) {
-                                    binViewerIndex = binViewerIndex + 1
-                                }
-                            },
-                            onClose = { binViewerIndex = -1 },
-                            onRestore = { media ->
-                                scope.launch {
-                                    val restored = FileOperationHelper.restoreFromTrash(
-                                        context, listOf(media.uri)
-                                    )
-                                    if (restored > 0) {
-                                        viewModel.refreshImages()
-                                        trashedMedia = withContext(Dispatchers.IO) {
-                                            repository.getTrashedMedia()
-                                        }
-                                        snackbarHostState.showSnackbar("Restored to the gallery")
-                                    } else {
-                                        snackbarHostState.showSnackbar(
-                                            "Could not restore this item"
-                                        )
-                                    }
-                                    binViewerIndex = -1
-                                }
-                            },
-                            onDeletePermanent = { media ->
-                                scope.launch {
-                                    val n = FileOperationHelper.deletePermanentlyFromTrash(
-                                        context, listOf(media.uri)
-                                    )
-                                    if (n > 0) {
-                                        viewModel.deleteImages(listOf(media.uri))
-                                        trashedMedia = withContext(Dispatchers.IO) {
-                                            repository.getTrashedMedia()
-                                        }
-                                        snackbarHostState.showSnackbar("Deleted permanently")
-                                    } else {
-                                        snackbarHostState.showSnackbar(
-                                            "Could not delete this item"
-                                        )
-                                    }
-                                    binViewerIndex = -1
-                                }
+                        // Full-screen recycle-bin viewer: swipe left/right to page
+                        // through the binned items, swipe up for restore/delete
+                        // actions, swipe down to close (like the folder-view detail
+                        // screen). Uses the same folder-filtered list as the grid.
+                        val binViewerItems =
+                            if (binFolder == null) trashedMedia
+                            else trashedMedia.filter {
+                                it.folderName.ifBlank { "Unknown" } == binFolder
                             }
-                        )
+                        val currentBinView = binViewerItems.getOrNull(binViewerIndex)
+                        if (currentBinView != null) {
+                            RecycleBinViewer(
+                                item = currentBinView,
+                                positionText = "${binViewerIndex + 1}/${binViewerItems.size}",
+                                onPrev = { if (binViewerIndex > 0) binViewerIndex = binViewerIndex - 1 },
+                                onNext = {
+                                    if (binViewerIndex < binViewerItems.lastIndex) {
+                                        binViewerIndex = binViewerIndex + 1
+                                    }
+                                },
+                                onClose = { binViewerIndex = -1 },
+                                onRestore = { media ->
+                                    scope.launch {
+                                        val restored = FileOperationHelper.restoreFromTrash(
+                                            context, listOf(media.uri)
+                                        )
+                                        if (restored > 0) {
+                                            viewModel.refreshImages()
+                                            trashedMedia = withContext(Dispatchers.IO) {
+                                                repository.getTrashedMedia()
+                                            }
+                                            snackbarHostState.showSnackbar("Restored to the gallery")
+                                        } else {
+                                            snackbarHostState.showSnackbar(
+                                                "Could not restore this item"
+                                            )
+                                        }
+                                        binViewerIndex = -1
+                                    }
+                                },
+                                onDeletePermanent = { media ->
+                                    scope.launch {
+                                        val n = FileOperationHelper.deletePermanentlyFromTrash(
+                                            context, listOf(media.uri)
+                                        )
+                                        if (n > 0) {
+                                            viewModel.deleteImages(listOf(media.uri))
+                                            trashedMedia = withContext(Dispatchers.IO) {
+                                                repository.getTrashedMedia()
+                                            }
+                                            snackbarHostState.showSnackbar("Deleted permanently")
+                                        } else {
+                                            snackbarHostState.showSnackbar(
+                                                "Could not delete this item"
+                                            )
+                                        }
+                                        binViewerIndex = -1
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             }
