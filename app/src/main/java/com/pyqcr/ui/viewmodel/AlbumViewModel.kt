@@ -53,6 +53,9 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
 
     private var foldersJob: Job? = null
 
+    // Job for the active image-list Flow collector (switched per browse mode).
+    private var imagesJob: Job? = null
+
     private var videosJob: Job? = null
 
     // Last folder videos were loaded for — so a MediaStore refresh reloads the
