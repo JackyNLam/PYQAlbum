@@ -667,13 +667,13 @@ object FileOperationHelper {
                 }
                 var n = context.contentResolver.update(parsed, values, null, null)
                 if (n <= 0) {
-                    val trashUri = trashVolumeUri(parsed)
-                    if (trashUri != null) {
+                    for (trashUri in trashVolumeCandidates(parsed)) {
                         n = try {
                             context.contentResolver.update(trashUri, values, null, null)
                         } catch (e: Exception) {
                             0
                         }
+                        if (n > 0) break
                     }
                 }
                 if (n > 0) restored++
@@ -690,10 +690,14 @@ object FileOperationHelper {
      * devices — the provider only honours the delete when the row is addressed
      * through the trash volume (content://media/trash/...) AND the caller owns
      * the row (or holds All-files access). Each URI is tried in turn:
-     *   1. the trash-volume URI for the guessed collection
-     *   2. the other collection's trash-volume URI (misclassification guard)
+     *   1. trash-volume addresses for the guessed collection (global AND the
+     *      row's own volume-qualified form — secondary-volume rows such as SD
+     *      cards do NOT resolve through the global trash view on some ROMs)
+     *   2. the other collection's trash-volume addresses (id-reuse guard)
      *   3. the row's own URI (volume-qualified when the bin query supplied one)
      *   4. recover-then-delete: clear IS_TRASHED, then delete the row
+     * Every failed attempt is logged with its reason so the caller can debug
+     * rows that still cannot be removed from logcat.
      * Returns the URIs that could NOT be deleted directly — the caller should
      * show the system delete-request dialog ([createBinPermanentDeleteRequest])
      * for those, which permanently deletes rows this app does not own too.
@@ -709,11 +713,19 @@ object FileOperationHelper {
                         val n = try {
                             context.contentResolver.delete(tryUri, null, null)
                         } catch (e: Exception) {
-                            0
+                            // e.g. RecoverableSecurityException on a row another
+                            // app owns — the system dialog covers these later.
+                            Log.w(TAG, "trash delete of $tryUri threw", e)
+                            -1
                         }
                         if (n > 0) {
                             deleted = true
                             break
+                        }
+                        if (n < 0) {
+                            Log.w(TAG, "trash delete of $tryUri threw (row $u)")
+                        } else {
+                            Log.w(TAG, "trash delete of $tryUri returned $n rows (row $u)")
                         }
                     }
                     if (!deleted) {
@@ -728,17 +740,31 @@ object FileOperationHelper {
                             val values = ContentValues().apply {
                                 put(MediaStore.MediaColumns.IS_TRASHED, 0)
                             }
-                            if (context.contentResolver.update(parsed, values, null, null) > 0) {
+                            val untrashed = try {
+                                context.contentResolver.update(parsed, values, null, null)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "untrash update of $parsed threw", e)
+                                -1
+                            }
+                            if (untrashed > 0) {
                                 if (context.contentResolver.delete(parsed, null, null) > 0) {
                                     deleted = true
                                 } else {
+                                    Log.w(TAG, "untrash ok but delete refused for $parsed — re-trashing")
                                     val reTrash = ContentValues().apply {
                                         put(MediaStore.MediaColumns.IS_TRASHED, 1)
                                     }
-                                    context.contentResolver.update(parsed, reTrash, null, null)
+                                    try {
+                                        context.contentResolver.update(parsed, reTrash, null, null)
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "re-trash update of $parsed threw", e)
+                                    }
                                 }
+                            } else {
+                                Log.w(TAG, "untrash update of $parsed returned $untrashed rows")
                             }
                         } catch (e: Exception) {
+                            Log.w(TAG, "recover-then-delete failed for $parsed", e)
                         }
                     }
                 } catch (e: Exception) {
@@ -752,47 +778,72 @@ object FileOperationHelper {
     /**
      * Candidate URIs for permanently deleting one trashed row, best first.
      * Trash-volume id namespaces are per-collection, so trying both collections
-     * is safe (an id that exists in neither table deletes 0 rows).
+     * is safe (an id that exists in neither table deletes 0 rows). Both the
+     * global trash view and the row's own volume-qualified trash address are
+     * included — rows on secondary volumes (SD cards) do not resolve through
+     * the global content://media/trash/... view on some ROMs.
      */
     private fun deleteCandidates(parsed: Uri): List<Uri> {
         val candidates = mutableListOf<Uri>()
-        val trash = trashVolumeUri(parsed)
-        if (trash != null) {
-            candidates.add(trash)
-            val other = if (trash.toString().contains("/images/")) {
-                Uri.parse(trash.toString().replace("/images/", "/video/"))
+        val trash = trashVolumeCandidates(parsed)
+        candidates.addAll(trash)
+        for (t in trash) {
+            val other = if (t.toString().contains("/images/")) {
+                t.toString().replace("/images/", "/video/")
             } else {
-                Uri.parse(trash.toString().replace("/video/", "/images/"))
+                t.toString().replace("/video/", "/images/")
             }
-            candidates.add(other)
+            candidates.add(Uri.parse(other))
         }
         // The row's own address — volume-qualified when the bin query supplied
         // a volume name, generic otherwise.
         candidates.add(parsed)
-        return candidates
+        return candidates.distinct()
     }
 
     /**
      * Build the system "delete permanently" request for trashed rows — the
      * platform-sanctioned way to remove recycle-bin items this app does not
-     * own without All-files access. Passes the trash-volume URIs to
-     * MediaStore.createDeleteRequest; the system shows ONE confirmation dialog
-     * and the provider performs the permanent delete on confirm. Returns null
-     * on API < 30 or when no trash URI could be built (callers then report the
-     * failure directly).
+     * own without All-files access. Passes the trash-volume URIs (global AND
+     * volume-qualified — SD-card rows only resolve through their own volume)
+     * to MediaStore.createDeleteRequest; the system shows ONE confirmation
+     * dialog and the provider performs the permanent delete on confirm. If
+     * the trash-form list is rejected by the ROM, falls back to the rows'
+     * OWN URIs — the system resolves trashed rows through them and still
+     * presents the permanent-delete flow. Returns null on API < 30 or when
+     * no request could be built (callers then report the failure directly).
      */
     fun createBinPermanentDeleteRequest(context: Context, uris: List<String>): IntentSender? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        val trashUris = uris.mapNotNull { raw ->
+        val trashUris = uris.flatMap { raw ->
             try {
-                trashVolumeUri(Uri.parse(raw))
+                trashVolumeCandidates(Uri.parse(raw))
             } catch (e: Exception) {
+                emptyList()
+            }
+        }.distinct()
+        if (trashUris.isNotEmpty()) {
+            val sender = try {
+                MediaStore.createDeleteRequest(context.contentResolver, trashUris).intentSender
+            } catch (e: Exception) {
+                Log.w(TAG, "createDeleteRequest rejected trash URIs, retrying with the rows' own URIs", e)
                 null
             }
+            if (sender != null) return sender
         }
-        if (trashUris.isEmpty()) return null
+        // Fallback: some ROMs reject the trash-volume URI form inside
+        // createDeleteRequest; the rows' own URIs resolve to the same trashed
+        // rows and the system shows the identical permanent-delete dialog.
         return try {
-            MediaStore.createDeleteRequest(context.contentResolver, trashUris).intentSender
+            val ownUris = uris.mapNotNull { raw ->
+                try {
+                    Uri.parse(raw)
+                } catch (e: Exception) {
+                    null
+                }
+            }.distinct()
+            if (ownUris.isEmpty()) null
+            else MediaStore.createDeleteRequest(context.contentResolver, ownUris).intentSender
         } catch (e: Exception) {
             Log.w(TAG, "createBinPermanentDeleteRequest failed", e)
             null
@@ -800,22 +851,33 @@ object FileOperationHelper {
     }
 
     /**
-     * Trash-volume URI for a trashed media row (API 30+): the permanent-delete
-     * target the MediaProvider actually honours. Returns null on older APIs or
-     * when the row id cannot be parsed. (MediaStore.VOLUME_TRASH is not exposed
-     * by this build's android.jar — the literal "trash" is the same value.)
+     * Trash-volume addresses for one trashed row (API 30+): the permanent-delete
+     * targets the MediaProvider actually honours. Returns both the GLOBAL trash
+     * view (content://media/trash/...) and — when the row URI carries a volume
+     * — the row's own volume-qualified trash address (content://media/<volume>/
+     * trash/...). Rows on secondary volumes (SD cards) do NOT resolve through
+     * the global view on several ROMs, so both forms are tried. Empty on older
+     * APIs or when the row id cannot be parsed. (MediaStore.VOLUME_TRASH is not
+     * exposed by this build's android.jar — the literal "trash" is the same.)
      */
-    fun trashVolumeUri(uri: Uri): Uri? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+    fun trashVolumeCandidates(uri: Uri): List<Uri> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
         return try {
             val id = ContentUris.parseId(uri)
-            if (uri.toString().contains("/video/")) {
-                MediaStore.Video.Media.getContentUri("trash", id)
-            } else {
-                MediaStore.Images.Media.getContentUri("trash", id)
+            val collection = if (uri.toString().contains("/video/")) "video" else "images"
+            val global = Uri.parse("content://media/trash/$collection/media/$id")
+            val volumeQualified = try {
+                // pathSegments: ["media", "<volume>", "<collection>", "media", "<id>"]
+                val seg = uri.pathSegments
+                if (seg.size >= 5 && seg[0] == "media" && seg[1] != "trash") {
+                    Uri.parse("content://media/${seg[1]}/trash/$collection/media/$id")
+                } else null
+            } catch (e: Exception) {
+                null
             }
+            listOfNotNull(global, volumeQualified).distinct()
         } catch (e: Exception) {
-            null
+            emptyList()
         }
     }
 
@@ -833,6 +895,62 @@ object FileOperationHelper {
             }
         }
         deleted
+    }
+
+    /**
+     * Save a bitmap as a PNG into the shared Pictures/PYQAlbum/Screenshots
+     * folder (MediaStore insert, zero-permission on API 29+ via RELATIVE_PATH;
+     * IS_PENDING hides the file until the write completes). Returns the new
+     * content URI as a string, or null when the save failed.
+     */
+    fun savePngScreenshot(context: Context, bitmap: android.graphics.Bitmap, baseName: String): String? {
+        var outUri: Uri? = null
+        return try {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "${baseName}_${System.currentTimeMillis()}.png")
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(
+                        MediaStore.MediaColumns.RELATIVE_PATH,
+                        "${Environment.DIRECTORY_PICTURES}/PYQAlbum/Screenshots"
+                    )
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+            }
+            outUri = context.contentResolver.insert(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                values
+            )
+            if (outUri == null) {
+                Log.w(TAG, "savePngScreenshot: MediaStore insert returned null")
+                return null
+            }
+            val output = context.contentResolver.openOutputStream(outUri)
+            if (output == null) {
+                try { context.contentResolver.delete(outUri, null, null) } catch (e: Exception) {}
+                Log.w(TAG, "savePngScreenshot: no output stream for $outUri")
+                return null
+            }
+            output.use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val publish = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                }
+                try {
+                    context.contentResolver.update(outUri, publish, null, null)
+                } catch (e: Exception) {
+                    Log.w(TAG, "savePngScreenshot: publish failed", e)
+                }
+            }
+            outUri.toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "savePngScreenshot failed", e)
+            try {
+                outUri?.let { context.contentResolver.delete(it, null, null) }
+            } catch (e2: Exception) {
+            }
+            null
+        }
     }
 
     /** Choose a default fallback destination for copy/move operations. */

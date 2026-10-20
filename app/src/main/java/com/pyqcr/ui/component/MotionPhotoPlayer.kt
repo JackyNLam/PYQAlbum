@@ -1,9 +1,12 @@
 package com.pyqcr.ui.component
 
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.view.Surface
 import android.view.TextureView
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,8 +42,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.pyqcr.ui.util.FileOperationHelper
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -80,6 +86,7 @@ fun MotionPhotoPlayer(
     var positionMs by remember(videoPath) { mutableFloatStateOf(0f) }
     var durationMs by remember(videoPath) { mutableFloatStateOf(0f) }
     var isSeeking by remember(videoPath) { mutableStateOf(false) }
+    val context = LocalContext.current
 
     // Automatic retries: the first prepare can fail with a transient decoder
     // error on some devices; keying the AndroidView by [attempt] forces a fresh
@@ -106,6 +113,39 @@ fun MotionPhotoPlayer(
                 }
             }
             delay(250)
+        }
+    }
+
+    // Screenshot capture: grab the full-resolution frame at the current
+    // position via MediaMetadataRetriever (closest sync frame), save it as a
+    // PNG into Pictures/PYQAlbum/Screenshots and confirm with a toast. The
+    // retriever is released even when the grab itself throws.
+    val captureScreenshot: () -> Unit = {
+        var frame: Bitmap? = null
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(videoPath)
+            frame = retriever.getFrameAtTime(
+                (positionMs * 1000).toLong(),
+                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+            )
+        } catch (e: Exception) {
+            frame = null
+        } finally {
+            try {
+                retriever.release()
+            } catch (e: Exception) {
+            }
+        }
+        if (frame != null) {
+            val saved = FileOperationHelper.savePngScreenshot(context, frame, "PYQAlbum_Motion")
+            Toast.makeText(
+                context,
+                if (saved != null) "Screenshot saved" else "Could not save screenshot",
+                Toast.LENGTH_SHORT
+            ).show()
+        } else {
+            Toast.makeText(context, "Could not capture frame", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -322,6 +362,13 @@ fun MotionPhotoPlayer(
                         Icon(
                             Icons.Filled.Forward10,
                             contentDescription = "Forward 10 seconds",
+                            tint = Color.White
+                        )
+                    }
+                    IconButton(onClick = captureScreenshot) {
+                        Icon(
+                            Icons.Filled.PhotoCamera,
+                            contentDescription = "Save screenshot",
                             tint = Color.White
                         )
                     }

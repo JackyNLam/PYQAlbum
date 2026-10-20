@@ -50,6 +50,7 @@ import com.pyqcr.data.db.ImageTagCrossRef
 import com.pyqcr.data.db.TagEntity
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.ui.component.GifPlayer
 import com.pyqcr.ui.component.MotionPhotoPlayer
 import com.pyqcr.ui.component.RatingBar
 import com.pyqcr.ui.component.TagChip
@@ -482,6 +483,31 @@ fun ImageDetailScreen(
         fullPath = com.pyqcr.ui.util.FileOperationHelper.resolveFilePath(context, imageUri)
     }
 
+    // Real file name of the current item (MediaStore DISPLAY_NAME) — used as
+    // the top-bar title for items the Room DB does not know (folder-browse
+    // videos, GIFs…). Also drives GIF detection: an animated GIF gets the
+    // full playback control bar instead of the plain Coil image.
+    var mediaFileName by remember(imageUri) { mutableStateOf<String?>(null) }
+    var isGif by remember(imageUri) { mutableStateOf(false) }
+    LaunchedEffect(imageUri) {
+        val name = withContext(Dispatchers.IO) {
+            try {
+                FileOperationHelper.getFileName(context, imageUri)
+            } catch (e: Exception) {
+                null
+            }
+        }
+        mediaFileName = name
+        isGif = withContext(Dispatchers.IO) {
+            try {
+                context.contentResolver.getType(Uri.parse(imageUri)) == "image/gif" ||
+                    name?.lowercase()?.endsWith(".gif") == true
+            } catch (e: Exception) {
+                false
+            }
+        }
+    }
+
     // Detect and extract the embedded video of a motion photo (JPEG + appended
     // MP4). GIFs and animated WebP play directly through Coil, so no extraction.
     // Plain video files skip this entirely — they play directly below.
@@ -534,7 +560,7 @@ fun ImageDetailScreen(
         topBar = {
             if (showControls && !showDetailPanel) {
                 TopAppBar(
-                    title = { Text(imageItem?.displayName ?: "Image") },
+                    title = { Text(imageItem?.displayName ?: mediaFileName ?: "Image") },
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.Default.ArrowBack, contentDescription = "Back")
@@ -664,6 +690,15 @@ fun ImageDetailScreen(
                         onClose = onBack,
                         showCloseButton = false
                     )
+                } else if (isGif) {
+                    // Animated GIF: play it with the same control bar as
+                    // videos (play/pause, seek bar, ±10 s, screenshot) instead
+                    // of the plain Coil image.
+                    GifPlayer(
+                        data = imageUri,
+                        onClose = onBack,
+                        showCloseButton = false
+                    )
                 } else {
                     SubcomposeAsyncImage(
                         model = ImageRequest.Builder(context)
@@ -671,7 +706,7 @@ fun ImageDetailScreen(
                             .size(1600)
                             .crossfade(true)
                             .build(),
-                        contentDescription = imageItem?.displayName,
+                        contentDescription = imageItem?.displayName ?: mediaFileName,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Fit
                     )
