@@ -1,5 +1,6 @@
 package com.pyqcr.ui.util
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.IntentSender
@@ -624,6 +625,61 @@ object FileOperationHelper {
             }
         }
         restored
+    }
+
+    /**
+     * Permanently delete trashed media. A plain delete against the generic
+     * external-volume URI of a trashed row silently deletes NOTHING on many
+     * devices — the provider only honours the delete when the row is addressed
+     * through the trash volume (content://media/trash/images/media/<id> /
+     * content://media/trash/video/media/<id>). The trash-volume form is tried
+     * first for every row on API 30+; the original URI is the fallback.
+     * Returns the number successfully deleted.
+     */
+    suspend fun deletePermanentlyFromTrash(context: Context, uris: List<String>): Int =
+        withContext(Dispatchers.IO) {
+            var deleted = 0
+            for (u in uris) {
+                try {
+                    val parsed = Uri.parse(u)
+                    val trashUri = trashVolumeUri(parsed)
+                    var n = 0
+                    if (trashUri != null) {
+                        n = try {
+                            context.contentResolver.delete(trashUri, null, null)
+                        } catch (e: Exception) {
+                            0
+                        }
+                    }
+                    if (n <= 0) {
+                        n = context.contentResolver.delete(parsed, null, null)
+                    }
+                    if (n > 0) deleted++
+                } catch (e: Exception) {
+                    Log.w(TAG, "deletePermanentlyFromTrash failed for $u", e)
+                }
+            }
+            deleted
+        }
+
+    /**
+     * Trash-volume URI for a trashed media row (API 30+): the permanent-delete
+     * target the MediaProvider actually honours. Returns null on older APIs or
+     * when the row id cannot be parsed. (MediaStore.VOLUME_TRASH is not exposed
+     * by this build's android.jar — the literal "trash" is the same value.)
+     */
+    fun trashVolumeUri(uri: Uri): Uri? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            val id = ContentUris.parseId(uri)
+            if (uri.toString().contains("/video/")) {
+                MediaStore.Video.Media.getContentUri("trash", id)
+            } else {
+                MediaStore.Images.Media.getContentUri("trash", id)
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**

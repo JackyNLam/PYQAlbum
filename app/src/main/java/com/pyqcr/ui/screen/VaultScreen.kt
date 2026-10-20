@@ -9,9 +9,11 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -29,10 +31,13 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -64,6 +69,7 @@ import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
 import com.pyqcr.ui.component.MotionPhotoPlayer
+import com.pyqcr.ui.component.VideoPlayer
 import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.util.MotionPhotoExtractor
 import kotlinx.coroutines.Dispatchers
@@ -102,7 +108,12 @@ fun VaultScreen(onBack: () -> Unit) {
     // Vault state
     var entries by remember { mutableStateOf<List<VaultEntry>>(emptyList()) }
     var galleryImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
+    var galleryVideos by remember { mutableStateOf<List<GalleryMedia>>(emptyList()) }
     var importing by remember { mutableStateOf(false) }
+
+    // Batch select state (folder grids)
+    var vaultSelection by remember { mutableStateOf(setOf<String>()) }
+    var vaultMultiSelect by remember { mutableStateOf(false) }
 
     // Import picker state
     var showImportPicker by remember { mutableStateOf(false) }
@@ -186,6 +197,12 @@ fun VaultScreen(onBack: () -> Unit) {
     LaunchedEffect(Unit) {
         repository.getAllImages().collect { images ->
             galleryImages = images
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        galleryVideos = withContext(Dispatchers.IO) {
+            loadGalleryVideos(context)
         }
     }
 
@@ -290,6 +307,21 @@ fun VaultScreen(onBack: () -> Unit) {
         }
     }
 
+    /** Move the viewer to the previous/next entry within the current folder. */
+    val navigateViewer: (Int) -> Unit = { delta ->
+        val current = viewingEntry
+        if (current != null) {
+            val list = entries.filter {
+                it.folder.ifBlank { "Uncategorised" } == currentFolder
+            }
+            val idx = list.indexOfFirst { it.id == current.id }
+            val next = list.getOrNull(idx + delta)
+            if (next != null) {
+                openViewer(next)
+            }
+        }
+    }
+
     /** Execute [action] once a verified vault password is available. */
     val runVaultAction: (VaultAction, VaultEntry, String) -> Unit = { action, entry, pwd ->
         scope.launch {
@@ -348,6 +380,62 @@ fun VaultScreen(onBack: () -> Unit) {
             showPasswordDialog = true
         } else {
             runVaultAction(action, entry, password)
+        }
+    }
+
+    /**
+     * Run a batch encrypt/decrypt/move-out over the current vault selection
+     * using the verified vault password (the vault is already unlocked when
+     * the folder grids are visible).
+     */
+    val runVaultBatch: (VaultAction) -> Unit = { action ->
+        val selected = entries.filter { it.id in vaultSelection }
+        if (selected.isNotEmpty()) {
+            scope.launch {
+                var ok = 0
+                for (entry in selected) {
+                    val result = when (action) {
+                        VaultAction.ENCRYPT -> if (!entry.encrypted) {
+                            VaultStorage.encryptEntry(context, entry, password)
+                        } else true
+                        VaultAction.DECRYPT -> if (entry.encrypted) {
+                            VaultStorage.decryptEntry(context, entry, password)
+                        } else true
+                        VaultAction.MOVE_OUT -> VaultStorage.moveOut(context, entry, password)
+                        VaultAction.VIEW -> false
+                    }
+                    if (result) ok++
+                }
+                refreshEntries()
+                vaultMultiSelect = false
+                vaultSelection = emptySet()
+                Toast.makeText(
+                    context,
+                    "$ok of ${selected.size} updated",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    /** Permanently remove the vault selection (vault-local — no recycle bin). */
+    val runVaultBatchDelete: () -> Unit = {
+        val selected = entries.filter { it.id in vaultSelection }
+        if (selected.isNotEmpty()) {
+            scope.launch {
+                var ok = 0
+                for (entry in selected) {
+                    try {
+                        VaultStorage.deleteEntry(context, entry)
+                        ok++
+                    } catch (e: Exception) {
+                    }
+                }
+                refreshEntries()
+                vaultMultiSelect = false
+                vaultSelection = emptySet()
+                Toast.makeText(context, "Removed $ok from the vault", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -528,13 +616,47 @@ fun VaultScreen(onBack: () -> Unit) {
                                 .background(Color.White)
                         ) {
                             gridItems(folderEntries, key = { it.id }) { entry ->
+                                val isSelected = entry.id in vaultSelection
                                 VaultCell(
                                     entry = entry,
                                     previewPath = if (entry.encrypted) null
                                     else VaultStorage.entryFile(context, entry).absolutePath,
-                                    onTap = { openViewer(entry) }
+                                    selected = vaultMultiSelect && isSelected,
+                                    onTap = {
+                                        if (vaultMultiSelect) {
+                                            vaultSelection = if (isSelected)
+                                                vaultSelection - entry.id
+                                            else
+                                                vaultSelection + entry.id
+                                        } else {
+                                            openViewer(entry)
+                                        }
+                                    },
+                                    onLongClick = {
+                                        if (!vaultMultiSelect) {
+                                            vaultMultiSelect = true
+                                            vaultSelection = setOf(entry.id)
+                                        }
+                                    }
                                 )
                             }
+                        }
+                        // Batch-select action bar (encrypt / decrypt / move out / delete)
+                        if (vaultMultiSelect) {
+                            VaultBatchBar(
+                                selectedCount = vaultSelection.size,
+                                onCancel = {
+                                    vaultMultiSelect = false
+                                    vaultSelection = emptySet()
+                                },
+                                onSelectAll = {
+                                    vaultSelection = folderEntries.map { it.id }.toSet()
+                                },
+                                onEncrypt = { runVaultBatch(VaultAction.ENCRYPT) },
+                                onDecrypt = { runVaultBatch(VaultAction.DECRYPT) },
+                                onMoveOut = { runVaultBatch(VaultAction.MOVE_OUT) },
+                                onDelete = { runVaultBatchDelete() }
+                            )
                         }
                     }
                 }
@@ -544,16 +666,23 @@ fun VaultScreen(onBack: () -> Unit) {
 
     // ===================== Import picker dialog (full-screen, folder filter) =====================
     if (showImportPicker) {
+        // Merged gallery list: images + videos (videos get a ▶ badge; both go
+        // through the same copy-as-is import path).
+        val pickerMedia = remember(galleryImages, galleryVideos) {
+            galleryImages.map {
+                GalleryMedia(it.uri, it.displayName, it.folderName, false)
+            } + galleryVideos
+        }
         // Distinct gallery folders for the filter row ("All folders" + each folder)
-        val folders = remember(galleryImages) {
-            galleryImages.map { it.folderName }
+        val folders = remember(pickerMedia) {
+            pickerMedia.map { it.folderName }
                 .filter { !it.isNullOrBlank() }
                 .distinct()
                 .sorted()
         }
-        val filteredImages = remember(galleryImages, importFolderFilter) {
-            if (importFolderFilter == null) galleryImages
-            else galleryImages.filter { it.folderName == importFolderFilter }
+        val filteredMedia = remember(pickerMedia, importFolderFilter) {
+            if (importFolderFilter == null) pickerMedia
+            else pickerMedia.filter { it.folderName == importFolderFilter }
         }
         Dialog(
             onDismissRequest = { showImportPicker = false },
@@ -631,23 +760,41 @@ fun VaultScreen(onBack: () -> Unit) {
                             .weight(1f)
                             .background(Color.Black)
                     ) {
-                        gridItems(filteredImages, key = { it.uri }) { image ->
-                            val selected = image.uri in importSelection
+                        gridItems(filteredMedia, key = { it.uri }) { media ->
+                            val selected = media.uri in importSelection
                             Box(
                                 modifier = Modifier
                                     .aspectRatio(1f)
                                     .clickable {
                                         importSelection = if (selected)
-                                            importSelection - image.uri
+                                            importSelection - media.uri
                                         else
-                                            importSelection + image.uri
+                                            importSelection + media.uri
                                     }
                             ) {
-                                ImageThumbnail(
-                                    imageUri = image.uri,
-                                    modifier = Modifier.fillMaxSize(),
-                                    backgroundColor = Color.Black
-                                )
+                                if (media.isVideo) {
+                                    // Videos can't be thumbnail-decoded by Coil —
+                                    // dark tile with a play badge instead.
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color(0xFF263238)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            Icons.Default.PlayArrow,
+                                            contentDescription = "Video",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(32.dp)
+                                        )
+                                    }
+                                } else {
+                                    ImageThumbnail(
+                                        imageUri = media.uri,
+                                        modifier = Modifier.fillMaxSize(),
+                                        backgroundColor = Color.Black
+                                    )
+                                }
                                 if (selected) {
                                     Box(
                                         modifier = Modifier
@@ -694,18 +841,22 @@ fun VaultScreen(onBack: () -> Unit) {
                                     var ok = 0
                                     var fail = 0
                                     val movedUris = mutableListOf<String>()
-                                    for (uri in importSelection) {
-                                        val name = VaultStorage.galleryDisplayName(context, uri)
+                                    for (media in pickerMedia) {
+                                        if (media.uri !in importSelection) continue
+                                        val name = media.displayName.ifBlank {
+                                            VaultStorage.galleryDisplayName(context, media.uri)
+                                        }
                                         val result = withContext(Dispatchers.IO) {
                                             VaultStorage.importFromGallery(
                                                 context = context,
-                                                uri = uri,
-                                                displayName = name
+                                                uri = media.uri,
+                                                displayName = name,
+                                                isVideo = media.isVideo
                                             )
                                         }
                                         if (result) {
                                             ok++
-                                            movedUris.add(uri)
+                                            movedUris.add(media.uri)
                                         } else {
                                             fail++
                                         }
@@ -715,7 +866,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                     refreshEntries()
                                     Toast.makeText(
                                         context,
-                                        if (fail == 0) "Moved $ok image(s) to the vault"
+                                        if (fail == 0) "Moved $ok item(s) to the vault"
                                         else "Moved $ok, $fail failed",
                                         Toast.LENGTH_SHORT
                                     ).show()
@@ -734,10 +885,12 @@ fun VaultScreen(onBack: () -> Unit) {
     }
 
     // Motion-photo detection: when a view path resolves, look for an embedded
-    // MP4 (GIFs/animated WebP play directly through Coil, so no extraction).
+    // MP4 (GIFs/animated WebP play directly through Coil, so no extraction;
+    // standalone videos are played directly and never scanned).
     LaunchedEffect(viewPath) {
         motionVideoPath = null
         showMotionVideo = false
+        if (viewingEntry?.isVideo == true) return@LaunchedEffect
         val path = viewPath
         if (path != null) {
             motionVideoPath = withContext(Dispatchers.IO) {
@@ -813,7 +966,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                 translationX = viewerOffset.x
                                 translationY = viewerOffset.y
                             }
-                            .pointerInput(Unit) {
+                            .pointerInput(viewingEntry?.id) {
                                 awaitEachGesture {
                                     awaitFirstDown(requireUnconsumed = false)
                                     var transformMode = viewerScale > 1f
@@ -864,11 +1017,15 @@ fun VaultScreen(onBack: () -> Unit) {
                                             showVaultActions = true
                                         } else if (verticalAccum > 80f) {
                                             showVaultActions = false
+                                        } else if (horizontalAccum < -80f) {
+                                            navigateViewer(1)
+                                        } else if (horizontalAccum > 80f) {
+                                            navigateViewer(-1)
                                         }
                                     }
                                 }
                             }
-                            .pointerInput(Unit) {
+                            .pointerInput(viewingEntry?.id) {
                                 detectTapGestures(
                                     onDoubleTap = {
                                         if (viewerScale > 1f) {
@@ -885,38 +1042,47 @@ fun VaultScreen(onBack: () -> Unit) {
                     ) {
                         val currentPath = viewPath
                         if (currentPath != null) {
-                            // GIF / animated WebP play directly through Coil; motion
-                            // photos get a ▶ chip that overlays the embedded video.
-                            AsyncImage(
-                                model = ImageRequest.Builder(context)
-                                    .data(currentPath)
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = entry.displayName,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Fit
-                            )
-                            if (!showMotionVideo && motionVideoPath != null) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.BottomCenter)
-                                        .padding(bottom = 8.dp)
-                                        .background(Color(0x99000000), MaterialTheme.shapes.small)
-                                        .clickable { showMotionVideo = true }
-                                        .padding(horizontal = 14.dp, vertical = 8.dp)
-                                ) {
-                                    Text("▶ Motion photo", color = Color.White)
-                                }
-                            }
-                            if (showMotionVideo && motionVideoPath != null) {
-                                MotionPhotoPlayer(
-                                    videoPath = motionVideoPath!!,
-                                    onClose = { showMotionVideo = false }
+                            if (entry.isVideo) {
+                                // Videos play directly (file path from the vault
+                                // storage, or the decrypted cache copy).
+                                VideoPlayer(data = currentPath, showCloseButton = false)
+                            } else {
+                                // GIF / animated WebP play directly through Coil;
+                                // motion photos get a ▶ chip over the still frame.
+                                AsyncImage(
+                                    model = ImageRequest.Builder(context)
+                                        .data(currentPath)
+                                        .crossfade(true)
+                                        .build(),
+                                    contentDescription = entry.displayName,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Fit
                                 )
+                                if (!showMotionVideo && motionVideoPath != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomCenter)
+                                            .padding(bottom = 8.dp)
+                                            .background(
+                                                Color(0x99000000),
+                                                MaterialTheme.shapes.small
+                                            )
+                                            .clickable { showMotionVideo = true }
+                                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                                    ) {
+                                        Text("▶ Motion photo", color = Color.White)
+                                    }
+                                }
+                                if (showMotionVideo && motionVideoPath != null) {
+                                    MotionPhotoPlayer(
+                                        videoPath = motionVideoPath!!,
+                                        onClose = { showMotionVideo = false }
+                                    )
+                                }
                             }
                             if (!showVaultActions) {
                                 Text(
-                                    text = "Swipe up for actions",
+                                    text = "Swipe: up actions · left/right browse",
                                     color = Color.White.copy(alpha = 0.75f),
                                     style = MaterialTheme.typography.labelMedium,
                                     modifier = Modifier
@@ -1342,24 +1508,44 @@ fun VaultScreen(onBack: () -> Unit) {
 }
 
 /** One tile in the vault grid. Encrypted entries show a lock instead of a preview. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun VaultCell(
     entry: VaultEntry,
     previewPath: String?,
-    onTap: () -> Unit
+    selected: Boolean = false,
+    onTap: () -> Unit,
+    onLongClick: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier
             .aspectRatio(1f)
-            .clickable(onClick = onTap)
+            .combinedClickable(onClick = onTap, onLongClick = onLongClick)
             .background(Color.White)
     ) {
         if (previewPath != null) {
-            ImageThumbnail(
-                imageUri = previewPath,
-                modifier = Modifier.fillMaxSize(),
-                backgroundColor = Color.White
-            )
+            if (entry.isVideo) {
+                // Videos can't be thumbnail-decoded by Coil — play badge tile
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF263238)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = "Video",
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            } else {
+                ImageThumbnail(
+                    imageUri = previewPath,
+                    modifier = Modifier.fillMaxSize(),
+                    backgroundColor = Color.White
+                )
+            }
         } else {
             Box(
                 modifier = Modifier
@@ -1372,6 +1558,27 @@ private fun VaultCell(
                     contentDescription = "Encrypted",
                     tint = Color(0xFFFFD740),
                     modifier = Modifier.size(28.dp)
+                )
+            }
+        }
+        // Selection overlay when batch-selecting
+        if (selected) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x4000E676))
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(3.dp, Color(0xFF00E676)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.Check,
+                    contentDescription = "Selected",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
                 )
             }
         }
@@ -1408,11 +1615,28 @@ private fun FolderCell(
             .background(Color.White)
     ) {
         if (previewEntry != null) {
-            ImageThumbnail(
-                imageUri = VaultStorage.entryFile(LocalContext.current, previewEntry).absolutePath,
-                modifier = Modifier.fillMaxSize(),
-                backgroundColor = Color.White
-            )
+            if (previewEntry.isVideo) {
+                // Videos can't be thumbnail-decoded by Coil — play badge tile
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF263238)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = "Video",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+            } else {
+                ImageThumbnail(
+                    imageUri = VaultStorage.entryFile(LocalContext.current, previewEntry).absolutePath,
+                    modifier = Modifier.fillMaxSize(),
+                    backgroundColor = Color.White
+                )
+            }
         } else {
             Box(
                 modifier = Modifier
@@ -1459,6 +1683,121 @@ private fun FolderCell(
     }
 }
 
+/**
+ * Bottom action bar shown while batch-selecting vault entries. Actions open
+ * from a ⋮ menu (same pattern as the album's batch bar) to stay compact.
+ */
+@Composable
+private fun VaultBatchBar(
+    selectedCount: Int,
+    onCancel: () -> Unit,
+    onSelectAll: () -> Unit,
+    onEncrypt: () -> Unit,
+    onDecrypt: () -> Unit,
+    onMoveOut: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var showMenu by remember { mutableStateOf(false) }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shadowElevation = 8.dp,
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+                .navigationBarsPadding()
+                .height(44.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Small action button — left side
+            IconButton(
+                onClick = onCancel,
+                modifier = Modifier.size(34.dp)
+            ) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Cancel",
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Text(
+                text = "$selectedCount selected",
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 4.dp)
+            )
+            TextButton(onClick = onSelectAll) {
+                Text("Select all")
+            }
+            // Actions menu
+            Box {
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(
+                        Icons.Default.MoreVert,
+                        contentDescription = "Actions",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onEncrypt() },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        text = { Text("Encrypt") }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onDecrypt() },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        text = { Text("Decrypt") }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onMoveOut() },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        text = { Text("Move out") }
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onDelete() },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        text = { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                    )
+                }
+            }
+        }
+    }
+}
+
 // ===================== Vault domain model =====================
 
 /** What the user is trying to do when the vault password is requested. */
@@ -1472,7 +1811,8 @@ data class VaultEntry(
     val relPath: String,
     val encrypted: Boolean,
     val hidden: Boolean,
-    val dateAdded: Long
+    val dateAdded: Long,
+    val isVideo: Boolean = false
 )
 
 /**
@@ -1487,8 +1827,62 @@ data class VaultMeta(
     val relPath: String = "",
     val encrypted: Boolean = false,
     val hidden: Boolean = false,
-    val dateAdded: Long = 0L
+    val dateAdded: Long = 0L,
+    val isVideo: Boolean = false
 )
+
+/** A gallery item (image or video) shown in the vault import picker. */
+private data class GalleryMedia(
+    val uri: String,
+    val displayName: String,
+    val folderName: String,
+    val isVideo: Boolean
+)
+
+/** Non-trashed gallery videos for the vault import picker (newest first). */
+private fun loadGalleryVideos(context: Context): List<GalleryMedia> {
+    return try {
+        val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            "${MediaStore.MediaColumns.IS_TRASHED} = 0"
+        } else {
+            null
+        }
+        val projection = arrayOf(
+            MediaStore.Video.Media._ID,
+            MediaStore.Video.Media.DISPLAY_NAME,
+            MediaStore.Video.Media.BUCKET_DISPLAY_NAME
+        )
+        val videos = mutableListOf<GalleryMedia>()
+        context.contentResolver.query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            null,
+            "${MediaStore.Video.Media.DATE_ADDED} DESC"
+        )?.use { c ->
+            val idCol = c.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+            val nameCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+            val folderCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
+            while (c.moveToNext()) {
+                val id = c.getLong(idCol)
+                videos.add(
+                    GalleryMedia(
+                        uri = Uri.withAppendedPath(
+                            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                            id.toString()
+                        ).toString(),
+                        displayName = c.getString(nameCol) ?: "video_$id",
+                        folderName = c.getString(folderCol) ?: "Unknown",
+                        isVideo = true
+                    )
+                )
+            }
+        }
+        videos
+    } catch (e: Exception) {
+        emptyList()
+    }
+}
 
 // ===================== Crypto (PBKDF2 + AES-256-GCM) =====================
 
@@ -1663,7 +2057,8 @@ object VaultStorage {
                 relPath = meta.relPath,
                 encrypted = meta.encrypted,
                 hidden = meta.hidden,
-                dateAdded = meta.dateAdded
+                dateAdded = meta.dateAdded,
+                isVideo = meta.isVideo
             )
         }.sortedByDescending { it.dateAdded }
     }
@@ -1690,12 +2085,13 @@ object VaultStorage {
      * (unencrypted — the vault's app-private storage already keeps it hidden
      * from other gallery apps). The source folder is recorded so the vault can
      * mirror the gallery's folder structure and move-out can restore the
-     * original location. Returns true on success.
+     * original location. Works for images AND videos. Returns true on success.
      */
     fun importFromGallery(
         context: Context,
         uri: String,
-        displayName: String
+        displayName: String,
+        isVideo: Boolean = false
     ): Boolean {
         return try {
             val bytes = context.contentResolver.openInputStream(Uri.parse(uri))
@@ -1715,7 +2111,8 @@ object VaultStorage {
                 relPath = relPath,
                 encrypted = false,
                 hidden = false,
-                dateAdded = System.currentTimeMillis()
+                dateAdded = System.currentTimeMillis(),
+                isVideo = isVideo
             )
             File(vaultDir(context), "$id.meta").writeText(gson.toJson(meta))
             true
@@ -1836,11 +2233,20 @@ object VaultStorage {
             if (bytes.isEmpty()) return false
 
             val name = entry.displayName.ifBlank { "vault_image" }
-            val mime = when (name.substringAfterLast('.', "").lowercase()) {
-                "gif" -> "image/gif"
-                "webp" -> "image/webp"
-                "png" -> "image/png"
-                else -> "image/jpeg"
+            val mime = when {
+                entry.isVideo -> when (name.substringAfterLast('.', "").lowercase()) {
+                    "webm" -> "video/webm"
+                    "3gp" -> "video/3gpp"
+                    "mkv" -> "video/x-matroska"
+                    "mov" -> "video/quicktime"
+                    else -> "video/mp4"
+                }
+                else -> when (name.substringAfterLast('.', "").lowercase()) {
+                    "gif" -> "image/gif"
+                    "webp" -> "image/webp"
+                    "png" -> "image/png"
+                    else -> "image/jpeg"
+                }
             }
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -1850,8 +2256,12 @@ object VaultStorage {
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
             }
+            val collection = if (entry.isVideo)
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            else
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             destUri = context.contentResolver.insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
+                collection, values
             ) ?: return false
             val output = context.contentResolver.openOutputStream(destUri!!)
             if (output == null) {

@@ -18,6 +18,15 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
+/** A media row (image or video) sitting in the system recycle bin (API 30+ trash). */
+data class TrashedMedia(
+    val uri: String,
+    val displayName: String,
+    val folderName: String,
+    val isVideo: Boolean,
+    val dateAdded: Long
+)
+
 class AlbumRepository(
     private val context: Context,
     private val database: AppDatabase,
@@ -262,12 +271,61 @@ class AlbumRepository(
                 queryArgs,
                 null
             )
-            readImageEntities(cursor)
+            readImageEntities(cursor, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
         } catch (e: Exception) {
             // Provider rejected the match-trashed argument — fall back to the
             // plain selection form (works where trashed rows stay visible).
             loadImagesFromMediaStore("${MediaStore.MediaColumns.IS_TRASHED} = 1")
         }
+    }
+
+    /** Same match-trashed read for the video collection (videos go to the
+     *  system recycle bin exactly like images). */
+    private fun loadTrashedVideosFromMediaStore(): List<ImageEntity> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
+        return try {
+            val queryArgs = Bundle().apply {
+                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, 1)
+                putString(
+                    "android:query-arg-sql-selection",
+                    "${MediaStore.MediaColumns.IS_TRASHED} = 1"
+                )
+                putString(
+                    "android:query-arg-sql-sort-order",
+                    "${MediaStore.Video.Media.DATE_ADDED} DESC"
+                )
+            }
+            val cursor = context.contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                videoProjection,
+                queryArgs,
+                null
+            )
+            readImageEntities(cursor, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+        } catch (e: Exception) {
+            // Same fallback as images — plain selection form.
+            val uri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            val cursor = context.contentResolver.query(
+                uri, videoProjection, "${MediaStore.MediaColumns.IS_TRASHED} = 1", null,
+                "${MediaStore.Video.Media.DATE_ADDED} DESC"
+            )
+            readImageEntities(cursor, uri)
+        }
+    }
+
+    /**
+     * All media (images AND videos) currently in the system recycle bin,
+     * newest first. Empty on older APIs where the trash does not exist.
+     */
+    suspend fun getTrashedMedia(): List<TrashedMedia> = withContext(ioDispatcher) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext emptyList()
+        val images = loadTrashedImagesFromMediaStore().map {
+            TrashedMedia(it.uri, it.displayName, it.folderName, false, it.dateAdded)
+        }
+        val videos = loadTrashedVideosFromMediaStore().map {
+            TrashedMedia(it.uri, it.displayName, it.folderName, true, it.dateAdded)
+        }
+        (images + videos).sortedByDescending { it.dateAdded }
     }
 
     /**
@@ -294,16 +352,30 @@ class AlbumRepository(
         MediaStore.Images.Media.BUCKET_DISPLAY_NAME
     )
 
+    private val videoProjection = arrayOf(
+        MediaStore.Video.Media._ID,
+        MediaStore.Video.Media.DISPLAY_NAME,
+        MediaStore.Video.Media.DATA,
+        MediaStore.Video.Media.WIDTH,
+        MediaStore.Video.Media.HEIGHT,
+        MediaStore.Video.Media.SIZE,
+        MediaStore.Video.Media.DATE_ADDED,
+        MediaStore.Video.Media.BUCKET_DISPLAY_NAME
+    )
+
     private fun loadImagesFromMediaStore(selection: String?): List<ImageEntity> {
         val uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val cursor = context.contentResolver.query(
             uri, imageProjection, selection, null,
             "${MediaStore.Images.Media.DATE_ADDED} DESC"
         )
-        return readImageEntities(cursor)
+        return readImageEntities(cursor, uri)
     }
 
-    private fun readImageEntities(cursor: Cursor?): List<ImageEntity> {
+    private fun readImageEntities(
+        cursor: Cursor?,
+        collectionUri: Uri
+    ): List<ImageEntity> {
         val images = mutableListOf<ImageEntity>()
 
         cursor?.use { c ->
@@ -321,7 +393,7 @@ class AlbumRepository(
                 val name = c.getString(nameCol)
                 val data = c.getString(dataCol)
                 val contentUri = Uri.withAppendedPath(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    collectionUri,
                     id.toString()
                 )
                 val width = c.getInt(widthCol)

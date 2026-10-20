@@ -14,10 +14,16 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -40,15 +46,27 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.content.ContentValues
@@ -64,6 +82,7 @@ import com.pyqcr.data.db.ImageTagCrossRef
 import com.pyqcr.data.db.TagEntity
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.data.repository.TrashedMedia
 import com.pyqcr.ui.component.*
 import com.pyqcr.data.db.FolderInfo
 import com.pyqcr.ui.util.FileOperationHelper
@@ -73,6 +92,9 @@ import com.pyqcr.ui.viewmodel.FolderListSortMode
 import com.pyqcr.ui.viewmodel.GroupByMode
 import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.ImageUtil
+import coil3.compose.SubcomposeAsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -498,8 +520,14 @@ fun AlbumScreen(
         }
     }
 
-    // Recycle-bin browsing: trashed images (restore clears the IS_TRASHED flag)
-    var trashedImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
+    // Recycle-bin browsing: trashed media — images AND videos (restore clears
+    // the IS_TRASHED flag). Original folder names are preserved so binned items
+    // can be browsed by folder: binFolder == null shows the folder list, any
+    // other value shows one folder's items; binViewerIndex (-1 = closed) opens
+    // the full-screen viewer.
+    var trashedMedia by remember { mutableStateOf<List<TrashedMedia>>(emptyList()) }
+    var binFolder by remember { mutableStateOf<String?>(null) }
+    var binViewerIndex by remember { mutableIntStateOf(-1) }
 
     /**
      * Remove [uris] from the gallery — RECYCLE BIN FIRST on API 30+ (the system
@@ -541,14 +569,18 @@ fun AlbumScreen(
     val performDelete: () -> Unit = {
         val uris = selectedImageUris.toList()
         if (selectedBrowseMode == BrowseMode.RECYCLE_BIN) {
-            // Inside the bin, Delete means permanent removal.
+            // Inside the bin, Delete means permanent removal — via the trash
+            // volume URI (a plain external-volume delete silently no-ops for
+            // trashed rows on Android 11+).
             scope.launch {
-                val n = FileOperationHelper.deleteMediaDirect(context, uris)
+                val n = FileOperationHelper.deletePermanentlyFromTrash(context, uris)
                 viewModel.deleteImages(uris)
-                trashedImages = withContext(Dispatchers.IO) {
-                    repository.getTrashedImages()
+                trashedMedia = withContext(Dispatchers.IO) {
+                    repository.getTrashedMedia()
                 }
-                snackbarHostState.showSnackbar("Deleted $n image(s) permanently")
+                binFolder = null
+                binViewerIndex = -1
+                snackbarHostState.showSnackbar("Deleted $n item(s) permanently")
                 isMultiSelectMode = false
                 selectedImageUris = emptySet()
             }
@@ -748,11 +780,14 @@ fun AlbumScreen(
         }
     }
 
-    // Load trashed images when the recycle bin is opened
+    // Load the recycle bin (images + videos) when it is opened; reset the
+    // folder drill-down and viewer whenever the browse mode changes.
     LaunchedEffect(selectedBrowseMode) {
+        binFolder = null
+        binViewerIndex = -1
         if (selectedBrowseMode == BrowseMode.RECYCLE_BIN) {
-            trashedImages = withContext(Dispatchers.IO) {
-                repository.getTrashedImages()
+            trashedMedia = withContext(Dispatchers.IO) {
+                repository.getTrashedMedia()
             }
         }
     }
@@ -911,7 +946,13 @@ fun AlbumScreen(
                 TopAppBar(
                     navigationIcon = {
                         IconButton(onClick = {
-                            scope.launch { drawerState.open() }
+                            if (selectedBrowseMode == BrowseMode.RECYCLE_BIN && binFolder != null) {
+                                // In a bin sub-folder: back returns to the bin folder list
+                                binFolder = null
+                                binViewerIndex = -1
+                            } else {
+                                scope.launch { drawerState.open() }
+                            }
                         }) {
                             Icon(Icons.Default.Menu, contentDescription = "Menu")
                         }
@@ -926,7 +967,7 @@ fun AlbumScreen(
                                 }
                             )
                             BrowseMode.TAG -> Text(selectedTagName ?: "Tags")
-                            BrowseMode.RECYCLE_BIN -> Text("Recycle Bin")
+                            BrowseMode.RECYCLE_BIN -> Text(binFolder ?: "Recycle Bin")
                         }
                     },
                     actions = {
@@ -1328,14 +1369,17 @@ fun AlbumScreen(
             },
             bottomBar = {
                 if (isMultiSelectMode) {
-                    // Images selectable in the current browse context (for Select All)
+                    // Media selectable in the current browse context (for Select All)
                     val contextImages: List<ImageItem> = when {
                         selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null -> images
                         selectedBrowseMode == BrowseMode.TAG && selectedTagName != null -> tagImages
-                        selectedBrowseMode == BrowseMode.RECYCLE_BIN -> trashedImages
                         else -> emptyList()
                     }
-                    val contextUris = contextImages.map { it.uri }
+                    val contextUris: List<String> =
+                        if (selectedBrowseMode == BrowseMode.RECYCLE_BIN)
+                            trashedMedia.map { it.uri }
+                        else
+                            contextImages.map { it.uri }
                     val allContextSelected = contextUris.isNotEmpty() && contextUris.all { it in selectedImageUris }
                     BatchMultiSelectBar(
                         selectedCount = selectedImageUris.size,
@@ -1354,13 +1398,15 @@ fun AlbumScreen(
                                 val restored = FileOperationHelper.restoreFromTrash(context, uris)
                                 if (restored > 0) {
                                     viewModel.refreshImages()
-                                    trashedImages = withContext(Dispatchers.IO) {
-                                        repository.getTrashedImages()
+                                    trashedMedia = withContext(Dispatchers.IO) {
+                                        repository.getTrashedMedia()
                                     }
-                                    snackbarHostState.showSnackbar("Restored $restored image(s)")
+                                    snackbarHostState.showSnackbar("Restored $restored item(s)")
                                 } else {
-                                    snackbarHostState.showSnackbar("Could not restore the selected images")
+                                    snackbarHostState.showSnackbar("Could not restore the selected items")
                                 }
+                                binFolder = null
+                                binViewerIndex = -1
                                 isMultiSelectMode = false
                                 selectedImageUris = emptySet()
                             }
@@ -1931,18 +1977,30 @@ fun AlbumScreen(
                     }
 
                     BrowseMode.RECYCLE_BIN -> {
-                        if (trashedImages.isEmpty()) {
+                        // The recycle bin keeps the original folder structure:
+                        // binFolder == null shows the folder list, any other
+                        // value shows that folder's trashed items. Items open a
+                        // full-screen viewer (swipe left/right to page, swipe up
+                        // for restore/delete actions, swipe down to close).
+                        if (trashedMedia.isEmpty()) {
                             Box(
-                                modifier = Modifier.fillMaxSize(),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.White),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "Recycle bin is empty",
+                                    text = "Trash is empty",
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                        } else {
+                        } else if (binFolder == null) {
+                            val binFolders = remember(trashedMedia) {
+                                trashedMedia.groupBy { it.folderName.ifBlank { "Unknown" } }
+                                    .toList()
+                                    .sortedBy { it.first }
+                            }
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(3),
                                 contentPadding = PaddingValues(2.dp),
@@ -1950,10 +2008,34 @@ fun AlbumScreen(
                                 verticalArrangement = Arrangement.spacedBy(2.dp),
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .background(Color.Black)
+                                    .background(Color.White)
                             ) {
-                                items(trashedImages, key = { it.uri }) { image ->
-                                    val isBinSelected = image.uri in selectedImageUris
+                                items(binFolders, key = { it.first }) { (folder, folderItems) ->
+                                    BinFolderCell(
+                                        folderName = folder,
+                                        preview = folderItems.firstOrNull(),
+                                        count = folderItems.size,
+                                        onTap = { binFolder = folder }
+                                    )
+                                }
+                            }
+                        } else {
+                            val binFolderItems = remember(trashedMedia, binFolder) {
+                                trashedMedia.filter {
+                                    it.folderName.ifBlank { "Unknown" } == binFolder
+                                }
+                            }
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(3),
+                                contentPadding = PaddingValues(2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.White)
+                            ) {
+                                items(binFolderItems, key = { it.uri }) { media ->
+                                    val isBinSelected = media.uri in selectedImageUris
                                     Box(
                                         modifier = Modifier
                                             .aspectRatio(1f)
@@ -1961,24 +2043,47 @@ fun AlbumScreen(
                                                 onClick = {
                                                     if (isMultiSelectMode) {
                                                         selectedImageUris = if (isBinSelected)
-                                                            selectedImageUris - image.uri
+                                                            selectedImageUris - media.uri
                                                         else
-                                                            selectedImageUris + image.uri
+                                                            selectedImageUris + media.uri
+                                                    } else {
+                                                        // Open the full-screen viewer at this item
+                                                        binViewerIndex = binFolderItems.indexOfFirst {
+                                                            it.uri == media.uri
+                                                        }
                                                     }
                                                 },
                                                 onLongClick = {
                                                     if (!isMultiSelectMode) {
                                                         isMultiSelectMode = true
-                                                        selectedImageUris = setOf(image.uri)
+                                                        selectedImageUris = setOf(media.uri)
                                                     }
                                                 }
                                             )
                                     ) {
-                                        ImageThumbnail(
-                                            imageUri = image.uri,
-                                            modifier = Modifier.fillMaxSize(),
-                                            backgroundColor = Color.Black
-                                        )
+                                        if (media.isVideo) {
+                                            // Videos can't be thumbnail-decoded by Coil —
+                                            // show a dark tile with a play badge instead.
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .background(Color(0xFF263238)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.PlayArrow,
+                                                    contentDescription = "Video",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(32.dp)
+                                                )
+                                            }
+                                        } else {
+                                            ImageThumbnail(
+                                                imageUri = media.uri,
+                                                modifier = Modifier.fillMaxSize(),
+                                                backgroundColor = Color.White
+                                            )
+                                        }
                                         // Selection overlay in multi-select mode
                                         if (isMultiSelectMode) {
                                             Box(
@@ -2010,77 +2115,73 @@ fun AlbumScreen(
                                                 }
                                             }
                                         }
-                                        // Restore + permanent Delete row
-                                        Row(
-                                            modifier = Modifier
-                                                .align(Alignment.BottomCenter)
-                                                .fillMaxWidth()
-                                                .background(Color(0x99000000))
-                                                .padding(vertical = 2.dp),
-                                            horizontalArrangement = Arrangement.Center
-                                        ) {
-                                            TextButton(
-                                                onClick = {
-                                                    // createRecoveryRequest is a hidden API in this
-                                                    // build, so restore = direct IS_TRASHED = 0 update.
-                                                    scope.launch {
-                                                        val restored = FileOperationHelper.restoreFromTrash(
-                                                            context, listOf(image.uri)
-                                                        )
-                                                        if (restored > 0) {
-                                                            viewModel.refreshImages()
-                                                            trashedImages = withContext(Dispatchers.IO) {
-                                                                repository.getTrashedImages()
-                                                            }
-                                                            snackbarHostState.showSnackbar(
-                                                                "Restored image from the recycle bin"
-                                                            )
-                                                        } else {
-                                                            snackbarHostState.showSnackbar(
-                                                                "Could not restore this image"
-                                                            )
-                                                        }
-                                                    }
-                                                },
-                                                contentPadding = PaddingValues(horizontal = 8.dp)
-                                            ) {
-                                                Text("Restore", color = Color.White)
-                                            }
-                                            TextButton(
-                                                onClick = {
-                                                    // Permanent delete — removes the MediaStore
-                                                    // row forever (API-agnostic direct delete).
-                                                    scope.launch {
-                                                        val n = FileOperationHelper.deleteMediaDirect(
-                                                            context, listOf(image.uri)
-                                                        )
-                                                        if (n > 0) {
-                                                            viewModel.deleteImages(listOf(image.uri))
-                                                            trashedImages = withContext(Dispatchers.IO) {
-                                                                repository.getTrashedImages()
-                                                            }
-                                                            snackbarHostState.showSnackbar(
-                                                                "Deleted permanently"
-                                                            )
-                                                        } else {
-                                                            snackbarHostState.showSnackbar(
-                                                                "Could not delete this image"
-                                                            )
-                                                        }
-                                                    }
-                                                },
-                                                contentPadding = PaddingValues(horizontal = 8.dp)
-                                            ) {
-                                                Text("Delete", color = MaterialTheme.colorScheme.error)
-                                            }
-                                        }
                                     }
                                 }
                             }
                         }
                     }
 
-
+                    // Full-screen recycle-bin viewer: swipe left/right to page
+                    // through the binned items, swipe up for restore/delete
+                    // actions, swipe down to close (like the folder-view detail
+                    // screen). Uses the same folder-filtered list as the grid.
+                    val binViewerItems =
+                        if (binFolder == null) trashedMedia
+                        else trashedMedia.filter {
+                            it.folderName.ifBlank { "Unknown" } == binFolder
+                        }
+                    val currentBinView = binViewerItems.getOrNull(binViewerIndex)
+                    if (currentBinView != null) {
+                        RecycleBinViewer(
+                            item = currentBinView,
+                            positionText = "${binViewerIndex + 1}/${binViewerItems.size}",
+                            onPrev = { if (binViewerIndex > 0) binViewerIndex = binViewerIndex - 1 },
+                            onNext = {
+                                if (binViewerIndex < binViewerItems.lastIndex) {
+                                    binViewerIndex = binViewerIndex + 1
+                                }
+                            },
+                            onClose = { binViewerIndex = -1 },
+                            onRestore = { media ->
+                                scope.launch {
+                                    val restored = FileOperationHelper.restoreFromTrash(
+                                        context, listOf(media.uri)
+                                    )
+                                    if (restored > 0) {
+                                        viewModel.refreshImages()
+                                        trashedMedia = withContext(Dispatchers.IO) {
+                                            repository.getTrashedMedia()
+                                        }
+                                        snackbarHostState.showSnackbar("Restored to the gallery")
+                                    } else {
+                                        snackbarHostState.showSnackbar(
+                                            "Could not restore this item"
+                                        )
+                                    }
+                                    binViewerIndex = -1
+                                }
+                            },
+                            onDeletePermanent = { media ->
+                                scope.launch {
+                                    val n = FileOperationHelper.deletePermanentlyFromTrash(
+                                        context, listOf(media.uri)
+                                    )
+                                    if (n > 0) {
+                                        viewModel.deleteImages(listOf(media.uri))
+                                        trashedMedia = withContext(Dispatchers.IO) {
+                                            repository.getTrashedMedia()
+                                        }
+                                        snackbarHostState.showSnackbar("Deleted permanently")
+                                    } else {
+                                        snackbarHostState.showSnackbar(
+                                            "Could not delete this item"
+                                        )
+                                    }
+                                    binViewerIndex = -1
+                                }
+                            }
+                        )
+                    }
                 }
             }
 
@@ -3473,4 +3574,336 @@ internal suspend fun resizeSingleImageToWidth(
             false
         }
     }
+}
+
+/** One folder tile in the recycle bin's folder list (keeps the original gallery structure). */
+@Composable
+private fun BinFolderCell(
+    folderName: String,
+    preview: TrashedMedia?,
+    count: Int,
+    onTap: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .aspectRatio(1f)
+            .clickable(onClick = onTap)
+            .background(Color.White)
+    ) {
+        if (preview != null) {
+            if (preview.isVideo) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF263238)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = "Video",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+            } else {
+                ImageThumbnail(
+                    imageUri = preview.uri,
+                    modifier = Modifier.fillMaxSize(),
+                    backgroundColor = Color.White
+                )
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF37474F)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.Image,
+                    contentDescription = null,
+                    tint = Color(0xFFFFD740),
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        }
+        // Folder name badge
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .background(Color(0xCC000000), RoundedCornerShape(2.dp))
+                .padding(horizontal = 3.dp, vertical = 1.dp)
+        ) {
+            Text(
+                text = folderName,
+                color = Color.White,
+                fontSize = MaterialTheme.typography.labelSmall.fontSize,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        // Count badge
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .background(Color(0xCC000000), RoundedCornerShape(2.dp))
+                .padding(horizontal = 4.dp, vertical = 1.dp)
+        ) {
+            Text(
+                text = count.toString(),
+                color = Color.White,
+                fontSize = MaterialTheme.typography.labelSmall.fontSize
+            )
+        }
+    }
+}
+
+/**
+ * Full-screen recycle-bin viewer — the same gesture model as the folder-view
+ * detail screen: pinch/zoom + drag-pan, and at normal zoom — swipe down to
+ * close, swipe up to reveal Restore / Delete permanently, swipe left/right to
+ * page through the binned items. Videos play inline via [VideoPlayer].
+ */
+@Composable
+private fun RecycleBinViewer(
+    item: TrashedMedia,
+    positionText: String,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onClose: () -> Unit,
+    onRestore: (TrashedMedia) -> Unit,
+    onDeletePermanent: (TrashedMedia) -> Unit
+) {
+    val context = LocalContext.current
+    val swipeThreshold = with(LocalDensity.current) { 60.dp.toPx() }
+    var scale by remember(item.uri) { mutableFloatStateOf(1f) }
+    var offset by remember(item.uri) { mutableStateOf(Offset.Zero) }
+    var viewSize by remember { mutableStateOf(Size.Zero) }
+    var showActions by remember(item.uri) { mutableStateOf(false) }
+    var showVideo by remember(item.uri) { mutableStateOf(false) }
+
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .systemBarsPadding()
+            ) {
+                // Top bar — back, title, position
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onClose) {
+                        Icon(
+                            Icons.Default.ArrowBack,
+                            contentDescription = "Back",
+                            tint = Color.White
+                        )
+                    }
+                    Text(
+                        text = item.displayName,
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = positionText,
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(end = 16.dp)
+                    )
+                }
+
+                // Media area: pinch zoom / drag pan while zoomed; at normal zoom
+                // a single-finger swipe pages / reveals the action panel.
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .clipToBounds()
+                        .onSizeChanged {
+                            viewSize = Size(it.width.toFloat(), it.height.toFloat())
+                        }
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = offset.x
+                            translationY = offset.y
+                        }
+                        .pointerInput(item.uri) {
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                                var transformMode = scale > 1f
+                                var verticalAccum = 0f
+                                var horizontalAccum = 0f
+                                do {
+                                    val event = awaitPointerEvent()
+                                    val pressedCount = event.changes.count { it.pressed }
+                                    if (pressedCount >= 2) transformMode = true
+                                    if (transformMode) {
+                                        if (pressedCount >= 2) {
+                                            val zoomChange = event.calculateZoom()
+                                            val panChange = event.calculatePan()
+                                            val newScale = (scale * zoomChange).coerceIn(1f, 5f)
+                                            scale = newScale
+                                            offset = if (newScale > 1f)
+                                                clampBinViewerOffset(
+                                                    offset + panChange * newScale,
+                                                    newScale,
+                                                    viewSize
+                                                )
+                                            else
+                                                Offset.Zero
+                                        } else if (pressedCount == 1) {
+                                            val single = event.changes.first { it.pressed }
+                                            offset = clampBinViewerOffset(
+                                                offset + single.positionChange() * scale,
+                                                scale,
+                                                viewSize
+                                            )
+                                        }
+                                        event.changes.forEach {
+                                            if (it.positionChanged()) it.consume()
+                                        }
+                                    } else {
+                                        val single = event.changes.firstOrNull { it.pressed }
+                                            ?: continue
+                                        if (single.positionChanged()) {
+                                            verticalAccum += single.positionChange().y
+                                            horizontalAccum += single.positionChange().x
+                                            single.consume()
+                                        }
+                                    }
+                                } while (event.changes.any { it.pressed })
+                                // Gesture ended at scale 1 — decide swipe action
+                                if (!transformMode) {
+                                    if (verticalAccum > swipeThreshold) {
+                                        onClose()
+                                    } else if (verticalAccum < -swipeThreshold) {
+                                        showActions = true
+                                    } else if (horizontalAccum < -swipeThreshold) {
+                                        onNext()
+                                    } else if (horizontalAccum > swipeThreshold) {
+                                        onPrev()
+                                    }
+                                }
+                            }
+                        }
+                        .pointerInput(item.uri) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    if (scale > 1f) {
+                                        scale = 1f
+                                        offset = Offset.Zero
+                                    } else {
+                                        scale = 3f
+                                        offset = Offset.Zero
+                                    }
+                                }
+                            )
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (item.isVideo) {
+                        if (!showVideo) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clickable { showVideo = true },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Default.PlayArrow,
+                                    contentDescription = "Play video",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(72.dp)
+                                )
+                            }
+                        } else {
+                            VideoPlayer(data = item.uri, showCloseButton = false)
+                        }
+                    } else {
+                        SubcomposeAsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(item.uri)
+                                .size(1600)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = item.displayName,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
+                    if (!showActions) {
+                        Text(
+                            text = "Swipe up for actions",
+                            color = Color.White.copy(alpha = 0.75f),
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 8.dp)
+                        )
+                    }
+                }
+
+                // Swipe-up actions panel
+                if (showActions) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xE6202020))
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { onRestore(item) }) {
+                                Text("Restore", color = Color.White)
+                            }
+                            TextButton(onClick = { onDeletePermanent(item) }) {
+                                Text(
+                                    "Delete permanently",
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { showActions = false }) {
+                                Text("Hide", color = Color.White.copy(alpha = 0.7f))
+                            }
+                        }
+                        if (item.isVideo) {
+                            Text(
+                                text = "Video file",
+                                color = Color.White.copy(alpha = 0.8f),
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Clamp a bin-viewer pan offset so the zoomed media stays within the viewport. */
+private fun clampBinViewerOffset(candidate: Offset, s: Float, viewSize: Size): Offset {
+    if (s <= 1f) return Offset.Zero
+    val viewW = viewSize.width
+    val viewH = viewSize.height
+    if (viewW <= 0f || viewH <= 0f) return candidate
+    val maxX = ((s - 1f) * viewW / 2f).coerceAtLeast(0f)
+    val maxY = ((s - 1f) * viewH / 2f).coerceAtLeast(0f)
+    return Offset(
+        candidate.x.coerceIn(-maxX, maxX),
+        candidate.y.coerceIn(-maxY, maxY)
+    )
 }
