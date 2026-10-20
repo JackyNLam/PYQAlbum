@@ -68,6 +68,50 @@ object FileOperationHelper {
         }
     }
 
+    /**
+     * Resolve the current on-device path of a MediaStore row (image OR video)
+     * from its content:// URI: RELATIVE_PATH + DISPLAY_NAME on Android 10+
+     * (scoped-storage safe, no DATA permission needed), falling back to the
+     * DATA column on older APIs. Returns null when the row cannot be read.
+     * Trashed rows are still queryable this way, so the recycle bin can show
+     * where a binned file lives.
+     */
+    fun resolveMediaPath(context: Context, uri: String): String? {
+        return try {
+            val contentUri = Uri.parse(uri)
+            val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                arrayOf(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    MediaStore.MediaColumns.DISPLAY_NAME
+                )
+            } else {
+                arrayOf(MediaStore.MediaColumns.DATA)
+            }
+            val cursor = context.contentResolver.query(contentUri, projection, null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val relIdx = it.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                        val nameIdx = it.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                        val rel = if (relIdx >= 0) it.getString(relIdx) else null
+                        val name = if (nameIdx >= 0) it.getString(nameIdx) else null
+                        if (rel != null && name != null) return rel + name
+                        if (rel != null) return rel
+                    }
+                    val dataIdx = it.getColumnIndex(MediaStore.MediaColumns.DATA)
+                    if (dataIdx >= 0) {
+                        val data = it.getString(dataIdx)
+                        if (data != null) return data
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveMediaPath failed for $uri: ${e.message}")
+            null
+        }
+    }
+
     /** Get the display name from a content:// URI. */
     fun getFileName(context: Context, uri: String): String {
         val contentUri = Uri.parse(uri)

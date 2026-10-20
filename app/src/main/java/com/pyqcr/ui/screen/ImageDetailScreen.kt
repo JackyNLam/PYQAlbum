@@ -1012,7 +1012,7 @@ fun ImageDetailScreen(
                             tint = if (isFavourite) Color(0xFFE91E63) else LocalContentColor.current
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text(if (isFavourite) "Favourite ✓ (visible in other apps)" else "Mark as Favourite")
+                        Text(if (isFavourite) "Favourite ✓" else "Mark as Favourite")
                     }
 
                     Spacer(Modifier.height(16.dp))

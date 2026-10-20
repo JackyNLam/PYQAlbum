@@ -3859,6 +3859,14 @@ private fun RecycleBinViewer(
     var viewSize by remember { mutableStateOf(Size.Zero) }
     var showActions by remember(item.uri) { mutableStateOf(false) }
     var showVideo by remember(item.uri) { mutableStateOf(false) }
+    // Current on-device path of the binned row (RELATIVE_PATH + name on
+    // Android 10+, DATA fallback elsewhere) — shown in the swipe-up panel.
+    var currentPath by remember(item.uri) { mutableStateOf<String?>(null) }
+    LaunchedEffect(item.uri) {
+        currentPath = withContext(Dispatchers.IO) {
+            FileOperationHelper.resolveMediaPath(context, item.uri)
+        }
+    }
 
     Dialog(
         onDismissRequest = onClose,
@@ -4043,6 +4051,16 @@ private fun RecycleBinViewer(
                             .background(Color(0xE6202020))
                             .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
+                        if (!currentPath.isNullOrBlank()) {
+                            Text(
+                                text = currentPath!!,
+                                color = Color.White.copy(alpha = 0.75f),
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             TextButton(onClick = { onRestore(item) }) {
                                 Text("Restore", color = Color.White)
