@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Label
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -42,16 +43,34 @@ fun ImageThumbnail(
             .aspectRatio(1f)          // Force square
             .background(backgroundColor)
     ) {
-        SubcomposeAsyncImage(
-            model = ImageRequest.Builder(context)
-                .data(imageUri)
-                .size(400)             // Limit decode size
-                .crossfade(true)
-                .build(),
-            contentDescription = null,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = contentScale
-        )
+        if (imageUri.contains("/video/")) {
+            // Videos can't be thumbnail-decoded by Coil — render a dark tile
+            // with a play badge, exactly like the recycle-bin grid tile.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF263238)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.PlayArrow,
+                    contentDescription = "Video",
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+        } else {
+            SubcomposeAsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(imageUri)
+                    .size(400)             // Limit decode size
+                    .crossfade(true)
+                    .build(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = contentScale
+            )
+        }
 
         // Rating badge
         if (rating > 0f) {

@@ -675,14 +675,24 @@ object FileOperationHelper {
                     if (!deleted) {
                         // Last resort: recover the row (IS_TRASHED = 0) then
                         // delete it as a normal item — works around ROMs that
-                        // reject trash-volume deletes entirely.
+                        // reject trash-volume deletes entirely. If the untrash
+                        // succeeds but the delete is refused, put the row BACK
+                        // in the trash — a silently restored row would leave a
+                        // bin entry that every later delete (including the
+                        // system dialog) no-ops against.
                         try {
                             val values = ContentValues().apply {
                                 put(MediaStore.MediaColumns.IS_TRASHED, 0)
                             }
-                            context.contentResolver.update(parsed, values, null, null)
-                            if (context.contentResolver.delete(parsed, null, null) > 0) {
-                                deleted = true
+                            if (context.contentResolver.update(parsed, values, null, null) > 0) {
+                                if (context.contentResolver.delete(parsed, null, null) > 0) {
+                                    deleted = true
+                                } else {
+                                    val reTrash = ContentValues().apply {
+                                        put(MediaStore.MediaColumns.IS_TRASHED, 1)
+                                    }
+                                    context.contentResolver.update(parsed, reTrash, null, null)
+                                }
                             }
                         } catch (e: Exception) {
                         }

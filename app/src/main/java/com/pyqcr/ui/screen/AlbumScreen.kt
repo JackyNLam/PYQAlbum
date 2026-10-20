@@ -137,7 +137,13 @@ fun AlbumScreen(
     val images by viewModel.images.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val folderInfos by viewModel.folderInfos.collectAsState()
+    val folderVideos by viewModel.folderVideos.collectAsState()
+    val videoFolderInfos by viewModel.videoFolderInfos.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+
+    // FOLDER browse shows videos right beside images ("just like image") —
+    // the grid/select-all operate on the combined list.
+    val folderItems = remember(images, folderVideos) { images + folderVideos }
 
     // Drawer state
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -540,13 +546,36 @@ fun AlbumScreen(
         pendingBinDeleteUris = emptyList()
         if (result.resultCode == android.app.Activity.RESULT_OK && pending.isNotEmpty()) {
             scope.launch {
-                viewModel.deleteImages(pending)
+                // The system dialog performs the permanent delete on approval,
+                // but some ROMs still skip rows (or apply on RESULT_CANCELED).
+                // Re-check the live trash and retry the direct delete once, so
+                // the reported count is honest instead of claiming success for
+                // rows that survived the dialog.
+                var remaining = withContext(Dispatchers.IO) {
+                    repository.currentTrashedUris(pending)
+                }
+                if (remaining.isNotEmpty()) {
+                    val retried = withContext(Dispatchers.IO) {
+                        FileOperationHelper.deletePermanentlyFromTrash(context, remaining)
+                    }
+                    remaining = withContext(Dispatchers.IO) {
+                        repository.currentTrashedUris(retried)
+                    }
+                }
+                val removed = pending.size - remaining.size
+                viewModel.deleteImages(if (remaining.isEmpty()) pending else pending - remaining.toSet())
                 trashedMedia = withContext(Dispatchers.IO) {
                     repository.getTrashedMedia()
                 }
                 binFolder = null
                 binViewerIndex = -1
-                snackbarHostState.showSnackbar("Deleted ${pending.size} item(s) permanently")
+                snackbarHostState.showSnackbar(
+                    if (remaining.isEmpty()) {
+                        "Deleted ${pending.size} item(s) permanently"
+                    } else {
+                        "Deleted $removed of ${pending.size}; ${remaining.size} could not be removed"
+                    }
+                )
                 isMultiSelectMode = false
                 selectedImageUris = emptySet()
             }
@@ -600,7 +629,6 @@ fun AlbumScreen(
             // through the system delete-request dialog instead.
             scope.launch {
                 val failed = FileOperationHelper.deletePermanentlyFromTrash(context, uris)
-                val failedCount = failed.size
                 if (failed.isEmpty()) {
                     viewModel.deleteImages(uris)
                     trashedMedia = withContext(Dispatchers.IO) {
@@ -612,20 +640,29 @@ fun AlbumScreen(
                     isMultiSelectMode = false
                     selectedImageUris = emptySet()
                 } else {
+                    // Rows whose ids are no longer trashed at all were already
+                    // removed elsewhere (the "broken link" case) — count them as
+                    // deleted now and only hand LIVE rows to the system dialog.
+                    val liveFailed = withContext(Dispatchers.IO) {
+                        repository.currentTrashedUris(failed)
+                    }
+                    val failedCount = liveFailed.size
                     val deletedCount = uris.size - failedCount
                     if (deletedCount > 0) {
-                        viewModel.deleteImages(uris - failed.toSet())
+                        viewModel.deleteImages(uris - liveFailed.toSet())
                         trashedMedia = withContext(Dispatchers.IO) {
                             repository.getTrashedMedia()
                         }
                         isMultiSelectMode = false
                         selectedImageUris = emptySet()
                     }
-                    val sender = FileOperationHelper.createBinPermanentDeleteRequest(
-                        context, failed
-                    )
+                    val sender = if (liveFailed.isNotEmpty()) {
+                        FileOperationHelper.createBinPermanentDeleteRequest(context, liveFailed)
+                    } else {
+                        null
+                    }
                     if (sender != null) {
-                        pendingBinDeleteUris = failed
+                        pendingBinDeleteUris = liveFailed
                         snackbarHostState.showSnackbar(
                             if (deletedCount > 0) {
                                 "Deleted $deletedCount item(s), $failedCount need confirmation"
@@ -634,6 +671,13 @@ fun AlbumScreen(
                             }
                         )
                         binDeleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                    } else if (liveFailed.isEmpty()) {
+                        // Everything was already gone — nothing left to delete.
+                        binFolder = null
+                        binViewerIndex = -1
+                        snackbarHostState.showSnackbar("Deleted ${uris.size} item(s) permanently")
+                        isMultiSelectMode = false
+                        selectedImageUris = emptySet()
                     } else {
                         snackbarHostState.showSnackbar("Could not delete $failedCount item(s)")
                     }
@@ -851,6 +895,7 @@ fun AlbumScreen(
     LaunchedEffect(Unit) {
         folderSortMode = viewModel.getPersistedFolderSortMode()
         groupByMode = viewModel.getPersistedGroupByMode()
+        viewModel.loadVideoFolderInfos()
     }
 
     // Re-sort folder images when folderSortMode changes; the "All Folders"
@@ -861,6 +906,14 @@ fun AlbumScreen(
             selectedFolder != null -> viewModel.loadImagesByFolderSorted(
                 folderName = selectedFolder!!,
                 mode = folderSortMode
+            )
+        }
+        // Videos mirror the same scope: every folder for the sentinel, one
+        // folder's videos otherwise (skipped while the step-1 folder list is
+        // showing).
+        if (selectedFolder != null) {
+            viewModel.loadFolderVideos(
+                if (selectedFolder == ALL_FOLDERS_SENTINEL) null else selectedFolder
             )
         }
         viewModel.persistFolderSortMode(folderSortMode)
@@ -1426,7 +1479,9 @@ fun AlbumScreen(
                 if (isMultiSelectMode) {
                     // Media selectable in the current browse context (for Select All)
                     val contextImages: List<ImageItem> = when {
-                        selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null -> images
+                        // FOLDER browse: images AND videos (multi-select, Select
+                        // All and batch actions cover both).
+                        selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null -> folderItems
                         selectedBrowseMode == BrowseMode.TAG && selectedTagName != null -> tagImages
                         else -> emptyList()
                     }
@@ -1660,7 +1715,25 @@ fun AlbumScreen(
                 when (selectedBrowseMode) {
                     BrowseMode.FOLDER -> {
                         if (selectedFolder == null) {
-                            // Step 1: Show only folder list — no images
+                            // Step 1: Show only the folder list — image folders
+                            // merged with video folders so video-only folders
+                            // appear too (counts combine both).
+                            val displayFolders = remember(folderInfos, videoFolderInfos) {
+                                val byName = LinkedHashMap<String, FolderInfo>()
+                                folderInfos.forEach { byName[it.folderName] = it }
+                                videoFolderInfos.forEach { vf ->
+                                    val existing = byName[vf.folderName]
+                                    byName[vf.folderName] = if (existing != null) {
+                                        existing.copy(
+                                            imageCount = existing.imageCount + vf.imageCount,
+                                            lastModified = maxOf(existing.lastModified, vf.lastModified)
+                                        )
+                                    } else {
+                                        vf
+                                    }
+                                }
+                                byName.values.toList()
+                            }
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(2),
                                 contentPadding = PaddingValues(16.dp),
@@ -1698,7 +1771,7 @@ fun AlbumScreen(
                                             )
                                             Spacer(Modifier.height(4.dp))
                                             Text(
-                                                text = "${folderInfos.sumOf { it.imageCount }} images",
+                                                text = "${displayFolders.sumOf { it.imageCount }} items",
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 textAlign = TextAlign.Center
@@ -1706,7 +1779,7 @@ fun AlbumScreen(
                                         }
                                     }
                                 }
-                                items(folderInfos) { folderInfo ->
+                                items(displayFolders) { folderInfo ->
                                     ElevatedCard(
                                         onClick = {
                                             selectedFolder = folderInfo.folderName
@@ -1735,7 +1808,7 @@ fun AlbumScreen(
                                             )
                                             Spacer(Modifier.height(4.dp))
                                             Text(
-                                                text = "${folderInfo.imageCount} images",
+                                                text = "${folderInfo.imageCount} items",
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 textAlign = TextAlign.Center
@@ -1745,7 +1818,8 @@ fun AlbumScreen(
                                 }
                             }
                         } else {
-                            // Step 2: Show images for selected folder with back button
+                            // Step 2: Show images + videos for selected folder
+                            // with back button
                             Column(modifier = Modifier.fillMaxSize()) {
                                 // Back button row
                                 TextButton(
@@ -1771,20 +1845,20 @@ fun AlbumScreen(
                                     ) {
                                         CircularProgressIndicator()
                                     }
-                                } else if (images.isEmpty()) {
+                                } else if (folderItems.isEmpty()) {
                                     Box(
                                         modifier = Modifier.fillMaxSize(),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = "No images in this folder",
+                                            text = "No images or videos in this folder",
                                             style = MaterialTheme.typography.bodyLarge,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
                                 } else {
                                     ImageGridView(
-                                        images = images,
+                                        images = folderItems,
                                         viewLayout = selectedViewLayout,
                                         isMultiSelectMode = isMultiSelectMode,
                                         selectedImageUris = selectedImageUris,
@@ -1817,7 +1891,7 @@ fun AlbumScreen(
                                                         savedJustifiedOffset = justifiedState.firstVisibleItemScrollOffset
                                                     }
                                                 }
-                                                onImageClick(uri, images.map { it.uri })
+                                                onImageClick(uri, folderItems.map { it.uri })
                                             }
                                         },
                                         onMultiSelectImageToggle = { uri ->
@@ -2243,25 +2317,41 @@ fun AlbumScreen(
                                             }
                                             snackbarHostState.showSnackbar("Deleted permanently")
                                         } else {
-                                            // Direct trash-volume delete failed
-                                            // (row not owned, no All-files
-                                            // access) — let the system dialog
-                                            // perform the permanent delete.
-                                            val sender = FileOperationHelper.createBinPermanentDeleteRequest(
-                                                context, failed
-                                            )
-                                            if (sender != null) {
-                                                pendingBinDeleteUris = failed
-                                                snackbarHostState.showSnackbar(
-                                                    "Confirm with the system to delete this item"
-                                                )
-                                                binDeleteLauncher.launch(
-                                                    IntentSenderRequest.Builder(sender).build()
-                                                )
+                                            // Only hand LIVE rows to the system
+                                            // dialog — a row that is no longer
+                                            // trashed at all was already removed
+                                            // elsewhere (the "broken link" case)
+                                            // and counts as deleted now.
+                                            val liveFailed = withContext(Dispatchers.IO) {
+                                                repository.currentTrashedUris(failed)
+                                            }
+                                            if (liveFailed.isEmpty()) {
+                                                viewModel.deleteImages(listOf(media.uri))
+                                                trashedMedia = withContext(Dispatchers.IO) {
+                                                    repository.getTrashedMedia()
+                                                }
+                                                snackbarHostState.showSnackbar("Deleted permanently")
                                             } else {
-                                                snackbarHostState.showSnackbar(
-                                                    "Could not delete this item"
+                                                // Direct trash-volume delete failed
+                                                // (row not owned, no All-files
+                                                // access) — let the system dialog
+                                                // perform the permanent delete.
+                                                val sender = FileOperationHelper.createBinPermanentDeleteRequest(
+                                                    context, liveFailed
                                                 )
+                                                if (sender != null) {
+                                                    pendingBinDeleteUris = liveFailed
+                                                    snackbarHostState.showSnackbar(
+                                                        "Confirm with the system to delete this item"
+                                                    )
+                                                    binDeleteLauncher.launch(
+                                                        IntentSenderRequest.Builder(sender).build()
+                                                    )
+                                                } else {
+                                                    snackbarHostState.showSnackbar(
+                                                        "Could not delete this item"
+                                                    )
+                                                }
                                             }
                                         }
                                         binViewerIndex = -1

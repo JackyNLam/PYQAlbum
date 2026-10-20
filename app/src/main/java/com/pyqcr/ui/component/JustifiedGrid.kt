@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Label
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.Icon
 
@@ -106,17 +107,35 @@ fun JustifiedGrid(
                                 )
                             )
                     ) {
-                        SubcomposeAsyncImage(
-                            model = ImageRequest.Builder(context)
-                                .data(image.uri)
-                                .size(coil3.size.Size(400, (rowHeight.value * 3).toInt()))
-                                .crossfade(true)
-                                .scale(Scale.FILL)
-                                .build(),
-                            contentDescription = image.displayName,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
+                        if (image.uri.contains("/video/")) {
+                            // Videos can't be decoded by Coil — dark tile with
+                            // a play badge, same as the GRID/Waterfall layouts.
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color(0xFF263238)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Default.PlayArrow,
+                                    contentDescription = "Video",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+                        } else {
+                            SubcomposeAsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(image.uri)
+                                    .size(coil3.size.Size(400, (rowHeight.value * 3).toInt()))
+                                    .crossfade(true)
+                                    .scale(Scale.FILL)
+                                    .build(),
+                                contentDescription = image.displayName,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
                         // Rating badge
                         if (image.rating > 0f) {
                             Box(

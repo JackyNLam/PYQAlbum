@@ -34,7 +34,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   8. No image-count limit — selections of any size are rated (URI list is passed to the background worker via a cache file, sidestepping WorkManager's 10 KiB input-data cap)
   9. Selection persists across app launches (SharedPreferences)
 - **Multi-select mode**: long-press enters multi-select; the bottom bar's ⋮ menu has **Select All / Deselect All** (applies to the current folder, tag, or recycle-bin view), **Collage**, batch Tag / Rate / **Favourite** / Remove Tags / **AI Rating** (if the selected images already have an AI score, asks whether to toggle the AI Rating queue or remove the stored AI info; otherwise it toggles the queue directly), **Copy to…** and **Move to…** (in-app folder browser), **Move to Vault**, and **Delete** — Delete **moves the images to the system recycle bin first** (Android 11+ trash, restorable) instead of deleting permanently
-- **Recycle Bin** (left drawer): white-background **folder-list view that preserves the original folder structure** — items stay grouped by their gallery folder (tap a folder to see its items); the per-folder grid supports **long-press batch select** with ⋮ **Restore** (clears the MediaStore trash flag) and **Delete permanently**. The bin queries carry the **row's real volume** (`volume_name`), so items on secondary storage (SD cards) build correct volume-qualified URIs that restore/delete actually work on. Permanent delete tries several addresses per row (the trash-volume URI, both image/video trash collections, the row's own URI, and finally recover-then-delete), and any row the direct delete cannot remove (not owned by this app, without All-files access) is handed to the **system "delete permanently" dialog** (`MediaStore.createDeleteRequest` on the trash URIs). Tapping an item opens a **full-screen viewer** with pinch/double-tap zoom + drag-pan and, at normal zoom, swipe **up** for Restore/Delete-permanently actions, **down** to close, **left/right** to page through the folder's items. **Images AND videos** land here (videos get a ▶ tile and play inline)
+- **Recycle Bin** (left drawer): white-background **folder-list view that preserves the original folder structure** — items stay grouped by their gallery folder (tap a folder to see its items); the per-folder grid supports **long-press batch select** with ⋮ **Restore** (clears the MediaStore trash flag) and **Delete permanently**. The bin queries carry the **row's real volume** (`volume_name`), so items on secondary storage (SD cards) build correct volume-qualified URIs that restore/delete actually work on. Permanent delete tries several addresses per row (the trash-volume URI, both image/video trash collections, the row's own URI, and finally recover-then-delete — if the untrash succeeds but the delete is refused the row is **put back in the trash** instead of silently slipping into the gallery), and **before the system "delete permanently" dialog the bin re-reads the live trash**: rows that no longer exist (stale/broken links) are counted as already-removed and only currently-trashed rows reach `MediaStore.createDeleteRequest`, with the outcome **re-verified after the dialog** so the reported numbers are honest. Tapping an item opens a **full-screen viewer** with pinch/double-tap zoom + drag-pan and, at normal zoom, swipe **up** for Restore/Delete-permanently actions, **down** to close, **left/right** to page through the folder's items. **Images AND videos** land here (videos get a ▶ tile and play inline)
 - **Remove Tags** (multi-select ⋮) lists **only the tags actually present on the selected images** — tags that none of the selected images carry are not offered
 - **Collage**: select ≥2 images → ⋮ → **Collage** — opens an options dialog first: **background color** for empty space (White / Black / Gray / Beige / Light Blue / Pink), **number of columns** (2–5), and **image order** (▲▼ reorder; images flow left-to-right, top-to-bottom). Images are scaled to fit uniform cells on the chosen background and saved to `Pictures/PYQAlbum/collage_<timestamp>.jpg`; all inputs plus the output are auto-tagged with a unique **`Collage <timestamp>`** tag so the set is easy to find and re-edit under the Tag view
 - **Copy**: files are written via ContentResolver stream to the chosen folder (works on all Android versions)
@@ -93,10 +93,10 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 | Route | Screen | Purpose |
 |-------|--------|---------|
-| `album` | `AlbumScreen` | Main album browser: folder grid → image grid with 3 view layouts, left drawer menu |
+| `album` | `AlbumScreen` | Main album browser: folder grid → media grid (images AND videos, 3 view layouts), left drawer menu |
 | `tag` | `TagScreen` | Tag list → images per tag *(can be discovered via drawer, or navigated separately)* |
 | `rating` | `RatingScreen` | Sort/filter by user rating or AI score *(still accessible via nav route)* |
-| `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, swipe down to go back, swipe up for controls; zoom/pan, GIF & motion-photo playback, file size, AI Rating/AI Edit toggles + Favourite |
+| `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, swipe down to go back, swipe up for controls; zoom/pan, GIF & motion-photo playback, **video playback** (folder-browse videos play here like images), file size, AI Rating/AI Edit toggles + Favourite |
 | `ai_edit` | `AiEditScreen` | **AI Image Editing**: qwen-image-2.0 — first image(s) + area/brush selection + optional second/third reference images + prompt (10 saved slots) |
 | `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope; the detail-screen AI Rating toggle feeds the shared selection queue |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
@@ -110,7 +110,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | Action | Result |
 |--------|--------|
 | **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Edit / AI Rating / Photo Vault / Recycle Bin |
-| **Tap folder card** (Folder mode) | Enter folder to see images in selected layout (folder cards show image count, sortable by modified date / count / name); the **All Folders** card at the top shows images from every folder at once |
+| **Tap folder card** (Folder mode) | Enter folder to see its media in the selected layout (folder cards show item count = images + videos, sortable by modified date / count / name); the **All Folders** card at the top shows every folder's items (images + videos) at once |
 | **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Rating (toggle) |
 | **Favourite** (♥) | Marks images in **MediaStore `IS_FAVORITE`** (Android 11+ column). The **direct verified write** is the PRIMARY method — silent, in-app marking; the flag does **not** need to be visible in other apps. Only when the provider rejects the direct write (a row another app owns, without All-files access) does the app fall back to the platform dialog: the system **createFavoriteRequest** confirmation dialog on Android 13+, or a **write-access** request (`MediaStore.createWriteRequest`) on Android 11/12 followed by the direct write. Note: WeChat favourites (收藏) are WeChat-internal and Google Photos favourites are cloud-based — neither can be set from another app, and some OEM galleries (Xiaomi/Oppo) keep their own favourites DB instead of `IS_FAVORITE`. Batch menu **Favourite**, and a **Mark as Favourite** button in the detail panel; ♥ badge on favourited thumbnails |
@@ -134,9 +134,9 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ### Browse Modes (via Left Drawer)
 
 #### Folder mode (default — no drawer tab selected)
-- **Step 1**: Shows a 2-column folder grid with folder icons, image count per folder
-- **Step 1 sort** (↕ button in toolbar): **↓Modified date** (default, newest first) / **↑Modified date** (oldest first) / **↓Count** (most images first) / **↑Count** (fewest first) / **↑Name** (alphabetical) / **↓Name** (reverse alphabetical)
-- **Step 2**: Tap a folder → images displayed in the selected layout (Grid/Waterfall/Justified)
+- **Step 1**: Shows a 2-column folder grid with folder icons, item count per folder (images + videos)
+- **Step 1 sort** (↕ button in toolbar): **↓Modified date** (default, newest first) / **↑Modified date** (oldest first) / **↓Count** (most items first) / **↑Count** (fewest first) / **↑Name** (alphabetical) / **↓Name** (reverse alphabetical)
+- **Step 2**: Tap a folder → images AND videos displayed in the selected layout (Grid/Waterfall/Justified); videos carry a ▶ tile
 - Layout toggle and sort button appear in toolbar when inside a folder
 - Default thumbnail sort: **↓Modified date** (newest first)
 - Sort options: **↓Modified date** (default) / **↑Modified date** / **↑Name** / **↓Name** / **Rating ↓** / **Rating ↑** / **AI Score ↓** / **AI Score ↑** — with ✓ checkmark on active option
@@ -154,15 +154,16 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 ## Details on Key Features
 
 ### Folder View
-- **Step 1**: 2-column grid of `ElevatedCard`s with folder icons, **image count** shown below folder name
+- **Step 1**: 2-column grid of `ElevatedCard`s with folder icons, **item count** shown below folder name — counts combine images **and videos**, and folders that hold **only videos** appear here too
 - **Folder list sort** (↕ button in toolbar when on folder grid):
-  - **↓Modified date** (default) — newest folder first (by latest image date)
+  - **↓Modified date** (default) — newest folder first (by latest item date)
   - **↑Modified date** — oldest folder first
-  - **↓Count** — folders with most images first
-  - **↑Count** — folders with fewest images first
+  - **↓Count** — folders with most items first
+  - **↑Count** — folders with fewest items first
   - **↑Name** — alphabetical order
   - **↓Name** — reverse alphabetical order
-- **Step 2**: Tap a folder → "← All Folders" back button at top, then image grid
+- **Step 2**: Tap a folder → "← All Folders" back button at top, then the media grid — **videos show up right beside images** (▶ dark tile) and **play in the full-screen viewer** exactly like images
+- The **All Folders** card at the top shows every folder's media at once (images + videos)
 - Sort images inside a folder via the Sort button (↕):
   - **↓Modified date** (default) — newest first
   - **↑Modified date** — oldest first

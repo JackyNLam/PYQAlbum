@@ -29,6 +29,15 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
     private val _folderInfos = MutableStateFlow<List<FolderInfo>>(emptyList())
     val folderInfos: StateFlow<List<FolderInfo>> = _folderInfos.asStateFlow()
 
+    // Videos shown in the FOLDER browse alongside images (see getFolderVideos).
+    private val _folderVideos = MutableStateFlow<List<ImageItem>>(emptyList())
+    val folderVideos: StateFlow<List<ImageItem>> = _folderVideos.asStateFlow()
+
+    // Folder cards for the VIDEO collection — merged with the Room image
+    // folders so folders that hold only videos still appear in the list.
+    private val _videoFolderInfos = MutableStateFlow<List<FolderInfo>>(emptyList())
+    val videoFolderInfos: StateFlow<List<FolderInfo>> = _videoFolderInfos.asStateFlow()
+
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
@@ -44,8 +53,11 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
 
     private var foldersJob: Job? = null
 
-    // Jobs to cancel previous collectors when switching modes
-    private var imagesJob: Job? = null
+    private var videosJob: Job? = null
+
+    // Last folder videos were loaded for — so a MediaStore refresh reloads the
+    // same scope (null = all folders / "All Folders").
+    private var lastVideoFolder: String? = null
 
     init {
         // Load folders with info (image count + last modified), default sort: newest first
@@ -73,6 +85,34 @@ class AlbumViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 _isLoading.value = false
             }
+            // Keep the FOLDER browse's video list and folder cards live too.
+            refreshVideos()
+        }
+    }
+
+    /** Videos for the FOLDER browse grid — one folder, or every folder when
+     *  [folderName] is null (the "All Folders" pseudo-entry). */
+    fun loadFolderVideos(folderName: String?) {
+        lastVideoFolder = folderName
+        viewModelScope.launch {
+            _folderVideos.value = repository.getFolderVideos(folderName)
+        }
+    }
+
+    /** Video folder cards (merged with the image folders in the UI). */
+    fun loadVideoFolderInfos() {
+        viewModelScope.launch {
+            _videoFolderInfos.value = repository.getVideoFolderInfos()
+        }
+    }
+
+    /** Reload the folder-scoped videos (keeps the last-loaded folder scope) and
+     *  their folder cards — called alongside [refreshImages] so folder browse
+     *  stays live after MediaStore changes (restores, deletions…). */
+    fun refreshVideos() {
+        viewModelScope.launch {
+            _videoFolderInfos.value = repository.getVideoFolderInfos()
+            _folderVideos.value = repository.getFolderVideos(lastVideoFolder)
         }
     }
 

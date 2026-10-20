@@ -53,6 +53,7 @@ import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.MotionPhotoPlayer
 import com.pyqcr.ui.component.RatingBar
 import com.pyqcr.ui.component.TagChip
+import com.pyqcr.ui.component.VideoPlayer
 import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.MotionPhotoExtractor
@@ -84,6 +85,11 @@ fun ImageDetailScreen(
 ) {
     // URL-decode the URI — Navigation Compose encodes it to avoid path-segment issues
     val imageUri = Uri.decode(imageUriRaw)
+
+    // Plain video file (content://media/.../video/...) — the folder browse now
+    // shows videos beside images, so the detail screen must PLAY them instead
+    // of trying to decode a thumbnail.
+    val isVideo = imageUri.contains("/video/")
 
     val context = LocalContext.current
     val app = context.applicationContext as PyqCrApp
@@ -478,11 +484,14 @@ fun ImageDetailScreen(
 
     // Detect and extract the embedded video of a motion photo (JPEG + appended
     // MP4). GIFs and animated WebP play directly through Coil, so no extraction.
+    // Plain video files skip this entirely — they play directly below.
     LaunchedEffect(imageUri) {
-        motionVideoPath = withContext(Dispatchers.IO) {
-            MotionPhotoExtractor.extractToCache(context, imageUri)?.absolutePath
+        if (!isVideo) {
+            motionVideoPath = withContext(Dispatchers.IO) {
+                MotionPhotoExtractor.extractToCache(context, imageUri)?.absolutePath
+            }
+            showMotionVideo = false
         }
-        showMotionVideo = false
     }
 
     LaunchedEffect(imageUri) {
@@ -645,20 +654,32 @@ fun ImageDetailScreen(
                     },
                 contentAlignment = Alignment.Center
             ) {
-                SubcomposeAsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(imageUri)
-                        .size(1600)
-                        .crossfade(true)
-                        .build(),
-                    contentDescription = imageItem?.displayName,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Fit
-                )
+                if (isVideo) {
+                    // Plain video file (mediaStore /video/ uri opened from the
+                    // folder grid): play it like the bin/vault viewers. The
+                    // outer gestures still handle swipe left/right (next/prev)
+                    // and swipe down (close) — no zoom on video.
+                    VideoPlayer(
+                        data = imageUri,
+                        onClose = onBack,
+                        showCloseButton = false
+                    )
+                } else {
+                    SubcomposeAsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(imageUri)
+                            .size(1600)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = imageItem?.displayName,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit
+                    )
+                }
 
                 // Motion photo: show a play button; tapping it plays the
                 // embedded video over the still frame.
-                if (!showMotionVideo && motionVideoPath != null) {
+                if (!isVideo && !showMotionVideo && motionVideoPath != null) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)

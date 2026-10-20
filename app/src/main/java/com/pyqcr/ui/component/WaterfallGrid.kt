@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Label
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.Icon
 
@@ -211,16 +212,35 @@ private fun WaterfallTile(image: ImageItem) {
     val context = LocalContext.current
     val ratio = if (image.height > 0) image.width.toFloat() / image.height.toFloat() else 1f
 
-    SubcomposeAsyncImage(
-        model = ImageRequest.Builder(context)
-            .data(image.uri)
-            .size(400)
-            .crossfade(true)
-            .build(),
-        contentDescription = image.displayName,
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(ratio),
-        contentScale = ContentScale.Fit
-    )
+    if (image.uri.contains("/video/")) {
+        // Videos can't be decoded by Coil — dark tile + play badge, same as
+        // the other grids (ImageThumbnail handles this for the GRID layout).
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(ratio)
+                .background(Color(0xFF263238)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Default.PlayArrow,
+                contentDescription = "Video",
+                tint = Color.White,
+                modifier = Modifier.size(36.dp)
+            )
+        }
+    } else {
+        SubcomposeAsyncImage(
+            model = ImageRequest.Builder(context)
+                .data(image.uri)
+                .size(400)
+                .crossfade(true)
+                .build(),
+            contentDescription = image.displayName,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(ratio),
+            contentScale = ContentScale.Fit
+        )
+    }
 }

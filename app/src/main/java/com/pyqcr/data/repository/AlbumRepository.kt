@@ -1,5 +1,6 @@
 package com.pyqcr.data.repository
 
+import android.content.ContentUris
 import android.content.Context
 import android.database.Cursor
 import android.net.Uri
@@ -326,6 +327,107 @@ class AlbumRepository(
             TrashedMedia(it.uri, it.displayName, it.folderName, true, it.dateAdded)
         }
         (images + videos).sortedByDescending { it.dateAdded }
+    }
+
+    /**
+     * Re-read the recycle bin NOW and return the CURRENT trashed URIs whose
+     * ids appear in [uris]. Rows that are no longer trashed (already deleted
+     * or restored elsewhere, or the id was recycled) are dropped — the caller
+     * counts those as already-removed. Used right before the system
+     * delete-permanently dialog and again after it, so stale/"broken link"
+     * URIs never reach (or silently survive) MediaStore.createDeleteRequest.
+     */
+    suspend fun currentTrashedUris(uris: List<String>): List<String> = withContext(ioDispatcher) {
+        if (uris.isEmpty() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext emptyList()
+        val wantedIds = uris.mapNotNull { raw ->
+            try {
+                ContentUris.parseId(Uri.parse(raw))
+            } catch (e: Exception) {
+                null
+            }
+        }.toSet()
+        if (wantedIds.isEmpty()) return@withContext emptyList()
+        (loadTrashedImagesFromMediaStore() + loadTrashedVideosFromMediaStore())
+            .filter { entity ->
+                try {
+                    ContentUris.parseId(Uri.parse(entity.uri)) in wantedIds
+                } catch (e: Exception) {
+                    false
+                }
+            }
+            .map { it.uri }
+    }
+
+    /**
+     * Videos currently in the gallery (not trashed), optionally restricted to
+     * one folder ([folderName] = the MediaStore BUCKET_DISPLAY_NAME, null =
+     * every folder). Used by the FOLDER browse so videos show up next to
+     * images and play like images.
+     */
+    suspend fun getFolderVideos(folderName: String?): List<ImageItem> = withContext(ioDispatcher) {
+        try {
+            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                "${MediaStore.MediaColumns.IS_TRASHED} = 0"
+            } else {
+                null
+            }
+            val args: Array<String>? = if (folderName != null) arrayOf(folderName) else null
+            // volume_name only exists from API 29 — use the qualified projection
+            // where available (falls back to the base projection below).
+            val projection =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) trashProjection(videoProjection)
+                else videoProjection
+            val cursor = context.contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                folderName?.let { name ->
+                    val base = selection
+                    if (base != null) "$base AND ${MediaStore.Video.Media.BUCKET_DISPLAY_NAME} = ?"
+                    else "${MediaStore.Video.Media.BUCKET_DISPLAY_NAME} = ?"
+                } ?: selection,
+                args,
+                "${MediaStore.Video.Media.DATE_ADDED} DESC"
+            )
+            readImageEntities(cursor, MediaStore.Video.Media.EXTERNAL_CONTENT_URI).map { it.toImageItem() }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /** Folder cards for the VIDEO collection (name, count, newest date) so
+     *  folders that contain only videos also appear in the FOLDER browse. */
+    suspend fun getVideoFolderInfos(): List<FolderInfo> = withContext(ioDispatcher) {
+        try {
+            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                "${MediaStore.MediaColumns.IS_TRASHED} = 0"
+            } else {
+                null
+            }
+            val cursor = context.contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(
+                    MediaStore.Video.Media.BUCKET_DISPLAY_NAME,
+                    MediaStore.Video.Media.DATE_ADDED
+                ),
+                selection,
+                null,
+                null
+            )
+            val counts = LinkedHashMap<String, Pair<Int, Long>>()
+            cursor?.use { c ->
+                val nameCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
+                val dateCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
+                while (c.moveToNext()) {
+                    val name = c.getString(nameCol) ?: "Unknown"
+                    val date = c.getLong(dateCol)
+                    val prev = counts[name]
+                    counts[name] = (prev?.first ?: 0) + 1 to maxOf(prev?.second ?: 0L, date)
+                }
+            }
+            counts.map { (name, v) -> FolderInfo(name, v.first, v.second) }
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 
     /**
