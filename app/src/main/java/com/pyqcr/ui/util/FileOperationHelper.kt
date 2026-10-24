@@ -14,6 +14,7 @@ import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 
 /**
@@ -651,6 +652,47 @@ object FileOperationHelper {
     }
 
     /**
+     * Whether a trashed row's backing file no longer exists on disk — an
+     * "orphaned" entry left behind when the physical file was deleted out from
+     * under MediaStore (a cleaner app, a manual delete through another manager,
+     * or the platform purging the OS trash folder). Such a row can never be
+     * restored (there is no file to bring back) and its file-backed delete
+     * no-ops, so round-13's recover-then-delete would re-trash it forever.
+     * Probes the row's own URI and every trash-volume address by opening a read
+     * descriptor; only a definitive FileNotFoundException from ALL addresses
+     * reports "missing" (a SecurityException is treated as present so a row we
+     * simply cannot read is not mistaken for an orphan).
+     */
+    private fun trashRowFileMissing(context: Context, uri: Uri): Boolean {
+        return try {
+            val probes = mutableListOf<Uri>()
+            // Trash-volume addresses FIRST — they are the correct read form for a
+            // trashed row (its own normal-collection URI may be unreadable even
+            // when the file exists, which would wrongly flag a live row as orphan).
+            probes.addAll(trashVolumeCandidates(uri))
+            probes.add(uri)
+            var anyMissing = false
+            for (probe in probes) {
+                try {
+                    val fd = context.contentResolver.openFileDescriptor(probe, "r")
+                    if (fd != null) {
+                        fd.close()
+                        return false // a live file opened — definitely not an orphan
+                    }
+                } catch (e: FileNotFoundException) {
+                    anyMissing = true // file missing on this address; keep probing
+                } catch (e: Exception) {
+                    return false // can't read here (SecurityException/etc) — assume present
+                }
+            }
+            // All addresses reported the file absent.
+            anyMissing
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
      * Restore trashed media by clearing their MediaStore IS_TRASHED flag
      * (all API levels — the system recovery-request intent is not a public
      * API in this build). Tries the row's own URI first (the bin now supplies
@@ -662,6 +704,14 @@ object FileOperationHelper {
         for (u in uris) {
             try {
                 val parsed = Uri.parse(u)
+                if (trashRowFileMissing(context, parsed)) {
+                    // Orphaned entry: the backing file is already gone, so there
+                    // is nothing to bring back — restoring would only fabricate a
+                    // broken tile in the gallery. Leave it in the bin (it is
+                    // removable there) and report it as not-restored.
+                    Log.w(TAG, "restoreFromTrash skipped $u — backing file already gone (orphaned row)")
+                    continue
+                }
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.IS_TRASHED, 0)
                 }
@@ -758,6 +808,16 @@ object FileOperationHelper {
                                 }
                                 if (n > 0) {
                                     deleted = true
+                                } else if (trashRowFileMissing(context, parsed)) {
+                                    // Orphaned row: untrash succeeded but the delete
+                                    // no-ops because the backing file is already gone
+                                    // (deleting a missing file returns 0/throws). If we
+                                    // re-trashed it here the row would be stuck in the
+                                    // bin forever — the exact "cannot delete or restore"
+                                    // symptom. Leave it UNTRASHED instead: the caller's
+                                    // live-bin re-read ([AlbumRepository.currentTrashedUris])
+                                    // then counts it as already-removed and drops it.
+                                    Log.w(TAG, "untrash ok but delete of $parsed returned $n and the backing file is gone (orphaned) — leaving it untrashed so it leaves the bin")
                                 } else {
                                     // The row is currently RESTORED (IS_TRASHED=0)
                                     // — put it straight back in the trash before
