@@ -619,6 +619,90 @@ fun AlbumScreen(
     }
 
     /**
+     * Bin restore: clear IS_TRASHED directly first (the fast path — instant, no
+     * dialog — for rows this app owns or when All-files access is granted). Any
+     * row the provider refuses to un-trash directly (secondary-volume rows it
+     * does not own, e.g. SD cards / HONOR Parallel Space) is handed to the system
+     * recovery-request dialog, mirroring how permanent delete falls back to the
+     * system delete dialog. Declared before every restore call site so the
+     * launcher / helper are not forward-referenced.
+     */
+    var pendingBinRestoreUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    val binRestoreLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val pending = pendingBinRestoreUris
+        pendingBinRestoreUris = emptyList()
+        if (pending.isNotEmpty()) {
+            scope.launch {
+                // Re-read the live bin: rows no longer trashed were restored by
+                // the dialog; survivors (or a cancel) stay put. Report honestly.
+                val remaining = withContext(Dispatchers.IO) {
+                    repository.currentTrashedUris(pending)
+                }
+                val restoredNow = pending.size - remaining.size
+                viewModel.refreshImages()
+                trashedMedia = withContext(Dispatchers.IO) {
+                    repository.getTrashedMedia()
+                }
+                binFolder = null
+                binViewerIndex = -1
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+                snackbarHostState.showSnackbar(
+                    if (result.resultCode == android.app.Activity.RESULT_OK && remaining.isEmpty()) {
+                        "Restored the selected item(s)"
+                    } else if (result.resultCode == android.app.Activity.RESULT_OK) {
+                        "Restored $restoredNow item(s); ${remaining.size} could not be restored"
+                    } else {
+                        "Restore cancelled — the item(s) stay in the recycle bin"
+                    }
+                )
+            }
+        }
+    }
+    val launchBinRestore: (List<String>) -> Unit = { uris ->
+        if (uris.isEmpty()) {
+            scope.launch { snackbarHostState.showSnackbar("Nothing to restore") }
+        } else {
+            scope.launch {
+                val failed = withContext(Dispatchers.IO) {
+                    FileOperationHelper.restoreFromTrash(context, uris)
+                }
+                if (failed.isEmpty()) {
+                    viewModel.refreshImages()
+                    trashedMedia = withContext(Dispatchers.IO) {
+                        repository.getTrashedMedia()
+                    }
+                    binFolder = null
+                    binViewerIndex = -1
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                    snackbarHostState.showSnackbar("Restored ${uris.size} item(s)")
+                } else {
+                    val sender = FileOperationHelper.createBinRestoreRequest(context, failed)
+                    if (sender != null) {
+                        pendingBinRestoreUris = failed
+                        binRestoreLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                    } else {
+                        viewModel.refreshImages()
+                        trashedMedia = withContext(Dispatchers.IO) {
+                            repository.getTrashedMedia()
+                        }
+                        binFolder = null
+                        binViewerIndex = -1
+                        isMultiSelectMode = false
+                        selectedImageUris = emptySet()
+                        snackbarHostState.showSnackbar(
+                            "Restored ${uris.size - failed.size} item(s); ${failed.size} could not be restored"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Remove [uris] from the gallery — RECYCLE BIN FIRST on API 30+ (the system
      * trash request, recoverable), falling back to a permanent delete on older
      * APIs or when the trash request cannot be built. [trashTemplate] / 
@@ -1539,23 +1623,7 @@ fun AlbumScreen(
                             selectedImageUris = if (allContextSelected) emptySet() else selectedImageUris + contextUris.toSet()
                         },
                         onRestore = {
-                            val uris = selectedImageUris.toList()
-                            scope.launch {
-                                val restored = FileOperationHelper.restoreFromTrash(context, uris)
-                                if (restored > 0) {
-                                    viewModel.refreshImages()
-                                    trashedMedia = withContext(Dispatchers.IO) {
-                                        repository.getTrashedMedia()
-                                    }
-                                    snackbarHostState.showSnackbar("Restored $restored item(s)")
-                                } else {
-                                    snackbarHostState.showSnackbar("Could not restore the selected items")
-                                }
-                                binFolder = null
-                                binViewerIndex = -1
-                                isMultiSelectMode = false
-                                selectedImageUris = emptySet()
-                            }
+                            launchBinRestore(selectedImageUris.toList())
                         },
                         onCollage = { openCollageDialog() },
                         onTag = {
@@ -2323,23 +2391,7 @@ fun AlbumScreen(
                                 },
                                 onClose = { binViewerIndex = -1 },
                                 onRestore = { media ->
-                                    scope.launch {
-                                        val restored = FileOperationHelper.restoreFromTrash(
-                                            context, listOf(media.uri)
-                                        )
-                                        if (restored > 0) {
-                                            viewModel.refreshImages()
-                                            trashedMedia = withContext(Dispatchers.IO) {
-                                                repository.getTrashedMedia()
-                                            }
-                                            snackbarHostState.showSnackbar("Restored to the gallery")
-                                        } else {
-                                            snackbarHostState.showSnackbar(
-                                                "Could not restore this item"
-                                            )
-                                        }
-                                        binViewerIndex = -1
-                                    }
+                                    launchBinRestore(listOf(media.uri))
                                 },
                                 onDeletePermanent = { media ->
                                     scope.launch {

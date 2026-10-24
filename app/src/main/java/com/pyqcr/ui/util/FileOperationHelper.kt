@@ -651,11 +651,16 @@ object FileOperationHelper {
     }
 
     /**
-     * Restore trashed media by clearing their MediaStore IS_TRASHED flag
-     * (all API levels — the system recovery-request intent is not a public
-     * API in this build). Tries the row's own URI first (the bin now supplies
-     * volume-qualified URIs for secondary-volume rows), then the trash-volume
-     * address. Returns the number successfully restored.
+     * Restore trashed media by clearing their MediaStore IS_TRASHED flag. Tries
+     * the row's own URI first (the bin supplies volume-qualified URIs for
+     * secondary-volume rows), then the trash-volume address. This direct write
+     * succeeds for rows this app owns or when All-files access is granted; where
+     * the provider refuses to un-trash a row directly (secondary-volume rows it
+     * does not own, e.g. SD cards / HONOR Parallel Space) it no-ops and the URI
+     * is returned so the caller can hand it to the system recovery dialog
+     * ([createBinRestoreRequest]) — exactly like permanent delete falls back to
+     * [createBinPermanentDeleteRequest]. Returns the URIs that could NOT be
+     * restored directly.
      *
      * Note: trashing does NOT delete the file — MediaProvider renames it to a
      * hidden ".trashed-<timestamp>-<name>" form and sets IS_TRASHED = 1. Reads
@@ -664,9 +669,10 @@ object FileOperationHelper {
      * never probe for existence — clearing IS_TRASHED is what asks the provider
      * to move the file back to its real name.
      */
-    suspend fun restoreFromTrash(context: Context, uris: List<String>): Int = withContext(Dispatchers.IO) {
-        var restored = 0
+    suspend fun restoreFromTrash(context: Context, uris: List<String>): List<String> = withContext(Dispatchers.IO) {
+        val failed = mutableListOf<String>()
         for (u in uris) {
+            var restored = false
             try {
                 val parsed = Uri.parse(u)
                 val values = ContentValues().apply {
@@ -683,12 +689,63 @@ object FileOperationHelper {
                         if (n > 0) break
                     }
                 }
-                if (n > 0) restored++
+                restored = n > 0
             } catch (e: Exception) {
                 Log.w(TAG, "restoreFromTrash failed for $u", e)
             }
+            if (!restored) failed += u
         }
-        restored
+        failed
+    }
+
+    /**
+     * Build the system "restore" request for trashed rows (API 30+). A direct
+     * IS_TRASHED = 0 update no-ops for secondary-volume rows the app does not
+     * own (SD cards, HONOR Parallel Space) — the provider only un-trashes them
+     * through the sanctioned recovery request, which is exactly why permanent
+     * DELETE started working only once it went through
+     * [createBinPermanentDeleteRequest]. MediaStore.createRestoreRequest resolves
+     * rows through their normal collection URIs (the form the bin query returns)
+     * and moves the hidden ".trashed-…" file back to its real name on confirm.
+     * The rows' own URIs are tried first; the trash-view addresses are a fallback
+     * for ROMs that only accept that form. Returns null on API < 30 or when no
+     * request could be built (callers then report the failure directly).
+     */
+    fun createBinRestoreRequest(context: Context, uris: List<String>): IntentSender? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val ownUris = uris.mapNotNull { raw ->
+            try {
+                Uri.parse(raw)
+            } catch (e: Exception) {
+                null
+            }
+        }.distinct()
+        if (ownUris.isNotEmpty()) {
+            val sender = try {
+                // createRestoreRequest returns an IntentSender DIRECTLY (unlike
+                // createTrashRequest / createDeleteRequest, which return an
+                // IntentSenderRequest needing .intentSender).
+                MediaStore.createRestoreRequest(context.contentResolver, ownUris)
+            } catch (e: Exception) {
+                Log.w(TAG, "createRestoreRequest rejected the rows' own URIs, retrying with trash addresses", e)
+                null
+            }
+            if (sender != null) return sender
+        }
+        val trashUris = uris.flatMap { raw ->
+            try {
+                trashVolumeCandidates(Uri.parse(raw))
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }.distinct()
+        if (trashUris.isEmpty()) return null
+        return try {
+            MediaStore.createRestoreRequest(context.contentResolver, trashUris)
+        } catch (e: Exception) {
+            Log.w(TAG, "createBinRestoreRequest failed", e)
+            null
+        }
     }
 
     /**
