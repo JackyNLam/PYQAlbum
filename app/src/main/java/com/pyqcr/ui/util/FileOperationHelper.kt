@@ -704,9 +704,13 @@ object FileOperationHelper {
      * own (SD cards, HONOR Parallel Space) — the provider only un-trashes them
      * through the sanctioned recovery request, which is exactly why permanent
      * DELETE started working only once it went through
-     * [createBinPermanentDeleteRequest]. MediaStore.createRestoreRequest resolves
-     * rows through their normal collection URIs (the form the bin query returns)
-     * and moves the hidden ".trashed-…" file back to its real name on confirm.
+     * [createBinPermanentDeleteRequest]. The public restore dialog is built with
+     * MediaStore.createTrashRequest(..., trash = false), which resolves rows
+     * through their normal collection URIs (the form the bin query returns) and
+     * moves the hidden ".trashed-…" file back to its real name on confirm.
+     * (MediaStore.createRestoreRequest itself is a hidden @SystemApi member that
+     * is not present in the compile SDK's android.jar, so it cannot be referenced
+     * directly — it fails CI with "Unresolved reference".)
      * The rows' own URIs are tried first; the trash-view addresses are a fallback
      * for ROMs that only accept that form. Returns null on API < 30 or when no
      * request could be built (callers then report the failure directly).
@@ -722,12 +726,12 @@ object FileOperationHelper {
         }.distinct()
         if (ownUris.isNotEmpty()) {
             val sender = try {
-                // createRestoreRequest returns an IntentSender DIRECTLY (unlike
-                // createTrashRequest / createDeleteRequest, which return an
-                // IntentSenderRequest needing .intentSender).
-                MediaStore.createRestoreRequest(context.contentResolver, ownUris)
+                // trash = false builds the sanctioned un-trash (restore) dialog;
+                // like createTrashRequest(true) / createDeleteRequest it returns
+                // an IntentSenderRequest, so take .intentSender.
+                MediaStore.createTrashRequest(context.contentResolver, ownUris, false).intentSender
             } catch (e: Exception) {
-                Log.w(TAG, "createRestoreRequest rejected the rows' own URIs, retrying with trash addresses", e)
+                Log.w(TAG, "restore request rejected the rows' own URIs, retrying with trash addresses", e)
                 null
             }
             if (sender != null) return sender
@@ -741,7 +745,7 @@ object FileOperationHelper {
         }.distinct()
         if (trashUris.isEmpty()) return null
         return try {
-            MediaStore.createRestoreRequest(context.contentResolver, trashUris)
+            MediaStore.createTrashRequest(context.contentResolver, trashUris, false).intentSender
         } catch (e: Exception) {
             Log.w(TAG, "createBinRestoreRequest failed", e)
             null
