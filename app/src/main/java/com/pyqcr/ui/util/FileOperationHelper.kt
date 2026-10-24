@@ -732,10 +732,13 @@ object FileOperationHelper {
                         // Last resort: recover the row (IS_TRASHED = 0) then
                         // delete it as a normal item — works around ROMs that
                         // reject trash-volume deletes entirely. If the untrash
-                        // succeeds but the delete is refused, put the row BACK
-                        // in the trash — a silently restored row would leave a
-                        // bin entry that every later delete (including the
-                        // system dialog) no-ops against.
+                        // succeeds but the delete is refused OR throws, put the
+                        // row BACK in the trash — a silently restored row would
+                        // leave a bin entry that every later delete (including
+                        // the system dialog) no-ops against, looking exactly
+                        // like a "corrupted" trash database. Each step is
+                        // guarded separately so the re-trash is never skipped:
+                        // the row ends either trashed or truly deleted.
                         try {
                             val values = ContentValues().apply {
                                 put(MediaStore.MediaColumns.IS_TRASHED, 0)
@@ -747,17 +750,40 @@ object FileOperationHelper {
                                 -1
                             }
                             if (untrashed > 0) {
-                                if (context.contentResolver.delete(parsed, null, null) > 0) {
+                                val n = try {
+                                    context.contentResolver.delete(parsed, null, null)
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "untrash ok but delete of $parsed threw", e)
+                                    -1
+                                }
+                                if (n > 0) {
                                     deleted = true
                                 } else {
-                                    Log.w(TAG, "untrash ok but delete refused for $parsed — re-trashing")
+                                    // The row is currently RESTORED (IS_TRASHED=0)
+                                    // — put it straight back in the trash before
+                                    // anything else can see it half-restored.
+                                    Log.w(TAG, "untrash ok but delete of $parsed returned $n — re-trashing")
                                     val reTrash = ContentValues().apply {
                                         put(MediaStore.MediaColumns.IS_TRASHED, 1)
                                     }
+                                    var retrashed = -1
                                     try {
-                                        context.contentResolver.update(parsed, reTrash, null, null)
+                                        retrashed = context.contentResolver.update(parsed, reTrash, null, null)
                                     } catch (e: Exception) {
                                         Log.w(TAG, "re-trash update of $parsed threw", e)
+                                    }
+                                    if (retrashed <= 0) {
+                                        for (trashUri in trashVolumeCandidates(parsed)) {
+                                            try {
+                                                retrashed = context.contentResolver.update(trashUri, reTrash, null, null)
+                                            } catch (e: Exception) {
+                                                Log.w(TAG, "re-trash update of $trashUri threw", e)
+                                            }
+                                            if (retrashed > 0) break
+                                        }
+                                    }
+                                    if (retrashed <= 0) {
+                                        Log.w(TAG, "row $parsed could not be re-trashed after a refused delete — check the gallery for a restored item")
                                     }
                                 }
                             } else {
@@ -852,20 +878,21 @@ object FileOperationHelper {
 
     /**
      * Trash-volume addresses for one trashed row (API 30+): the permanent-delete
-     * targets the MediaProvider actually honours. Returns both the GLOBAL trash
-     * view (content://media/trash/...) and — when the row URI carries a volume
-     * — the row's own volume-qualified trash address (content://media/<volume>/
-     * trash/...). Rows on secondary volumes (SD cards) do NOT resolve through
-     * the global view on several ROMs, so both forms are tried. Empty on older
-     * APIs or when the row id cannot be parsed. (MediaStore.VOLUME_TRASH is not
-     * exposed by this build's android.jar — the literal "trash" is the same.)
+     * targets the MediaProvider actually honours. Returns the row's own
+     * volume-qualified trash address (content://media/<volume>/trash/...) FIRST
+     * — it addresses this row precisely — then the GLOBAL trash view
+     * (content://media/trash/...), which some ROMs require but which can alias
+     * another volume's row that happens to share the same numeric id. Rows on
+     * secondary volumes (SD cards) do NOT resolve through the global view on
+     * several ROMs. Empty on older APIs or when the row id cannot be parsed.
+     * (MediaStore.VOLUME_TRASH is not exposed by this build's android.jar —
+     * the literal "trash" is the same.)
      */
     fun trashVolumeCandidates(uri: Uri): List<Uri> {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
         return try {
             val id = ContentUris.parseId(uri)
             val collection = if (uri.toString().contains("/video/")) "video" else "images"
-            val global = Uri.parse("content://media/trash/$collection/media/$id")
             val volumeQualified = try {
                 // pathSegments: ["media", "<volume>", "<collection>", "media", "<id>"]
                 val seg = uri.pathSegments
@@ -875,7 +902,8 @@ object FileOperationHelper {
             } catch (e: Exception) {
                 null
             }
-            listOfNotNull(global, volumeQualified).distinct()
+            val global = Uri.parse("content://media/trash/$collection/media/$id")
+            listOfNotNull(volumeQualified, global).distinct()
         } catch (e: Exception) {
             emptyList()
         }

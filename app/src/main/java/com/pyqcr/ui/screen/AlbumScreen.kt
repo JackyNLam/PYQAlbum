@@ -453,6 +453,13 @@ fun AlbumScreen(
             }
             isMultiSelectMode = false
             selectedImageUris = emptySet()
+        } else {
+            // Denied — but some ROMs apply the trash request even when they
+            // report RESULT_CANCELED, so reload the album to match reality
+            // instead of showing an image that no longer exists.
+            scope.launch {
+                viewModel.refreshImages()
+            }
         }
         pendingDeleteUris = null
         deleteSuccessMessage = "Deleted {n} image(s)"
@@ -576,6 +583,35 @@ fun AlbumScreen(
                         "Deleted $removed of ${pending.size}; ${remaining.size} could not be removed"
                     }
                 )
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            }
+        } else if (result.resultCode == android.app.Activity.RESULT_CANCELED && pending.isNotEmpty()) {
+            // The system dialog was DENIED. The denial itself does not touch
+            // MediaStore — the items simply stay in the recycle bin. Some ROMs
+            // still apply the delete on cancel though, so re-read the live bin
+            // and report honestly instead of leaving the user guessing that a
+            // denied dialog "corrupted" an item.
+            scope.launch {
+                val remaining = withContext(Dispatchers.IO) {
+                    repository.currentTrashedUris(pending)
+                }
+                val removed = pending.size - remaining.size
+                if (removed > 0) {
+                    viewModel.deleteImages(pending - remaining.toSet())
+                    snackbarHostState.showSnackbar(
+                        "Deleted $removed of ${pending.size} item(s); ${remaining.size} kept in the recycle bin"
+                    )
+                } else {
+                    snackbarHostState.showSnackbar(
+                        "Delete cancelled — the item(s) stay in the recycle bin"
+                    )
+                }
+                trashedMedia = withContext(Dispatchers.IO) {
+                    repository.getTrashedMedia()
+                }
+                binFolder = null
+                binViewerIndex = -1
                 isMultiSelectMode = false
                 selectedImageUris = emptySet()
             }
