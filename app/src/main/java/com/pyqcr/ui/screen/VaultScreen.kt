@@ -2214,78 +2214,125 @@ object VaultStorage {
     /**
      * Move an entry OUT of the vault back into the gallery — into its ORIGINAL
      * folder when that folder sits under a standard media root (Pictures /
-     * DCIM / Movies / Download), otherwise Pictures/PYQAlbum. Uses a MediaStore
-     * insert with the IS_PENDING publish pattern — zero extra permission,
-     * exactly how the album's own copy/move writes to standard collections.
+     * DCIM / Movies / Download), otherwise Pictures/PYQAlbum. Zero extra
+     * permission: it inserts through MediaStore and publishes the file.
+     * A "Download/" RELATIVE_PATH is rejected on the Images/Video collections
+     * by strict providers (e.g. HONOR Parallel Space's virtualised media
+     * store), so a Download target additionally falls back to the Downloads
+     * collection, and finally to Pictures/PYQAlbum, so the file always
+     * escapes the vault instead of being stranded by a failed move.
      * Encrypted entries are decrypted with [password] in memory first. The
      * vault copy is removed on success.
      */
     fun moveOut(context: Context, entry: VaultEntry, password: String?): Boolean {
-        var destUri: Uri? = null
-        return try {
-            val bytes = if (entry.encrypted) {
+        val bytes = try {
+            if (entry.encrypted) {
                 if (password.isNullOrEmpty()) return false
                 VaultCrypto.decryptBytes(entryFile(context, entry).readBytes(), password)
                     ?: return false
             } else {
                 entryFile(context, entry).readBytes()
             }
-            if (bytes.isEmpty()) return false
+        } catch (e: Exception) {
+            return false
+        }
+        if (bytes.isEmpty()) return false
 
-            val name = entry.displayName.ifBlank { "vault_image" }
-            val mime = when {
-                entry.isVideo -> when (name.substringAfterLast('.', "").lowercase()) {
-                    "webm" -> "video/webm"
-                    "3gp" -> "video/3gpp"
-                    "mkv" -> "video/x-matroska"
-                    "mov" -> "video/quicktime"
-                    else -> "video/mp4"
-                }
-                else -> when (name.substringAfterLast('.', "").lowercase()) {
-                    "gif" -> "image/gif"
-                    "webp" -> "image/webp"
-                    "png" -> "image/png"
-                    else -> "image/jpeg"
-                }
+        val name = entry.displayName.ifBlank { "vault_image" }
+        val mime = when {
+            entry.isVideo -> when (name.substringAfterLast('.', "").lowercase()) {
+                "webm" -> "video/webm"
+                "3gp" -> "video/3gpp"
+                "mkv" -> "video/x-matroska"
+                "mov" -> "video/quicktime"
+                else -> "video/mp4"
             }
+            else -> when (name.substringAfterLast('.', "").lowercase()) {
+                "gif" -> "image/gif"
+                "webp" -> "image/webp"
+                "png" -> "image/png"
+                else -> "image/jpeg"
+            }
+        }
+        val mediaCollection = if (entry.isVideo)
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        else
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val rel = restoreRelativePath(entry.relPath)
+        val toDownload = rel.trim('/').substringBefore('/').lowercase() == "download"
+        var exported: Uri? = null
+        exported = insertVaultOut(context, mediaCollection, name, mime, rel, true, bytes)
+        if (exported == null && toDownload && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val downloadsCollection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            // Direct write first (IS_PENDING on the Downloads collection is
+            // unreliable on some devices), then the pending-publish variant.
+            exported = insertVaultOut(context, downloadsCollection, name, mime, rel, false, bytes)
+                ?: insertVaultOut(context, downloadsCollection, name, mime, rel, true, bytes)
+        }
+        if (exported == null && rel.removeSuffix("/") != "Pictures/PYQAlbum") {
+            exported = insertVaultOut(context, mediaCollection, name, mime, "Pictures/PYQAlbum", true, bytes)
+        }
+        val doneUri = exported ?: return false
+        return try {
+            deleteEntry(context, entry)
+            true
+        } catch (e: Exception) {
+            // Vault copy survived — drop the half-moved export so a retry
+            // cannot stack up duplicate gallery files.
+            try { context.contentResolver.delete(doneUri, null, null) } catch (_: Exception) {}
+            false
+        }
+    }
+
+    /**
+     * Write [bytes] into [collection] as [name] ([mime]) under [relPath] and
+     * return the new row's URI; [usePending] runs the IS_PENDING 1 → write →
+     * publish cycle, while false writes straight into the freshly inserted
+     * row. A half-written row is always removed before reporting failure
+     * (null) so fallback retries do not stack up duplicates.
+     */
+    private fun insertVaultOut(
+        context: Context,
+        collection: Uri,
+        name: String,
+        mime: String,
+        relPath: String,
+        usePending: Boolean,
+        bytes: ByteArray
+    ): Uri? {
+        var destUri: Uri? = null
+        return try {
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 put(MediaStore.MediaColumns.MIME_TYPE, mime)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, restoreRelativePath(entry.relPath))
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+                if (usePending && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
             }
-            val collection = if (entry.isVideo)
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-            else
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            destUri = context.contentResolver.insert(
-                collection, values
-            ) ?: return false
+            destUri = context.contentResolver.insert(collection, values) ?: return null
             val output = context.contentResolver.openOutputStream(destUri!!)
             if (output == null) {
                 context.contentResolver.delete(destUri!!, null, null)
-                return false
+                return null
             }
             output.use { it.write(bytes) }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (usePending && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val publishValues = ContentValues().apply {
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
                 }
                 val updated = context.contentResolver.update(destUri!!, publishValues, null, null)
                 if (updated == 0) {
                     context.contentResolver.delete(destUri!!, null, null)
-                    return false
+                    return null
                 }
             }
-            deleteEntry(context, entry)
-            true
+            destUri
         } catch (e: Exception) {
             destUri?.let { uri ->
                 try { context.contentResolver.delete(uri, null, null) } catch (_: Exception) {}
             }
-            false
+            null
         }
     }
 
