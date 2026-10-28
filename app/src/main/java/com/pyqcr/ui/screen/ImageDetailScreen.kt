@@ -1190,11 +1190,11 @@ fun ImageDetailScreen(
                         ResizeOptionsDialog(
                             imageCount = 1,
                             onDismiss = { showResizeDialog = false },
-                            onConfirm = { targetWidth, saveMode, padSquare ->
+                            onConfirm = { targetWidth, saveMode, padSquare, padBlack ->
                                 showResizeDialog = false
                                 coroutineScope.launch {
                                     val ok = withContext(Dispatchers.IO) {
-                                        resizeSingleImageToWidth(context, imageUri, targetWidth, saveMode, padSquare)
+                                        resizeSingleImageToWidth(context, imageUri, targetWidth, saveMode, padSquare, padBlack)
                                     }
                                     if (ok) {
                                         snackbarHostState.showSnackbar("Resized to ${targetWidth}px wide")

@@ -143,8 +143,9 @@ fun AlbumScreen(
     val isLoading by viewModel.isLoading.collectAsState()
 
     // FOLDER browse shows videos right beside images ("just like image") —
-    // the grid/select-all operate on the combined list.
-    val folderItems = remember(images, folderVideos) { images + folderVideos }
+    // the combined list is built after the sort state below, so videos AND
+    // GIFs interleave with the stills by the active folder sort mode instead
+    // of piling up at the bottom.
 
     // Drawer state
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -200,6 +201,25 @@ fun AlbumScreen(
     // Folder sort state — sort images inside a folder
     var folderSortMode by remember { mutableStateOf(FolderSortMode.MODIFIED_DATE_DESC) }
     var groupByMode by remember { mutableStateOf(GroupByMode.NONE) }
+
+    // Combined FOLDER browse list: stills AND videos merged into ONE list
+    // ordered by the active sort mode (stable sort keeps images before videos
+    // on ties). GIFs already live in the stills list, so they interleave too —
+    // nothing is piled at the bottom anymore. The viewer swipe order follows
+    // this same list.
+    val folderItems = remember(images, folderVideos, folderSortMode) {
+        val merged = images + folderVideos
+        when (folderSortMode) {
+            FolderSortMode.MODIFIED_DATE_DESC -> merged.sortedByDescending { it.dateAdded }
+            FolderSortMode.MODIFIED_DATE_ASC -> merged.sortedBy { it.dateAdded }
+            FolderSortMode.NAME_ASC -> merged.sortedBy { it.displayName.lowercase() }
+            FolderSortMode.NAME_DESC -> merged.sortedByDescending { it.displayName.lowercase() }
+            FolderSortMode.USER_RATING_DESC -> merged.sortedByDescending { it.rating }
+            FolderSortMode.USER_RATING_ASC -> merged.sortedBy { it.rating }
+            FolderSortMode.AI_SCORE_DESC -> merged.sortedByDescending { it.aiScore ?: 0f }
+            FolderSortMode.AI_SCORE_ASC -> merged.sortedBy { it.aiScore ?: 0f }
+        }
+    }
 
     // Copy/move operation state
     var copyMoveMessage by remember { mutableStateOf("") }
@@ -304,7 +324,10 @@ fun AlbumScreen(
                     val folderLabel = destinationFolderLabel(destDir, treeUri)
 
                     // Move: collect sources copied via SAF/MediaStore that need system-delete
-                    // confirmation. On API 30+ one createDeleteRequest dialog covers them all.
+                    // confirmation. On API 30+ one createTrashRequest dialog covers them all —
+                    // the originals land in the recoverable recycle bin, NOT permanently
+                    // deleted, so a destination that later misbehaves (restricted/virtualised
+                    // storage) never costs the user their data.
                     if (operation == "move") {
                         val sourcesToDelete = results
                             .filter { it.second.success && it.second.sourceNeedsDeletion }
@@ -324,7 +347,9 @@ fun AlbumScreen(
 
                         if (sourcesToDelete.isNotEmpty()) {
                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                                val request = FileOperationHelper.createDeleteRequest(context, sourcesToDelete)
+                                // Trash (recoverable), volume-qualified inside — never a
+                                // silent permanent delete of move sources.
+                                val request = FileOperationHelper.createTrashRequest(context, sourcesToDelete)
                                 if (request != null) {
                                     val baseMsg = buildString {
                                         append("Copied $successCount/${uris.size} images to $folderLabel")
@@ -958,15 +983,15 @@ fun AlbumScreen(
     }
 
     /** Resize selected images to target pixel width; [padSquare] pads each
-     *  scaled result onto a white square canvas. */
-    val batchResize: (List<String>, Int, String, Boolean) -> Unit = { uris, targetWidth, saveMode, padSquare ->
+     *  scaled result onto a square canvas ([padBlack] picks black, else white). */
+    val batchResize: (List<String>, Int, String, Boolean, Boolean) -> Unit = { uris, targetWidth, saveMode, padSquare, padBlack ->
         scope.launch {
             try {
                 var successCount = 0
                 var failCount = 0
                 for (uriStr in uris) {
                     val ok = withContext(Dispatchers.IO) {
-                        resizeSingleImageToWidth(context, uriStr, targetWidth, saveMode, padSquare)
+                        resizeSingleImageToWidth(context, uriStr, targetWidth, saveMode, padSquare, padBlack)
                     }
                     if (ok) successCount++ else failCount++
                 }
@@ -2838,9 +2863,9 @@ fun AlbumScreen(
                 ResizeOptionsDialog(
                     imageCount = selectedImageUris.size,
                     onDismiss = { showResizeDialog = false },
-                    onConfirm = { targetWidth, saveMode, padSquare ->
+                    onConfirm = { targetWidth, saveMode, padSquare, padBlack ->
                         showResizeDialog = false
-                        batchResize(selectedImageUris.toList(), targetWidth, saveMode, padSquare)
+                        batchResize(selectedImageUris.toList(), targetWidth, saveMode, padSquare, padBlack)
                     }
                 )
             }
@@ -3806,19 +3831,21 @@ internal object FileUtils {
  * Batch resize options dialog.
  * Lets the user choose a target width (500 / 1000 / 2000 / custom),
  * whether to replace the original or save a copy with "_resized" suffix,
- * and an optional white square pad (letterbox onto a square canvas).
+ * and an optional square pad (letterbox onto a square canvas) with a
+ * white or black background.
  */
 @Composable
 internal fun ResizeOptionsDialog(
     imageCount: Int,
     onDismiss: () -> Unit,
-    onConfirm: (targetWidth: Int, saveMode: String, padSquare: Boolean) -> Unit
+    onConfirm: (targetWidth: Int, saveMode: String, padSquare: Boolean, padBlack: Boolean) -> Unit
 ) {
     var selectedWidth by remember { mutableIntStateOf(500) }
     var customWidth by remember { mutableStateOf("") }
     var saveMode by remember { mutableStateOf("replace") }
     var useCustom by remember { mutableStateOf(false) }
     var padSquare by remember { mutableStateOf(false) }
+    var padBlack by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3878,7 +3905,22 @@ internal fun ResizeOptionsDialog(
                         checked = padSquare,
                         onCheckedChange = { padSquare = it }
                     )
-                    Text("Pad to square (white background)", modifier = Modifier.padding(start = 4.dp))
+                    Text("Pad to square", modifier = Modifier.padding(start = 4.dp))
+                }
+                if (padSquare) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = !padBlack,
+                            onClick = { padBlack = false },
+                            label = { Text("White background") }
+                        )
+                        FilterChip(
+                            selected = padBlack,
+                            onClick = { padBlack = true },
+                            label = { Text("Black background") }
+                        )
+                    }
                 }
             }
         },
@@ -3886,7 +3928,7 @@ internal fun ResizeOptionsDialog(
             TextButton(
                 onClick = {
                     val w = if (useCustom) customWidth.toIntOrNull() ?: 500 else selectedWidth
-                    onConfirm(w, saveMode, padSquare)
+                    onConfirm(w, saveMode, padSquare, padBlack)
                 },
                 enabled = !useCustom || customWidth.toIntOrNull() != null
             ) {
@@ -3905,7 +3947,8 @@ internal fun ResizeOptionsDialog(
  * Resize one image to [targetWidth] pixels wide. [saveMode] is either
  * "replace" (re-compress the original MediaStore row in place) or "suffix"
  * (save a new "_resized" copy). [padSquare] pads the scaled image onto a
- * white square canvas (side = larger result edge, image centered).
+ * square canvas (side = larger result edge, image centered); the pad
+ * background is white, or black when [padBlack] is true.
  * Shared by the album batch menu and the single-image detail panel.
  * Returns true on success.
  */
@@ -3914,7 +3957,8 @@ internal suspend fun resizeSingleImageToWidth(
     uriStr: String,
     targetWidth: Int,
     saveMode: String,
-    padSquare: Boolean = false
+    padSquare: Boolean = false,
+    padBlack: Boolean = false
 ): Boolean {
     return withContext(Dispatchers.IO) {
         try {
@@ -3938,12 +3982,14 @@ internal suspend fun resizeSingleImageToWidth(
             val sampled = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOpts) } ?: return@withContext false
             val scaled = Bitmap.createScaledBitmap(sampled, fw, fh, true)
             sampled.recycle()
-            // White square pad: side = larger result edge, image centered.
+            // Square pad: side = larger result edge, image centered on a
+            // white (default) or black canvas.
             val resized = if (padSquare) {
                 val side = maxOf(fw, fh)
                 val square = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
                 val padCanvas = android.graphics.Canvas(square)
-                padCanvas.drawColor(android.graphics.Color.WHITE)
+                val padColor = if (padBlack) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+                padCanvas.drawColor(padColor)
                 padCanvas.drawBitmap(scaled, (side - fw) / 2f, (side - fh) / 2f, null)
                 scaled.recycle()
                 square

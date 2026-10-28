@@ -329,6 +329,18 @@ object FileOperationHelper {
             if (realPath != null) {
                 val sourceFile = File(realPath)
                 if (sourceFile.exists() && sourceFile.renameTo(destFile)) {
+                    // Virtualised filesystems (HONOR Parallel Space) can ACK a
+                    // rename yet leave nothing real at the target. Never drop the
+                    // stale row unless the bytes actually landed — otherwise the
+                    // file is un-indexed AND un-moved: data loss with no undo.
+                    if (!destFile.exists() || destFile.length() <= 0L) {
+                        val restored = destFile.exists() && destFile.renameTo(sourceFile)
+                        Log.w(TAG, "renameTo left no usable file at ${destFile.absolutePath} (restored=$restored) — move aborted")
+                        return@withContext FileOpResult(
+                            false, null,
+                            "The destination rejected the move (restricted storage) — original kept"
+                        )
+                    }
                     MediaStoreUtils.scanFile(context, destFile.absolutePath)
                     // Remove the stale MediaStore row for the old location
                     deleteSourceEntry(context, contentUri)
@@ -377,6 +389,18 @@ object FileOperationHelper {
                 }
                 input.use { i -> output.use { o -> i.copyTo(o) } }
 
+                // Verify the new document is real before any source deletion is
+                // queued (see isReadableCopy) — a phantom SAF copy plus a
+                // confirmed delete dialog would silently lose the image.
+                val expected = sizeOf(context, contentUri)
+                if (!isReadableCopy(context, docUri, expected)) {
+                    try { DocumentsContract.deleteDocument(context.contentResolver, docUri) } catch (_: Exception) {}
+                    return@withContext FileOpResult(
+                        false, null,
+                        "The copied file could not be read back from the chosen folder — original kept"
+                    )
+                }
+
                 FileOpResult(true, docUri.toString(), null)
             } catch (e: Exception) {
                 Log.e(TAG, "copyViaSaf failed for $sourceUri", e)
@@ -401,6 +425,7 @@ object FileOperationHelper {
                 val contentUri = Uri.parse(sourceUri)
                 val fileName = getFileName(context, sourceUri)
                 val mime = mimeTypeFor(fileName)
+                val expectedSize = sizeOf(context, contentUri)
 
                 // Always insert into MediaStore.Images regardless of RELATIVE_PATH.
                 // MediaStore.Downloads does NOT reliably support IS_PENDING across
@@ -450,6 +475,19 @@ object FileOperationHelper {
                             "Failed to publish file in $relativePath — the device may block writes here"
                         )
                     }
+                }
+
+                // Read the published copy BACK before claiming success. A move
+                // deletes the original only after this returns true — virtualised
+                // providers (HONOR Parallel Space) have been observed to publish
+                // rows that resolve to an empty file, and deleting the source
+                // after such a "successful" copy is how a move eats the data.
+                if (!isReadableCopy(context, destUri, expectedSize)) {
+                    try { context.contentResolver.delete(destUri, null, null) } catch (_: Exception) {}
+                    return@withContext FileOpResult(
+                        false, null,
+                        "The copied file could not be read back from $relativePath — original kept"
+                    )
                 }
 
                 FileOpResult(true, destUri.toString(), null)
@@ -526,6 +564,63 @@ object FileOperationHelper {
         "heic", "heif" -> "image/heic"
         "bmp" -> "image/bmp"
         else -> "image/jpeg"
+    }
+
+    // ---------- Destination verification (move must never eat the source) ----------
+
+    /** Query the SIZE column of a content URI (null when unreadable). */
+    private fun sizeOf(context: Context, uri: Uri): Long? {
+        return try {
+            val cursor = context.contentResolver.query(
+                uri, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null
+            )
+            if (cursor == null) return null
+            var value: Long? = null
+            try {
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                    if (idx >= 0 && !cursor.isNull(idx)) value = cursor.getLong(idx)
+                }
+            } finally {
+                cursor.close()
+            }
+            value
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Verify a freshly written destination is REAL — openable and the expected
+     * number of bytes. Strict/virtualised providers (confirmed on HONOR
+     * Parallel Space) can publish a row that looks successful yet resolves to
+     * an empty or unreadable file. A move deletes the original only after this
+     * check passes, so a phantom copy can never turn into data loss.
+     * [expectedSize] is the source's size when known; a positive-but-shorter
+     * result means a truncated write.
+     */
+    private fun isReadableCopy(context: Context, uri: Uri, expectedSize: Long?): Boolean {
+        val fd = try {
+            context.contentResolver.openFileDescriptor(uri, "r")
+        } catch (e: Exception) {
+            null
+        }
+        if (fd == null) return false
+        var ok = false
+        try {
+            val stat = fd.statSize
+            ok = if (expectedSize != null && expectedSize > 0L) {
+                stat >= expectedSize ||
+                    (stat < 0L && (sizeOf(context, uri) ?: -1L) >= expectedSize)
+            } else {
+                stat > 0L || (sizeOf(context, uri) ?: -1L) > 0L
+            }
+        } catch (e: Exception) {
+            ok = false
+        } finally {
+            try { fd.close() } catch (_: Exception) {}
+        }
+        return ok
     }
 
     // ---------- Source deletion after copy ----------

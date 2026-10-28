@@ -521,12 +521,14 @@ fun AreaSelectionDialog(
                     }
                 }
 
-                // Action row — fixed bottom padding (some ROMs deliver no
-                // window insets into Dialog composables).
+                // Action row — fixed generous bottom padding (some ROMs deliver
+                // no window insets into Dialog composables; HONOR Parallel Space
+                // overlays its gesture area at the very bottom, which made the
+                // buttons untappable at 24.dp).
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 24.dp),
+                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 56.dp),
                     horizontalArrangement = Arrangement.End
                 ) {
                     TextButton(onClick = onDismiss) {
