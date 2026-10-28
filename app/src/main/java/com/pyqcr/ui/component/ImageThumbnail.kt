@@ -44,19 +44,38 @@ fun ImageThumbnail(
             .background(backgroundColor)
     ) {
         if (imageUri.contains("/video/")) {
-            // Videos can't be thumbnail-decoded by Coil — render a dark tile
-            // with a play badge, exactly like the recycle-bin grid tile.
+            // Videos now preview a REAL frame: the app ImageLoader registers
+            // coil-video's VideoFrameDecoder, so a video URI decodes like an
+            // image. While decoding — or when the row cannot be read (trashed
+            // videos) — the old dark play-tile is the placeholder, and a
+            // corner ▶ keeps marking the tile as a video.
+            SubcomposeAsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(imageUri)
+                    .size(400)             // Limit decode size
+                    .crossfade(true)
+                    .build(),
+                contentDescription = "Video",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = contentScale,
+                loading = { VideoTileFallback() },
+                error = { VideoTileFallback() }
+            )
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xFF263238)),
-                contentAlignment = Alignment.Center
+                    .align(Alignment.BottomEnd)
+                    .padding(4.dp)
+                    .background(
+                        Color(0xCC000000),
+                        shape = MaterialTheme.shapes.small
+                    )
+                    .padding(1.dp)
             ) {
                 Icon(
                     Icons.Default.PlayArrow,
-                    contentDescription = "Video",
+                    contentDescription = null,
                     tint = Color.White,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(14.dp)
                 )
             }
         } else {
@@ -133,5 +152,24 @@ fun ImageThumbnail(
                 )
             }
         }
+    }
+}
+
+/** Dark play-tile shown while a video frame is still decoding, or when the
+ * row cannot be read at all (e.g. trashed media, whose reads are blocked). */
+@Composable
+private fun VideoTileFallback() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF263238)),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Default.PlayArrow,
+            contentDescription = "Video",
+            tint = Color.White,
+            modifier = Modifier.size(32.dp)
+        )
     }
 }

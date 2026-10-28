@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -142,6 +143,18 @@ fun VaultScreen(onBack: () -> Unit) {
 
     // Folder drill-down state: null = vault folder list, otherwise one folder
     var currentFolder by remember { mutableStateOf<String?>(null) }
+
+    // System Back: leave the current vault folder first; the viewer and the
+    // dialogs are Dialogs — they consume the back press themselves.
+    BackHandler(enabled = currentFolder != null && viewingEntry == null) {
+        currentFolder = null
+    }
+
+    // System Back: leaving multi-select restores the plain browse UI.
+    BackHandler(enabled = vaultMultiSelect && viewingEntry == null && currentFolder == null) {
+        vaultMultiSelect = false
+        vaultSelection = emptySet()
+    }
 
     // Full-screen viewer state (pinch-zoom + pan, swipe-up actions panel)
     val viewingId = viewingEntry?.id

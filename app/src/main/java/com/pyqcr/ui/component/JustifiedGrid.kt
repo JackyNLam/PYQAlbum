@@ -108,21 +108,24 @@ fun JustifiedGrid(
                             )
                     ) {
                         if (image.uri.contains("/video/")) {
-                            // Videos can't be decoded by Coil — dark tile with
-                            // a play badge, same as the GRID/Waterfall layouts.
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color(0xFF263238)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    Icons.Default.PlayArrow,
-                                    contentDescription = "Video",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(36.dp)
-                                )
-                            }
+                            // Videos preview a REAL frame now: the app
+                            // ImageLoader registers coil-video's
+                            // VideoFrameDecoder, so the URI decodes like an
+                            // image. The old dark play tile stays as the
+                            // loading/error placeholder.
+                            SubcomposeAsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(image.uri)
+                                    .size(coil3.size.Size(400, (rowHeight.value * 3).toInt()))
+                                    .crossfade(true)
+                                    .scale(Scale.FILL)
+                                    .build(),
+                                contentDescription = image.displayName,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop,
+                                loading = { VideoTilePlaceholder() },
+                                error = { VideoTilePlaceholder() }
+                            )
                         } else {
                             SubcomposeAsyncImage(
                                 model = ImageRequest.Builder(context)
@@ -274,5 +277,23 @@ fun JustifiedGrid(
                 }
             }
         }
+    }
+}
+
+/** Dark play tile for video cells that are still decoding or unreadable. */
+@Composable
+private fun VideoTilePlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF263238)),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Default.PlayArrow,
+            contentDescription = "Video",
+            tint = Color.White,
+            modifier = Modifier.size(36.dp)
+        )
     }
 }

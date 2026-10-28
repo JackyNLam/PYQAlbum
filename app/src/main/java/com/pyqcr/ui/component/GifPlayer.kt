@@ -122,19 +122,18 @@ fun GifPlayer(
         }
     }
 
-    /** Save the frame at the current position as a PNG screenshot. */
+    /** Save EXACTLY what is on screen as a PNG screenshot: the live frame
+     * view is redrawn at the current frameTime into a view-sized bitmap, so
+     * the capture can never differ from the moment the user is looking at. */
     val captureScreenshot: () -> Unit = {
-        val m = movie
-        if (m == null) {
+        val v = frameView
+        if (v == null || movie == null || v.width <= 0 || v.height <= 0) {
             Toast.makeText(context, "GIF is not loaded yet", Toast.LENGTH_SHORT).show()
         } else {
             try {
-                val w = if (m.width() > 0) m.width() else 320
-                val h = if (m.height() > 0) m.height() else 240
-                val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                val canvas = Canvas(bmp)
-                m.setTime(positionMs.toInt())
-                m.draw(canvas, 0f, 0f)
+                v.frameTime = positionMs.toInt()
+                val bmp = Bitmap.createBitmap(v.width, v.height, Bitmap.Config.ARGB_8888)
+                v.draw(Canvas(bmp))
                 val saved = FileOperationHelper.savePngScreenshot(context, bmp, "PYQAlbum_GIF")
                 Toast.makeText(
                     context,

@@ -999,6 +999,71 @@ object FileOperationHelper {
     }
 
     /**
+     * Current DISPLAY_NAME of a MediaStore row (image or video), or null when
+     * the row is gone / unreadable.
+     */
+    fun displayNameOf(context: Context, uriStr: String): String? {
+        val uri = try {
+            Uri.parse(uriStr)
+        } catch (e: Exception) {
+            return null
+        }
+        return try {
+            var name: String? = null
+            val c = context.contentResolver.query(
+                uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null
+            )
+            if (c != null) {
+                try {
+                    if (c.moveToFirst()) name = c.getString(0)
+                } finally {
+                    c.close()
+                }
+            }
+            name
+        } catch (e: Exception) {
+            Log.w(TAG, "displayNameOf failed for $uriStr", e)
+            null
+        }
+    }
+
+    /**
+     * Rename a MediaStore image/video row in place: updates DISPLAY_NAME
+     * (+ TITLE) — on API 29+ MediaProvider renames the underlying file too,
+     * for rows the app may write (its own files, or anything once All-files
+     * access is granted; otherwise 0 rows are affected and this returns
+     * false). [newBaseName] is the name WITHOUT extension — the row's current
+     * extension is kept. The content URI does not change on rename, so tags /
+     * ratings / favourites keyed by URI survive. True on success (including
+     * when the row already carries the requested name).
+     */
+    fun renameMedia(context: Context, uriStr: String, newBaseName: String): Boolean {
+        val clean = newBaseName.trim().replace("/", "_").replace("\\", "_")
+        if (clean.isEmpty()) return false
+        val oldName = displayNameOf(context, uriStr) ?: return false
+        val ext = oldName.substringAfterLast('.', "")
+        val target = if (ext.isEmpty()) clean else "$clean.$ext"
+        if (target == oldName) return true
+        val uri = try {
+            Uri.parse(uriStr)
+        } catch (e: Exception) {
+            return false
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, target)
+            put(MediaStore.MediaColumns.TITLE, clean)
+        }
+        return try {
+            val n = context.contentResolver.update(uri, values, null, null)
+            if (n <= 0) Log.w(TAG, "renameMedia: 0 rows updated for $uriStr -> $target")
+            n > 0
+        } catch (e: Exception) {
+            Log.w(TAG, "renameMedia failed for $uriStr -> $target", e)
+            false
+        }
+    }
+
+    /**
      * Save a bitmap as a PNG into the shared Pictures/PYQAlbum/Screenshots
      * folder (MediaStore insert, zero-permission on API 29+ via RELATIVE_PATH;
      * IS_PENDING hides the file until the write completes). Returns the new

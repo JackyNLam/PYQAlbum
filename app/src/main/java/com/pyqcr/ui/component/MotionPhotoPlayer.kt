@@ -82,6 +82,10 @@ fun MotionPhotoPlayer(
     // Live playback state, driven by the MediaPlayer instance held in
     // [playerRef] (set when the view's player is built, cleared on release).
     var playerRef by remember(videoPath) { mutableStateOf<MediaPlayer?>(null) }
+    // The live TextureView — held so the screenshot can grab the EXACT frame
+    // composited on screen (TextureView.getBitmap) instead of seeking a
+    // keyframe that may be seconds away from what the user is looking at.
+    var textureRef by remember(videoPath) { mutableStateOf<TextureView?>(null) }
     var isPlaying by remember(videoPath) { mutableStateOf(false) }
     var positionMs by remember(videoPath) { mutableFloatStateOf(0f) }
     var durationMs by remember(videoPath) { mutableFloatStateOf(0f) }
@@ -116,25 +120,34 @@ fun MotionPhotoPlayer(
         }
     }
 
-    // Screenshot capture: grab the full-resolution frame at the current
-    // position via MediaMetadataRetriever (closest sync frame), save it as a
-    // PNG into Pictures/PYQAlbum/Screenshots and confirm with a toast. The
-    // retriever is released even when the grab itself throws.
+    // Screenshot capture: grab the CURRENT on-screen frame straight from the
+    // TextureView — exactly the moment shown on screen. (The old path used
+    // MediaMetadataRetriever, which snaps the nearest SYNC keyframe and could
+    // save a visibly different moment.) The retriever stays as a fallback for
+    // the rare case where the view holds no bitmap yet. Saves a PNG into
+    // Pictures/PYQAlbum/Screenshots and confirms with a toast.
     val captureScreenshot: () -> Unit = {
         var frame: Bitmap? = null
-        val retriever = MediaMetadataRetriever()
         try {
-            retriever.setDataSource(videoPath)
-            frame = retriever.getFrameAtTime(
-                (positionMs * 1000).toLong(),
-                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-            )
+            frame = textureRef?.bitmap
         } catch (e: Exception) {
             frame = null
-        } finally {
+        }
+        if (frame == null) {
+            val retriever = MediaMetadataRetriever()
             try {
-                retriever.release()
+                retriever.setDataSource(videoPath)
+                frame = retriever.getFrameAtTime(
+                    (positionMs * 1000).toLong(),
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                )
             } catch (e: Exception) {
+                frame = null
+            } finally {
+                try {
+                    retriever.release()
+                } catch (e: Exception) {
+                }
             }
         }
         if (frame != null) {
@@ -166,6 +179,7 @@ fun MotionPhotoPlayer(
             AndroidView(
                 factory = { ctx ->
                     TextureView(ctx).apply {
+                        textureRef = this
                         surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                             override fun onSurfaceTextureAvailable(
                                 surface: SurfaceTexture,
@@ -177,7 +191,7 @@ fun MotionPhotoPlayer(
                                         setDataSource(videoPath)
                                         setSurface(Surface(surface))
                                         isLooping = true
-                                        setVolume(0f, 0f) // motion clips are silent
+                                        setVolume(1f, 1f) // motion clips play with sound
                                         setOnPreparedListener { p ->
                                             // Only start when THIS view's player is
                                             // still alive (tag is cleared on release).
@@ -254,6 +268,9 @@ fun MotionPhotoPlayer(
                     }
                     it.tag = null
                     playerRef = null
+                    // Only clear the shared ref if it still points at THIS view
+                    // (a retry recreates the view before this release runs).
+                    if (textureRef === it) textureRef = null
                     isPlaying = false
                 }
             )

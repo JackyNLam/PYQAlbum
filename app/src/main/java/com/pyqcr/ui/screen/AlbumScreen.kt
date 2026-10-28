@@ -70,6 +70,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.content.ContentValues
+import androidx.activity.compose.BackHandler
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -542,6 +543,29 @@ fun AlbumScreen(
     var binFolder by remember { mutableStateOf<String?>(null) }
     var binViewerIndex by remember { mutableIntStateOf(-1) }
 
+    // System Back walks the in-app steps back (drawer → bin viewer → bin folder
+    // list / folder / tag drill-down → multi-select → browse mode) instead of
+    // leaving the gallery on the first press. Dialogs — including the full
+    // bin viewer — consume the back press themselves.
+    BackHandler(
+        enabled = drawerState.isOpen || binViewerIndex >= 0 || binFolder != null ||
+            isMultiSelectMode || selectedFolder != null || selectedTagName != null ||
+            selectedBrowseMode != BrowseMode.FOLDER
+    ) {
+        when {
+            drawerState.isOpen -> scope.launch { drawerState.close() }
+            binViewerIndex >= 0 -> binViewerIndex = -1
+            binFolder != null -> binFolder = null
+            isMultiSelectMode -> {
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            }
+            selectedFolder != null -> selectedFolder = null
+            selectedTagName != null -> selectedTagName = null
+            else -> selectedBrowseMode = BrowseMode.FOLDER
+        }
+    }
+
     // Bin permanent-delete fallback: when the direct trash-volume delete cannot
     // remove a row (rows this app does not own, without All-files access), the
     // system delete-request dialog performs the permanent delete on approval.
@@ -820,6 +844,34 @@ fun AlbumScreen(
     var collageImageOrder by remember { mutableStateOf<List<String>>(emptyList()) }
     var showResizeDialog by remember { mutableStateOf(false) }
     var showAiEditRoleDialog by remember { mutableStateOf(false) }
+    // Rename-file dialog (batch ⋮ menu — single selection only)
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameTargetUri by remember { mutableStateOf<String?>(null) }
+    var renameBaseDraft by remember { mutableStateOf("") }
+    var renameExtDraft by remember { mutableStateOf("") }
+
+    /** Load the file name of [uri] into the rename dialog. */
+    val openRenameDialog: (String) -> Unit = { uri ->
+        scope.launch {
+            val name = withContext(Dispatchers.IO) {
+                FileOperationHelper.displayNameOf(context, uri)
+            }
+            if (name.isNullOrBlank()) {
+                snackbarHostState.showSnackbar("Could not read the file name")
+            } else {
+                val dot = name.lastIndexOf('.')
+                if (dot > 0) {
+                    renameBaseDraft = name.substring(0, dot)
+                    renameExtDraft = name.substring(dot + 1)
+                } else {
+                    renameBaseDraft = name
+                    renameExtDraft = ""
+                }
+                renameTargetUri = uri
+                showRenameDialog = true
+            }
+        }
+    }
 
     /** Open the collage options dialog (background color / columns / image order). */
     val openCollageDialog: () -> Unit = {
@@ -905,15 +957,16 @@ fun AlbumScreen(
         }
     }
 
-    /** Resize selected images to target pixel width. */
-    val batchResize: (List<String>, Int, String) -> Unit = { uris, targetWidth, saveMode ->
+    /** Resize selected images to target pixel width; [padSquare] pads each
+     *  scaled result onto a white square canvas. */
+    val batchResize: (List<String>, Int, String, Boolean) -> Unit = { uris, targetWidth, saveMode, padSquare ->
         scope.launch {
             try {
                 var successCount = 0
                 var failCount = 0
                 for (uriStr in uris) {
                     val ok = withContext(Dispatchers.IO) {
-                        resizeSingleImageToWidth(context, uriStr, targetWidth, saveMode)
+                        resizeSingleImageToWidth(context, uriStr, targetWidth, saveMode, padSquare)
                     }
                     if (ok) successCount++ else failCount++
                 }
@@ -1709,6 +1762,10 @@ fun AlbumScreen(
                         onResize = {
                             showResizeDialog = true
                         },
+                        onRename = {
+                            val uri = selectedImageUris.firstOrNull()
+                            if (uri != null) openRenameDialog(uri)
+                        },
                         onAiEdit = {
                             showAiEditRoleDialog = true
                         },
@@ -1973,7 +2030,7 @@ fun AlbumScreen(
                                         gridState = gridState,
                                         waterfallState = waterfallState,
                                         justifiedState = justifiedState,
-                                        onImageClick = { uri, _ ->
+                                        onImageClick = { uri, imageList ->
                                             if (isMultiSelectMode) {
                                                 selectedImageUris = if (uri in selectedImageUris)
                                                     selectedImageUris - uri
@@ -1995,7 +2052,10 @@ fun AlbumScreen(
                                                         savedJustifiedOffset = justifiedState.firstVisibleItemScrollOffset
                                                     }
                                                 }
-                                                onImageClick(uri, folderItems.map { it.uri })
+                                                // Viewer follows the grid's CURRENT display order
+                                                // (grouped views reorder items) — feature: swipe
+                                                // left/right walks the list as shown.
+                                                onImageClick(uri, imageList)
                                             }
                                         },
                                         onMultiSelectImageToggle = { uri ->
@@ -2778,9 +2838,62 @@ fun AlbumScreen(
                 ResizeOptionsDialog(
                     imageCount = selectedImageUris.size,
                     onDismiss = { showResizeDialog = false },
-                    onConfirm = { targetWidth, saveMode ->
+                    onConfirm = { targetWidth, saveMode, padSquare ->
                         showResizeDialog = false
-                        batchResize(selectedImageUris.toList(), targetWidth, saveMode)
+                        batchResize(selectedImageUris.toList(), targetWidth, saveMode, padSquare)
+                    }
+                )
+            }
+            // Rename-file dialog (batch ⋮ menu, single selection)
+            if (showRenameDialog) {
+                AlertDialog(
+                    onDismissRequest = { showRenameDialog = false },
+                    title = { Text("Rename file") },
+                    text = {
+                        Column {
+                            OutlinedTextField(
+                                value = renameBaseDraft,
+                                onValueChange = { renameBaseDraft = it },
+                                label = { Text("File name") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            if (renameExtDraft.isNotEmpty()) {
+                                Text(
+                                    text = "The extension .$renameExtDraft is kept",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                showRenameDialog = false
+                                val uri = renameTargetUri
+                                val base = renameBaseDraft.trim().replace("/", "_").replace("\\", "_")
+                                if (uri != null && base.isNotEmpty()) {
+                                    scope.launch {
+                                        val ok = withContext(Dispatchers.IO) {
+                                            FileOperationHelper.renameMedia(context, uri, base)
+                                        }
+                                        viewModel.refreshImages()
+                                        if (ok) {
+                                            isMultiSelectMode = false
+                                            selectedImageUris = emptySet()
+                                            snackbarHostState.showSnackbar("Renamed to $base")
+                                        } else {
+                                            snackbarHostState.showSnackbar("Rename failed — the file is protected or was removed")
+                                        }
+                                    }
+                                }
+                            }
+                        ) { Text("Rename") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") }
                     }
                 )
             }
@@ -2895,6 +3008,7 @@ private fun BatchMultiSelectBar(
     onFavourite: () -> Unit,
     onSelectForAi: () -> Unit,
     onResize: () -> Unit,
+    onRename: () -> Unit,
     onAiEdit: () -> Unit,
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit,
@@ -2990,6 +3104,12 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onResize() },
                         text = { Text("Resize") },
                         leadingIcon = { Icon(Icons.Default.PhotoSizeSelectLarge, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onRename() },
+                        enabled = selectedCount == 1,
+                        text = { Text("Rename") },
+                        leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     HorizontalDivider()
                     DropdownMenuItem(
@@ -3121,6 +3241,16 @@ private fun ImageGridView(
         }
     }
 
+    // The URI list handed to the viewer must be the DISPLAY order — grouped
+    // grids reorder items — so swipe left/right follows what the user sees.
+    val displayUris = remember(imageUris, groups, groupByMode) {
+        if (groupByMode != GroupByMode.NONE && groups.isNotEmpty()) {
+            groups.flatMap { entry -> entry.value.map { it.uri } }
+        } else {
+            imageUris
+        }
+    }
+
     when (viewLayout) {
         ViewLayout.GRID -> {
             if (groupByMode != GroupByMode.NONE && groups.isNotEmpty()) {
@@ -3145,7 +3275,7 @@ private fun ImageGridView(
                         items(groupImages, key = { it.uri }) { image ->
                             ImageGridCell(
                                 image = image,
-                                imageUris = imageUris,
+                                imageUris = displayUris,
                                 isMultiSelectMode = isMultiSelectMode,
                                 selectedImageUris = selectedImageUris,
                                 aiSelectedUris = aiSelectedUris,
@@ -3172,7 +3302,7 @@ private fun ImageGridView(
                     items(images, key = { it.uri }) { image ->
                         ImageGridCell(
                             image = image,
-                            imageUris = imageUris,
+                            imageUris = displayUris,
                             isMultiSelectMode = isMultiSelectMode,
                             selectedImageUris = selectedImageUris,
                             aiSelectedUris = aiSelectedUris,
@@ -3187,7 +3317,7 @@ private fun ImageGridView(
         }
 
         ViewLayout.WATERFALL -> {
-            val gridClick: (String) -> Unit = { uri -> onImageClick(uri, imageUris) }
+            val gridClick: (String) -> Unit = { uri -> onImageClick(uri, displayUris) }
             WaterfallGrid(
                 images = images,
                 columns = 3,
@@ -3204,7 +3334,7 @@ private fun ImageGridView(
         }
 
         ViewLayout.JUSTIFIED -> {
-            val justifiedClick: (String) -> Unit = { uri -> onImageClick(uri, imageUris) }
+            val justifiedClick: (String) -> Unit = { uri -> onImageClick(uri, displayUris) }
             JustifiedGrid(
                 images = images,
                 state = justifiedState,
@@ -3674,19 +3804,21 @@ internal object FileUtils {
 
 /**
  * Batch resize options dialog.
- * Lets the user choose a target width (500 / 1000 / 2000 / custom) and
- * whether to replace the original or save a copy with "_resized" suffix.
+ * Lets the user choose a target width (500 / 1000 / 2000 / custom),
+ * whether to replace the original or save a copy with "_resized" suffix,
+ * and an optional white square pad (letterbox onto a square canvas).
  */
 @Composable
 internal fun ResizeOptionsDialog(
     imageCount: Int,
     onDismiss: () -> Unit,
-    onConfirm: (targetWidth: Int, saveMode: String) -> Unit
+    onConfirm: (targetWidth: Int, saveMode: String, padSquare: Boolean) -> Unit
 ) {
     var selectedWidth by remember { mutableIntStateOf(500) }
     var customWidth by remember { mutableStateOf("") }
     var saveMode by remember { mutableStateOf("replace") }
     var useCustom by remember { mutableStateOf(false) }
+    var padSquare by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3737,13 +3869,24 @@ internal fun ResizeOptionsDialog(
                     )
                     Text("Save as copy with \"_resized\" suffix", modifier = Modifier.padding(start = 4.dp))
                 }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.clickable { padSquare = !padSquare },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = padSquare,
+                        onCheckedChange = { padSquare = it }
+                    )
+                    Text("Pad to square (white background)", modifier = Modifier.padding(start = 4.dp))
+                }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
                     val w = if (useCustom) customWidth.toIntOrNull() ?: 500 else selectedWidth
-                    onConfirm(w, saveMode)
+                    onConfirm(w, saveMode, padSquare)
                 },
                 enabled = !useCustom || customWidth.toIntOrNull() != null
             ) {
@@ -3761,14 +3904,17 @@ internal fun ResizeOptionsDialog(
 /**
  * Resize one image to [targetWidth] pixels wide. [saveMode] is either
  * "replace" (re-compress the original MediaStore row in place) or "suffix"
- * (save a new "_resized" copy). Shared by the album batch menu and the
- * single-image detail panel. Returns true on success.
+ * (save a new "_resized" copy). [padSquare] pads the scaled image onto a
+ * white square canvas (side = larger result edge, image centered).
+ * Shared by the album batch menu and the single-image detail panel.
+ * Returns true on success.
  */
 internal suspend fun resizeSingleImageToWidth(
     context: Context,
     uriStr: String,
     targetWidth: Int,
-    saveMode: String
+    saveMode: String,
+    padSquare: Boolean = false
 ): Boolean {
     return withContext(Dispatchers.IO) {
         try {
@@ -3790,8 +3936,20 @@ internal suspend fun resizeSingleImageToWidth(
 
             val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
             val sampled = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOpts) } ?: return@withContext false
-            val resized = Bitmap.createScaledBitmap(sampled, fw, fh, true)
+            val scaled = Bitmap.createScaledBitmap(sampled, fw, fh, true)
             sampled.recycle()
+            // White square pad: side = larger result edge, image centered.
+            val resized = if (padSquare) {
+                val side = maxOf(fw, fh)
+                val square = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
+                val padCanvas = android.graphics.Canvas(square)
+                padCanvas.drawColor(android.graphics.Color.WHITE)
+                padCanvas.drawBitmap(scaled, (side - fw) / 2f, (side - fh) / 2f, null)
+                scaled.recycle()
+                square
+            } else {
+                scaled
+            }
 
             when (saveMode) {
                 "replace" -> {

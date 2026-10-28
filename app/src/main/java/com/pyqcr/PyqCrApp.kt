@@ -4,6 +4,7 @@ import android.app.Application
 import coil3.ImageLoader
 import coil3.disk.DiskCache
 import coil3.gif.GifDecoder
+import coil3.video.VideoFrameDecoder
 import coil3.memory.MemoryCache
 import coil3.request.CachePolicy
 import coil3.request.crossfade
@@ -43,6 +44,9 @@ class PyqCrApp : Application() {
             .components {
                 // Animated GIF / animated WebP support (coil-gif)
                 add(GifDecoder.Factory())
+                // Video frame thumbnails: a video URI renders a real frame
+                // instead of failing to decode (coil-video)
+                add(VideoFrameDecoder.Factory())
             }
             .logger(DebugLogger())
             .build()

@@ -7,9 +7,12 @@ import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,15 +20,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import com.pyqcr.ai.BrushMask
 import com.pyqcr.ai.BrushStroke
@@ -46,6 +51,11 @@ private enum class SelectionMode { RECT, BRUSH }
  *
  * Coordinates are 0f..1f relative to the image itself (not the container),
  * accounting for letterboxing from ContentScale.Fit.
+ *
+ * Two fingers pinch-zoom / pan the PREVIEW only: strokes are stored in
+ * image-normalized space, so the selection tracks the image at any zoom.
+ * Every completed stroke is APPENDED to the list — painting several times
+ * accumulates all brushed areas (undo pops the newest stroke).
  */
 @Composable
 fun AreaSelectionDialog(
@@ -57,12 +67,17 @@ fun AreaSelectionDialog(
     var mode by remember { mutableStateOf(SelectionMode.RECT) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
-    var strokes by remember { mutableStateOf<List<BrushStroke>>(emptyList()) }
+    // Snapshot list — commit is an append, never a whole-list replacement,
+    // so no stale-capture path can drop earlier strokes.
+    val strokes = remember { mutableStateListOf<BrushStroke>() }
     var activeStroke by remember { mutableStateOf<BrushStroke?>(null) }
     var brushSize by remember { mutableFloatStateOf(0.04f) }
     var eraser by remember { mutableStateOf(false) }
     var containerSize by remember { mutableStateOf(Size.Zero) }
     var imageDims by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var panX by remember { mutableFloatStateOf(0f) }
+    var panY by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
 
     // Load intrinsic image dimensions so we can compute the actual
@@ -73,17 +88,20 @@ fun AreaSelectionDialog(
     }
 
     // Pre-fill the tool with an existing selection (e.g. re-opening the dialog
-    // to refine a previously selected source).
+    // to refine a previously selected source). A stored brush mask wins over
+    // the default whole-image crop rect, and its strokes are restored so new
+    // strokes append to them instead of starting over.
     LaunchedEffect(imageUri, initialSelection) {
-        if (initialSelection?.cropRect?.isValid() == true) {
-            mode = SelectionMode.RECT
-        } else if (initialSelection?.hasMask == true) {
+        if (initialSelection?.hasMask == true) {
             mode = SelectionMode.BRUSH
-            strokes = initialSelection.mask!!.strokes
+            strokes.clear()
+            strokes.addAll(initialSelection.mask!!.strokes)
+        } else if (initialSelection?.cropRect?.isValid() == true) {
+            mode = SelectionMode.RECT
         }
     }
 
-    /** Map a container-space position to image-normalized 0..1 space, clamped. */
+    /** Map a layer-space position to image-normalized 0..1 space, clamped. */
     fun normalizedPoint(pos: Offset): BrushStrokePoint {
         val dims = imageDims
         if (dims != null && containerSize.width > 0 && containerSize.height > 0) {
@@ -105,7 +123,7 @@ fun AreaSelectionDialog(
         )
     }
 
-    /** Map an image-normalized point back to container space for the overlay. */
+    /** Map an image-normalized point back to layer space for the overlay. */
     fun containerPoint(n: BrushStrokePoint): Offset {
         val dims = imageDims
         if (dims != null && containerSize.width > 0 && containerSize.height > 0) {
@@ -121,19 +139,50 @@ fun AreaSelectionDialog(
         return Offset(n.x * containerSize.width, n.y * containerSize.height)
     }
 
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            shape = RoundedCornerShape(16.dp)
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color.Black
         ) {
-            Column {
-                Text(
-                    if (mode == SelectionMode.RECT) "Select area to edit" else "Paint area to keep",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(16.dp)
-                )
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Top bar: close, title, undo (brush), zoom reset
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Cancel",
+                            tint = Color.White
+                        )
+                    }
+                    Text(
+                        if (mode == SelectionMode.RECT) "Select area to edit" else "Paint area to keep",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1
+                    )
+                    if (mode == SelectionMode.BRUSH && strokes.isNotEmpty()) {
+                        TextButton(onClick = {
+                            strokes.removeAt(strokes.lastIndex)
+                            activeStroke = null
+                        }) { Text("Undo", color = Color.White) }
+                    }
+                    if (zoom > 1f) {
+                        TextButton(onClick = {
+                            zoom = 1f
+                            panX = 0f
+                            panY = 0f
+                        }) { Text("Reset zoom", color = Color.White) }
+                    }
+                }
 
                 // Rectangle / Brush tool switcher
                 SingleChoiceSegmentedButtonRow(
@@ -143,7 +192,12 @@ fun AreaSelectionDialog(
                 ) {
                     SegmentedButton(
                         selected = mode == SelectionMode.RECT,
-                        onClick = { mode = SelectionMode.RECT; dragStart = null; dragEnd = null; activeStroke = null },
+                        onClick = {
+                            mode = SelectionMode.RECT
+                            dragStart = null
+                            dragEnd = null
+                            activeStroke = null
+                        },
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
                     ) {
                         Text("Rectangle")
@@ -159,23 +213,56 @@ fun AreaSelectionDialog(
 
                 Spacer(Modifier.height(8.dp))
 
-                // Image area with gesture handling for the active tool
+                // Full-screen image area with gesture handling for the active
+                // tool. graphicsLayer applies the pinch-zoom and pointerInput
+                // sits INSIDE it, so delivered positions are already in the
+                // image's own (pre-zoom) space — painting tracks the zoomed
+                // image with no manual transform math.
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 250.dp, max = 450.dp)
-                        .pointerInput(Unit) {
+                        .weight(1f)
+                        .graphicsLayer {
+                            scaleX = zoom
+                            scaleY = zoom
+                            translationX = panX
+                            translationY = panY
+                        }
+                        .pointerInput(mode) {
                             awaitEachGesture {
-                                val down = awaitFirstDown()
+                                val down = awaitFirstDown(requireUnconsumed = false)
                                 if (mode == SelectionMode.RECT) {
                                     dragStart = down.position
                                     dragEnd = down.position
-                                    drag(down.id) { change ->
-                                        change.consume()
-                                        dragEnd = change.position
-                                    }
+                                    var pinch = false
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        if (event.changes.count { it.pressed } >= 2) {
+                                            pinch = true
+                                        }
+                                        if (!pinch) {
+                                            val change = event.changes.firstOrNull { it.pressed }
+                                            if (change != null) {
+                                                change.consume()
+                                                dragEnd = change.position
+                                            }
+                                        } else {
+                                            val zoomChange = event.calculateZoom()
+                                            val panChange = event.calculatePan()
+                                            zoom = (zoom * zoomChange).coerceIn(1f, 8f)
+                                            if (zoom > 1f) {
+                                                panX += panChange.x
+                                                panY += panChange.y
+                                            } else {
+                                                panX = 0f
+                                                panY = 0f
+                                            }
+                                            event.changes.forEach {
+                                                if (it.positionChanged()) it.consume()
+                                            }
+                                        }
+                                    } while (event.changes.any { it.pressed })
                                 } else {
-                                    activeStroke = null
                                     val pts = mutableListOf<BrushStrokePoint>()
                                     fun addPoint(pos: Offset) {
                                         val n = normalizedPoint(pos)
@@ -196,22 +283,64 @@ fun AreaSelectionDialog(
                                         )
                                     }
                                     addPoint(down.position)
-                                    drag(down.id) { change ->
-                                        change.consume()
-                                        addPoint(change.position)
-                                    }
-                                    if (pts.isNotEmpty()) {
-                                        strokes = strokes + BrushStroke(
-                                            points = pts,
-                                            radius = brushSize,
-                                            eraser = eraser
+                                    var pinch = false
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        val pressedCount = event.changes.count { it.pressed }
+                                        if (!pinch && pressedCount >= 2) {
+                                            pinch = true
+                                            // Commit what was painted so far before
+                                            // the pinch takes over — nothing is lost.
+                                            if (pts.isNotEmpty()) {
+                                                strokes.add(
+                                                    BrushStroke(
+                                                        points = pts.toList(),
+                                                        radius = brushSize,
+                                                        eraser = eraser
+                                                    )
+                                                )
+                                                pts.clear()
+                                            }
+                                            activeStroke = null
+                                        }
+                                        if (!pinch) {
+                                            val change = event.changes.firstOrNull { it.pressed }
+                                            if (change != null) {
+                                                change.consume()
+                                                addPoint(change.position)
+                                            }
+                                        } else {
+                                            val zoomChange = event.calculateZoom()
+                                            val panChange = event.calculatePan()
+                                            zoom = (zoom * zoomChange).coerceIn(1f, 8f)
+                                            if (zoom > 1f) {
+                                                panX += panChange.x
+                                                panY += panChange.y
+                                            } else {
+                                                panX = 0f
+                                                panY = 0f
+                                            }
+                                            event.changes.forEach {
+                                                if (it.positionChanged()) it.consume()
+                                            }
+                                        }
+                                    } while (event.changes.any { it.pressed })
+                                    if (!pinch && pts.isNotEmpty()) {
+                                        strokes.add(
+                                            BrushStroke(
+                                                points = pts.toList(),
+                                                radius = brushSize,
+                                                eraser = eraser
+                                            )
                                         )
-                                        activeStroke = null
                                     }
+                                    activeStroke = null
                                 }
                             }
                         }
-                        .onSizeChanged { containerSize = Size(it.width.toFloat(), it.height.toFloat()) }
+                        .onSizeChanged {
+                            containerSize = Size(it.width.toFloat(), it.height.toFloat())
+                        }
                 ) {
                     AsyncImage(
                         model = imageUri,
@@ -234,10 +363,10 @@ fun AreaSelectionDialog(
 
                             // Dim outside the selection via four rects (avoids BlendMode issues)
                             val dim = Color(0x80000000)
-                            drawRect(dim, topLeft = Offset.Zero, size = Size(w, top))           // top
-                            drawRect(dim, topLeft = Offset(0f, bottom), size = Size(w, h - bottom)) // bottom
-                            drawRect(dim, topLeft = Offset(0f, top), size = Size(left, bottom - top)) // left
-                            drawRect(dim, topLeft = Offset(right, top), size = Size(w - right, bottom - top)) // right
+                            drawRect(dim, topLeft = Offset.Zero, size = Size(w, top))
+                            drawRect(dim, topLeft = Offset(0f, bottom), size = Size(w, h - bottom))
+                            drawRect(dim, topLeft = Offset(0f, top), size = Size(left, bottom - top))
+                            drawRect(dim, topLeft = Offset(right, top), size = Size(w - right, bottom - top))
 
                             // Selection border
                             drawRect(
@@ -246,12 +375,6 @@ fun AreaSelectionDialog(
                                 size = Size(right - left, bottom - top),
                                 style = Stroke(width = 2.dp.toPx())
                             )
-                            // Crosshair indicator in center
-                            val cx = (left + right) / 2f
-                            val cy = (top + bottom) / 2f
-                            val cs = 6.dp.toPx()
-                            drawLine(Color.White, Offset(cx - cs, cy), Offset(cx + cs, cy), strokeWidth = 1f)
-                            drawLine(Color.White, Offset(cx, cy - cs), Offset(cx, cy + cs), strokeWidth = 1f)
                         }
                     } else {
                         // Painted strokes overlay — pre-rendered to an offscreen
@@ -285,14 +408,12 @@ fun AreaSelectionDialog(
 
                             // Strokes render in temporal order: paint strokes add
                             // opaque white, eraser strokes punch holes (CLEAR)
-                            // through only what was painted before them, so a new
-                            // stroke can repaint an earlier-erased area. The
-                            // in-progress stroke (activeStroke) is appended last
-                            // so brush/eraser feedback shows in real time.
-                            val allStrokes =
+                            // through only what was painted before them. Every
+                            // committed stroke is in the list, so all brushed
+                            // areas count — not just the first.
+                            val allStrokes: List<BrushStroke> =
                                 if (activeStroke != null) strokes + activeStroke!! else strokes
 
-                            // Paint strokes — full-opacity white
                             val paint = android.graphics.Paint().apply {
                                 color = android.graphics.Color.WHITE
                                 isAntiAlias = true
@@ -300,7 +421,6 @@ fun AreaSelectionDialog(
                                 strokeCap = android.graphics.Paint.Cap.ROUND
                                 strokeJoin = android.graphics.Paint.Join.ROUND
                             }
-                            // Eraser strokes — punch transparent holes
                             val erase = android.graphics.Paint().apply {
                                 isAntiAlias = true
                                 style = android.graphics.Paint.Style.STROKE
@@ -311,8 +431,8 @@ fun AreaSelectionDialog(
                                 )
                             }
                             for (stroke in allStrokes) {
-                                val strokePx = stroke.radius * reference
                                 if (stroke.points.isEmpty()) continue
+                                val strokePx = stroke.radius * reference
                                 val p = if (stroke.eraser) erase else paint
                                 p.strokeWidth = strokePx
                                 if (stroke.points.size == 1) {
@@ -353,7 +473,10 @@ fun AreaSelectionDialog(
                                 shape = RoundedCornerShape(8.dp)
                             ) {
                                 Text(
-                                    if (mode == SelectionMode.RECT) "Drag to select area" else "Paint to select area",
+                                    if (mode == SelectionMode.RECT)
+                                        "Drag to select area — pinch with two fingers to zoom"
+                                    else
+                                        "Paint to select area — pinch with two fingers to zoom",
                                     color = Color.White,
                                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)
                                 )
@@ -362,7 +485,7 @@ fun AreaSelectionDialog(
                     }
                 }
 
-                // Brush tool controls (size / eraser / clear)
+                // Brush tool controls (size / eraser / undo / clear)
                 if (mode == SelectionMode.BRUSH) {
                     Row(
                         modifier = Modifier
@@ -373,6 +496,7 @@ fun AreaSelectionDialog(
                         Text(
                             text = "Size ${(brushSize * 100).toInt()}%",
                             style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
                             modifier = Modifier.width(64.dp)
                         )
                         Slider(
@@ -389,21 +513,25 @@ fun AreaSelectionDialog(
                         )
                         Spacer(Modifier.width(4.dp))
                         TextButton(
-                            onClick = { strokes = emptyList(); activeStroke = null },
+                            onClick = { strokes.clear(); activeStroke = null },
                             enabled = strokes.isNotEmpty()
                         ) {
-                            Text("Clear")
+                            Text("Clear", color = Color.White)
                         }
                     }
                 }
 
+                // Action row — fixed bottom padding (some ROMs deliver no
+                // window insets into Dialog composables).
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(12.dp),
+                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 24.dp),
                     horizontalArrangement = Arrangement.End
                 ) {
-                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancel", color = Color.White)
+                    }
                     Spacer(Modifier.width(8.dp))
                     Button(
                         onClick = {
@@ -419,7 +547,7 @@ fun AreaSelectionDialog(
                                 }
                                 SelectionMode.BRUSH -> {
                                     if (strokes.isEmpty()) return@Button
-                                    onConfirm(EditSelection(mask = BrushMask(strokes)))
+                                    onConfirm(EditSelection(mask = BrushMask(strokes.toList())))
                                 }
                             }
                         },
@@ -435,63 +563,40 @@ fun AreaSelectionDialog(
 }
 
 /**
- * Convert drag coordinates (in container space) to a normalized [CropRect]
- * by mapping onto the actual displayed image bounds, accounting for
- * [ContentScale.Fit] letterboxing.
+ * Convert drag coordinates (in container/layer space) to a normalized
+ * [CropRect] (in image space), correctly accounting for ContentScale.Fit
+ * letterboxing — the image is centered, so empty margins must be subtracted.
  */
 private fun dragToCropRect(
-    dragStart: Offset,
-    dragEnd: Offset,
+    start: Offset,
+    end: Offset,
     containerSize: Size,
     imageDims: Pair<Int, Int>?
 ): CropRect {
-    val dims = imageDims
-    if (dims != null && containerSize.width > 0 && containerSize.height > 0) {
-        val imgW = dims.first.toFloat()
-        val imgH = dims.second.toFloat()
-
-        // ContentScale.Fit math
-        val scale = minOf(containerSize.width / imgW, containerSize.height / imgH)
-        val displayW = imgW * scale
-        val displayH = imgH * scale
-        val offsetX = (containerSize.width - displayW) / 2f
-        val offsetY = (containerSize.height - displayH) / 2f
-
-        // Clamp drag positions to the displayed image bounds
-        fun clampToImage(pos: Offset): Offset {
-            return Offset(
-                (pos.x - offsetX).coerceIn(0f, displayW) / displayW,
-                (pos.y - offsetY).coerceIn(0f, displayH) / displayH
-            )
-        }
-        val startN = clampToImage(dragStart)
-        val endN = clampToImage(dragEnd)
-        return CropRect(
-            left = minOf(startN.x, endN.x),
-            top = minOf(startN.y, endN.y),
-            right = maxOf(startN.x, endN.x),
-            bottom = maxOf(startN.y, endN.y)
-        )
+    if (imageDims == null || containerSize.width <= 0f || containerSize.height <= 0f) {
+        return CropRect(0f, 0f, 1f, 1f)
     }
-    // Fallback: normalize by container size (no image dims available)
-    return CropRect(
-        left = (minOf(dragStart.x, dragEnd.x) / containerSize.width).coerceIn(0f, 1f),
-        top = (minOf(dragStart.y, dragEnd.y) / containerSize.height).coerceIn(0f, 1f),
-        right = (maxOf(dragStart.x, dragEnd.x) / containerSize.width).coerceIn(0f, 1f),
-        bottom = (maxOf(dragStart.y, dragEnd.y) / containerSize.height).coerceIn(0f, 1f)
-    )
+    val imgW = imageDims.first.toFloat()
+    val imgH = imageDims.second.toFloat()
+    val scale = minOf(containerSize.width / imgW, containerSize.height / imgH)
+    val displayW = imgW * scale
+    val displayH = imgH * scale
+    val offsetX = (containerSize.width - displayW) / 2f
+    val offsetY = (containerSize.height - displayH) / 2f
+    val left = ((minOf(start.x, end.x) - offsetX) / displayW).coerceIn(0f, 1f)
+    val top = ((minOf(start.y, end.y) - offsetY) / displayH).coerceIn(0f, 1f)
+    val right = ((maxOf(start.x, end.x) - offsetX) / displayW).coerceIn(0f, 1f)
+    val bottom = ((maxOf(start.y, end.y) - offsetY) / displayH).coerceIn(0f, 1f)
+    return CropRect(left, top, right, bottom)
 }
 
 /**
- * Load just the pixel dimensions of an image without decoding the full bitmap.
- * Also accounts for EXIF orientation so the returned dimensions match how
- * [coil3.compose.AsyncImage] displays the image (which applies EXIF rotation
- * automatically).
- * Supports content:// URIs and file paths.
+ * Decode the image bounds (inJustDecodeBounds) plus EXIF orientation, so the
+ * mapping matches what Coil displays after auto-rotation.
  */
 private fun loadImageDimensions(context: Context, uriStr: String): Pair<Int, Int>? {
+    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     return try {
-        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         if (uriStr.startsWith("content://")) {
             val uri = Uri.parse(uriStr)
             context.contentResolver.openInputStream(uri)?.use { input ->

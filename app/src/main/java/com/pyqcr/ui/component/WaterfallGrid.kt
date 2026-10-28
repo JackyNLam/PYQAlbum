@@ -213,22 +213,23 @@ private fun WaterfallTile(image: ImageItem) {
     val ratio = if (image.height > 0) image.width.toFloat() / image.height.toFloat() else 1f
 
     if (image.uri.contains("/video/")) {
-        // Videos can't be decoded by Coil — dark tile + play badge, same as
-        // the other grids (ImageThumbnail handles this for the GRID layout).
-        Box(
+        // Videos preview a REAL frame now: the app ImageLoader registers
+        // coil-video's VideoFrameDecoder, so the URI decodes like an image.
+        // The old dark play tile stays as the loading/error placeholder.
+        SubcomposeAsyncImage(
+            model = ImageRequest.Builder(context)
+                .data(image.uri)
+                .size(400)
+                .crossfade(true)
+                .build(),
+            contentDescription = image.displayName,
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(ratio)
-                .background(Color(0xFF263238)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                Icons.Default.PlayArrow,
-                contentDescription = "Video",
-                tint = Color.White,
-                modifier = Modifier.size(36.dp)
-            )
-        }
+                .aspectRatio(ratio),
+            contentScale = ContentScale.Fit,
+            loading = { VideoTilePlaceholder() },
+            error = { VideoTilePlaceholder() }
+        )
     } else {
         SubcomposeAsyncImage(
             model = ImageRequest.Builder(context)
@@ -241,6 +242,24 @@ private fun WaterfallTile(image: ImageItem) {
                 .fillMaxWidth()
                 .aspectRatio(ratio),
             contentScale = ContentScale.Fit
+        )
+    }
+}
+
+/** Dark play tile for video cells that are still decoding or unreadable. */
+@Composable
+private fun VideoTilePlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF263238)),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Default.PlayArrow,
+            contentDescription = "Video",
+            tint = Color.White,
+            modifier = Modifier.size(36.dp)
         )
     }
 }

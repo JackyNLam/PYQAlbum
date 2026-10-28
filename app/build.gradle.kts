@@ -94,6 +94,8 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.0.4")
     // Animated GIF / animated WebP decoding (ImageDecoder-based)
     implementation("io.coil-kt.coil3:coil-gif:3.0.4")
+    // Video frame thumbnails (MediaMetadataRetriever-backed frame decode)
+    implementation("io.coil-kt.coil3:coil-video:3.0.4")
 
     // Room
     implementation("androidx.room:room-runtime:2.6.1")
