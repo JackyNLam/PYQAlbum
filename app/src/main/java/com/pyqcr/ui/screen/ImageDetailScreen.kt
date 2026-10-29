@@ -8,8 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -151,20 +150,73 @@ fun ImageDetailScreen(
 
     // Live swipe feedback: the image tracks the finger and slides off-screen in
     // the swipe direction before navigating (short, keeps the gesture tactile).
-    val swipeX = remember { Animatable(0f) }
-    val swipeY = remember { Animatable(0f) }
+    // Plain state (not Animatable) because the pointer loop below runs inside
+    // awaitEachGesture, whose restricted suspension scope cannot call
+    // Animatable.snapTo/animateTo — the settling animation runs in an effect.
+    var swipeDx by remember { mutableFloatStateOf(0f) }
+    var swipeDy by remember { mutableFloatStateOf(0f) }
+    // Decided when a scale-1 gesture ends: 0 none, 1 next, 2 previous, 3 back,
+    // 4 reveal the action bar, 5 settle back in place.
+    var pendingSwipe by remember { mutableIntStateOf(0) }
 
     // Size of the image viewport (px) — used to clamp the pan so the zoomed
     // image can never be dragged entirely out of view.
     var viewSize by remember { mutableStateOf(Size.Zero) }
+
+    /** Animates the swipe translation from its current value to the target. */
+    suspend fun slideSwipeTo(targetX: Float, targetY: Float, durationMillis: Int) {
+        val startX = swipeDx
+        val startY = swipeDy
+        animate(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = tween(durationMillis)
+        ) { fraction, _ ->
+            swipeDx = startX + (targetX - startX) * fraction
+            swipeDy = startY + (targetY - startY) * fraction
+        }
+    }
+
+    // Runs the swipe outcome OUTSIDE the pointer-input restricted scope.
+    LaunchedEffect(pendingSwipe) {
+        val widthPx = if (viewSize.width > 0f) viewSize.width else 1080f
+        val heightPx = if (viewSize.height > 0f) viewSize.height else 1920f
+        when (pendingSwipe) {
+            1 -> {
+                slideSwipeTo(-widthPx, 0f, 170)
+                onNextImage()
+            }
+            2 -> {
+                slideSwipeTo(widthPx, 0f, 170)
+                onPreviousImage()
+            }
+            3 -> {
+                slideSwipeTo(0f, heightPx * 0.35f, 150)
+                onBack()
+            }
+            4 -> {
+                slideSwipeTo(0f, 0f, 180)
+                showDetailPanel = true
+            }
+            5 -> slideSwipeTo(0f, 0f, 200)
+        }
+        pendingSwipe = 0
+    }
 
     // Slide a newly opened neighbour in from the side it was swiped from.
     var enterSlideDone by remember(imageUri) { mutableStateOf(false) }
     LaunchedEffect(imageUri, viewSize.width) {
         if (!enterSlideDone && enterDirection != 0 && viewSize.width > 0f) {
             enterSlideDone = true
-            swipeX.snapTo(viewSize.width * 0.28f * enterDirection)
-            swipeX.animateTo(0f, tween(200))
+            val from = viewSize.width * 0.28f * enterDirection
+            swipeDx = from
+            animate(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = tween(200)
+            ) { fraction, _ ->
+                swipeDx = from * (1f - fraction)
+            }
         }
     }
 
@@ -651,11 +703,11 @@ fun ImageDetailScreen(
                         // The saved pan offset plus the in-progress swipe
                         // translation — swiping at scale 1 drags the photo with
                         // the finger before it settles / leaves the screen.
-                        translationX = offset.x + swipeX.value
-                        translationY = offset.y + swipeY.value
+                        translationX = offset.x + swipeDx
+                        translationY = offset.y + swipeDy
                         val width = if (viewSize.width > 0f) viewSize.width else 1f
                         val swipeFraction =
-                            (kotlin.math.abs(swipeX.value) / width).coerceIn(0f, 1f)
+                            (kotlin.math.abs(swipeDx) / width).coerceIn(0f, 1f)
                         alpha = 1f - swipeFraction * 0.45f
                     }
                     .pointerInput(Unit) {
@@ -702,50 +754,24 @@ fun ImageDetailScreen(
                                         verticalAccum += change.positionChange().y
                                         horizontalAccum += change.positionChange().x
                                         // Live feedback: the photo follows the finger.
-                                        swipeX.snapTo(horizontalAccum)
-                                        swipeY.snapTo(verticalAccum)
+                                        swipeDx = horizontalAccum
+                                        swipeDy = verticalAccum
                                         change.consume()
                                     }
                                 }
                             } while (event.changes.any { it.pressed })
-                            // Gesture ended at scale 1 — decide swipe navigation
+                            // Gesture ended at scale 1 — only record the outcome
+                            // here. Animating/navigating must happen outside the
+                            // restricted awaitEachGesture scope (see the
+                            // pendingSwipe effect above).
                             if (!transformMode) {
-                                val widthPx = if (viewSize.width > 0f) viewSize.width else 1080f
-                                val heightPx = if (viewSize.height > 0f) viewSize.height else 1920f
-                                when {
-                                    verticalAccum > swipeThreshold -> {
-                                        // Swipe down → leave the viewer: let the
-                                        // photo slide down a little first.
-                                        swipeY.animateTo(heightPx * 0.35f, tween(150))
-                                        onBack()
-                                    }
-                                    verticalAccum < -swipeThreshold -> {
-                                        // Swipe up → settle back, then reveal the
-                                        // action bar with its own slide-up.
-                                        swipeY.animateTo(0f, spring())
-                                        showDetailPanel = true
-                                    }
-                                    horizontalAccum < -swipeThreshold -> {
-                                        if (hasNextImage) {
-                                            swipeX.animateTo(-widthPx, tween(170))
-                                            onNextImage()
-                                        } else {
-                                            swipeX.animateTo(0f, spring())
-                                        }
-                                    }
-                                    horizontalAccum > swipeThreshold -> {
-                                        if (hasPreviousImage) {
-                                            swipeX.animateTo(widthPx, tween(170))
-                                            onPreviousImage()
-                                        } else {
-                                            swipeX.animateTo(0f, spring())
-                                        }
-                                    }
-                                    else -> {
-                                        // Not far enough — spring back into place.
-                                        swipeX.animateTo(0f, spring())
-                                        swipeY.animateTo(0f, spring())
-                                    }
+                                pendingSwipe = when {
+                                    verticalAccum > swipeThreshold -> 3
+                                    verticalAccum < -swipeThreshold -> 4
+                                    horizontalAccum < -swipeThreshold -> if (hasNextImage) 1 else 5
+                                    horizontalAccum > swipeThreshold ->
+                                        if (hasPreviousImage) 2 else 5
+                                    else -> 5
                                 }
                             }
                         }
