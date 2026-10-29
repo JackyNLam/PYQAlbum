@@ -15,11 +15,13 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -304,9 +306,34 @@ fun ImageDetailScreen(
 
     // ---- Batch-menu actions on the swipe-up panel ----
     // The same operations the album's batch ⋮ menu offers, applied to this
-    // single image: resize / copy / move / move-to-vault / delete.
+    // single image: resize / rename / copy / move / move-to-vault / delete.
 
     var showResizeDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameBaseDraft by remember { mutableStateOf("") }
+    var renameExtDraft by remember { mutableStateOf("") }
+
+    /** Load the file name into the rename dialog (same behaviour as the batch menu). */
+    val openRenameDialog: () -> Unit = {
+        coroutineScope.launch {
+            val name = withContext(Dispatchers.IO) {
+                FileOperationHelper.displayNameOf(context, imageUri)
+            }
+            if (name.isNullOrBlank()) {
+                snackbarHostState.showSnackbar("Could not read the file name")
+            } else {
+                val dot = name.lastIndexOf('.')
+                if (dot > 0) {
+                    renameBaseDraft = name.substring(0, dot)
+                    renameExtDraft = name.substring(dot + 1)
+                } else {
+                    renameBaseDraft = name
+                    renameExtDraft = ""
+                }
+                showRenameDialog = true
+            }
+        }
+    }
     var destinationDialogOp by remember { mutableStateOf("copy") }
     var folderBrowserDir by remember { mutableStateOf<File?>(null) }
     var showDestinationDialog by remember { mutableStateOf(false) }
@@ -740,84 +767,107 @@ fun ImageDetailScreen(
 
             // ===================== DETAIL PANEL (swipe-up) =====================
             if (showDetailPanel) {
-                Column(
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .fillMaxHeight(0.5f)
-                        .align(Alignment.BottomCenter)
-                        .verticalScroll(rememberScrollState())
-                        .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp)
+                        .fillMaxHeight(0.62f)
+                        .align(Alignment.BottomCenter),
+                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 3.dp,
+                    shadowElevation = 16.dp
                 ) {
-                    // Handle area + pull-down hint
-                    Box(
+                    Column(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .pointerInput(Unit) {
-                                detectVerticalDragGestures(
-                                    onDragEnd = {
-                                        if (dragVerticalAccum > swipeThreshold) {
-                                            // swipe down on panel → hide panel
-                                            showDetailPanel = false
-                                            showControls = true
-                                        }
-                                        dragVerticalAccum = 0f
-                                    },
-                                    onVerticalDrag = { change, dragAmount ->
-                                        change.consume()
-                                        dragVerticalAccum += dragAmount
-                                    }
-                                )
-                            },
-                        contentAlignment = Alignment.Center
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .navigationBarsPadding()
+                            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp)
                     ) {
-                        // Drag handle indicator
+                        // Handle area + pull-down hint
                         Box(
                             modifier = Modifier
-                                .width(40.dp)
-                                .height(4.dp)
-                                .background(
-                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                    shape = MaterialTheme.shapes.small
+                                .fillMaxWidth()
+                                .pointerInput(Unit) {
+                                    detectVerticalDragGestures(
+                                        onDragEnd = {
+                                            if (dragVerticalAccum > swipeThreshold) {
+                                                // swipe down on panel → hide panel
+                                                showDetailPanel = false
+                                                showControls = true
+                                            }
+                                            dragVerticalAccum = 0f
+                                        },
+                                        onVerticalDrag = { change, dragAmount ->
+                                            change.consume()
+                                            dragVerticalAccum += dragAmount
+                                        }
+                                    )
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(44.dp)
+                                        .height(4.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                                            shape = RoundedCornerShape(2.dp)
+                                        )
                                 )
-                        )
-                    }
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "Swipe down to close",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
 
-                    Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(10.dp))
 
                     // ====== Metadata ======
                     Text(
                         text = imageItem?.displayName ?: "",
-                        style = MaterialTheme.typography.titleMedium
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-                    Text(
-                        text = "Folder: ${imageItem?.folderName ?: "Unknown"}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = "Path: ${fullPath ?: imageUri}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (imageItem?.width != null && imageItem?.height != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                    ) {
+                        DetailChip("📁 ${imageItem?.folderName ?: "Unknown"}")
+                        if (imageItem?.width != null && imageItem?.height != null) {
+                            DetailChip("${imageItem?.width} × ${imageItem?.height}")
+                        }
+                        DetailChip(formatFileSize(imageItem?.sizeBytes ?: 0L))
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         Text(
-                            text = "${imageItem?.width} x ${imageItem?.height}",
-                            style = MaterialTheme.typography.bodySmall
+                            text = fullPath ?: imageUri,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                         )
                     }
-                    Text(
-                        text = "Size: ${formatFileSize(imageItem?.sizeBytes ?: 0L)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
 
-                    Spacer(Modifier.height(16.dp))
+                    Spacer(Modifier.height(14.dp))
 
                     // ====== Rating ======
-                    Text(
-                        text = "Rating",
-                        style = MaterialTheme.typography.titleSmall
-                    )
+                    DetailSectionTitle("Rating")
                     RatingBar(
                         rating = rating,
                         onRatingChange = { newRating ->
@@ -849,10 +899,7 @@ fun ImageDetailScreen(
                     Spacer(Modifier.height(16.dp))
 
                     // ====== Tags ======
-                    Text(
-                        text = "Tags",
-                        style = MaterialTheme.typography.titleSmall
-                    )
+                    DetailSectionTitle("Tags")
 
                     if (tags.isNotEmpty()) {
                         LazyRow(
@@ -984,10 +1031,7 @@ fun ImageDetailScreen(
                     Spacer(Modifier.height(16.dp))
 
                     // ====== AI actions (below the tag area) — toggles, like the batch menu ======
-                    Text(
-                        text = "AI Actions",
-                        style = MaterialTheme.typography.titleSmall
-                    )
+                    DetailSectionTitle("AI Actions")
                     Spacer(Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1053,66 +1097,53 @@ fun ImageDetailScreen(
                     Spacer(Modifier.height(16.dp))
 
                     // ====== More actions (same as the album's batch select menu) ======
-                    Text(
-                        text = "More Actions",
-                        style = MaterialTheme.typography.titleSmall
-                    )
+                    DetailSectionTitle("More Actions")
                     Spacer(Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        OutlinedButton(
+                        DetailActionButton(
+                            icon = Icons.Default.PhotoSizeSelectLarge,
+                            label = "Resize",
                             onClick = { showResizeDialog = true },
                             modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                Icons.Default.PhotoSizeSelectLarge,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Resize")
-                        }
-                        OutlinedButton(
+                        )
+                        DetailActionButton(
+                            icon = Icons.Default.DriveFileRenameOutline,
+                            label = "Rename",
+                            onClick = { openRenameDialog() },
+                            modifier = Modifier.weight(1f)
+                        )
+                        DetailActionButton(
+                            icon = Icons.Default.SaveAlt,
+                            label = "Copy",
                             onClick = {
                                 destinationDialogOp = "copy"
                                 folderBrowserDir = Environment.getExternalStorageDirectory()
                                 showDestinationDialog = true
                             },
                             modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                Icons.Default.SaveAlt,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Copy")
-                        }
+                        )
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        OutlinedButton(
+                        DetailActionButton(
+                            icon = Icons.Default.Forward,
+                            label = "Move",
                             onClick = {
                                 destinationDialogOp = "move"
                                 folderBrowserDir = Environment.getExternalStorageDirectory()
                                 showDestinationDialog = true
                             },
                             modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                Icons.Default.Forward,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Move")
-                        }
-                        OutlinedButton(
+                        )
+                        DetailActionButton(
+                            icon = Icons.Default.Lock,
+                            label = "Vault",
                             onClick = {
                                 coroutineScope.launch {
                                     val name = VaultStorage.galleryDisplayName(context, imageUri)
@@ -1127,33 +1158,16 @@ fun ImageDetailScreen(
                                 }
                             },
                             modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                Icons.Default.Lock,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Vault")
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(
-                        onClick = {
-                            trashUris(listOf(imageUri), "Moved to the recycle bin", "Deleted permanently")
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
                         )
-                    ) {
-                        Icon(
-                            Icons.Default.Delete,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                        DetailActionButton(
+                            icon = Icons.Default.Delete,
+                            label = "Delete",
+                            onClick = {
+                                trashUris(listOf(imageUri), "Moved to the recycle bin", "Deleted permanently")
+                            },
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.weight(1f)
                         )
-                        Spacer(Modifier.width(6.dp))
-                        Text("Delete")
                     }
 
                     // AI Edit role dialog — same source/target roles as the batch menu
@@ -1183,18 +1197,74 @@ fun ImageDetailScreen(
                         )
                     }
 
-                    // Batch-style dialogs for the single image: resize options
+                    // Batch-style dialogs for the single image: resize options, rename,
                     // and the in-app copy/move folder browser (same as the
                     // album's batch menu).
+                    if (showRenameDialog) {
+                        AlertDialog(
+                            onDismissRequest = { showRenameDialog = false },
+                            title = { Text("Rename file") },
+                            text = {
+                                Column {
+                                    OutlinedTextField(
+                                        value = renameBaseDraft,
+                                        onValueChange = { renameBaseDraft = it },
+                                        label = { Text("File name") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    if (renameExtDraft.isNotEmpty()) {
+                                        Text(
+                                            text = "The extension .$renameExtDraft is kept",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(top = 4.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    onClick = {
+                                        showRenameDialog = false
+                                        val base = renameBaseDraft.trim().replace("/", "_").replace("\\", "_")
+                                        if (base.isNotEmpty()) {
+                                            coroutineScope.launch {
+                                                val ok = withContext(Dispatchers.IO) {
+                                                    FileOperationHelper.renameMedia(context, imageUri, base)
+                                                }
+                                                withContext(Dispatchers.IO) {
+                                                    repository.refreshImagesFromMediaStore()
+                                                }
+                                                if (ok) {
+                                                    imageItem = imageItem?.copy(
+                                                        displayName = if (renameExtDraft.isNotEmpty())
+                                                            "$base.$renameExtDraft" else base
+                                                    )
+                                                    snackbarHostState.showSnackbar("Renamed to $base")
+                                                } else {
+                                                    snackbarHostState.showSnackbar("Rename failed — the file is protected or was removed")
+                                                }
+                                            }
+                                        }
+                                    }
+                                ) { Text("Rename") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") }
+                            }
+                        )
+                    }
+
                     if (showResizeDialog) {
                         ResizeOptionsDialog(
                             imageCount = 1,
                             onDismiss = { showResizeDialog = false },
-                            onConfirm = { targetWidth, saveMode, padSquare, padBlack ->
+                            onConfirm = { targetWidth, saveMode, padSquare, padColor ->
                                 showResizeDialog = false
                                 coroutineScope.launch {
                                     val ok = withContext(Dispatchers.IO) {
-                                        resizeSingleImageToWidth(context, imageUri, targetWidth, saveMode, padSquare, padBlack)
+                                        resizeSingleImageToWidth(context, imageUri, targetWidth, saveMode, padSquare, padColor)
                                     }
                                     if (ok) {
                                         snackbarHostState.showSnackbar("Resized to ${targetWidth}px wide")
@@ -1346,9 +1416,68 @@ fun ImageDetailScreen(
                             }
                         )
                     }
+                    }
                 }
             }
         }
+    }
+}
+
+/** Small rounded label used for the metadata row in the swipe-up panel. */
+@Composable
+private fun DetailChip(text: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        shape = RoundedCornerShape(6.dp)
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+        )
+    }
+}
+
+/** Section heading in the swipe-up panel. */
+@Composable
+private fun DetailSectionTitle(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary
+    )
+}
+
+/** Compact icon + label action tile used in the swipe-up panel's action grid. */
+@Composable
+private fun DetailActionButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = MaterialTheme.colorScheme.onSurface
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.height(48.dp),
+        contentPadding = PaddingValues(horizontal = 4.dp)
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = tint
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = tint,
+            maxLines = 1
+        )
     }
 }
 

@@ -983,15 +983,15 @@ fun AlbumScreen(
     }
 
     /** Resize selected images to target pixel width; [padSquare] pads each
-     *  scaled result onto a square canvas ([padBlack] picks black, else white). */
-    val batchResize: (List<String>, Int, String, Boolean, Boolean) -> Unit = { uris, targetWidth, saveMode, padSquare, padBlack ->
+     *  scaled result onto a square canvas ([padColor] is the pad ARGB color). */
+    val batchResize: (List<String>, Int, String, Boolean, Int) -> Unit = { uris, targetWidth, saveMode, padSquare, padColor ->
         scope.launch {
             try {
                 var successCount = 0
                 var failCount = 0
                 for (uriStr in uris) {
                     val ok = withContext(Dispatchers.IO) {
-                        resizeSingleImageToWidth(context, uriStr, targetWidth, saveMode, padSquare, padBlack)
+                        resizeSingleImageToWidth(context, uriStr, targetWidth, saveMode, padSquare, padColor)
                     }
                     if (ok) successCount++ else failCount++
                 }
@@ -1252,15 +1252,27 @@ fun AlbumScreen(
                 TopAppBar(
                     navigationIcon = {
                         IconButton(onClick = {
-                            if (selectedBrowseMode == BrowseMode.RECYCLE_BIN && binFolder != null) {
-                                // In a bin sub-folder: back returns to the bin folder list
-                                binFolder = null
-                                binViewerIndex = -1
-                            } else {
-                                scope.launch { drawerState.open() }
+                            when {
+                                selectedBrowseMode == BrowseMode.RECYCLE_BIN && binFolder != null -> {
+                                    // In a bin sub-folder: back returns to the bin folder list
+                                    binFolder = null
+                                    binViewerIndex = -1
+                                }
+                                selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null -> {
+                                    // Inside a folder: the app-bar arrow returns to
+                                    // the folder list (no extra banner row needed).
+                                    selectedFolder = null
+                                    viewModel.refreshImages()
+                                }
+                                else -> scope.launch { drawerState.open() }
                             }
                         }) {
-                            Icon(Icons.Default.Menu, contentDescription = "Menu")
+                            Icon(
+                                if (selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null)
+                                    Icons.Default.ArrowBack else Icons.Default.Menu,
+                                contentDescription = if (selectedBrowseMode == BrowseMode.FOLDER && selectedFolder != null)
+                                    "Back to folders" else "Menu"
+                            )
                         }
                     },
                     title = {
@@ -2004,26 +2016,10 @@ fun AlbumScreen(
                                 }
                             }
                         } else {
-                            // Step 2: Show images + videos for selected folder
-                            // with back button
+                            // Step 2: Show images + videos for the selected folder.
+                            // The app-bar back arrow (and system Back) returns to
+                            // the folder list — no separate banner row.
                             Column(modifier = Modifier.fillMaxSize()) {
-                                // Back button row
-                                TextButton(
-                                    onClick = {
-                                        selectedFolder = null
-                                        viewModel.refreshImages()
-                                    },
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Default.ArrowBack,
-                                        contentDescription = "Back",
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("All Folders")
-                                }
-
                                 if (isLoading) {
                                     Box(
                                         modifier = Modifier.fillMaxSize(),
@@ -2863,9 +2859,9 @@ fun AlbumScreen(
                 ResizeOptionsDialog(
                     imageCount = selectedImageUris.size,
                     onDismiss = { showResizeDialog = false },
-                    onConfirm = { targetWidth, saveMode, padSquare, padBlack ->
+                    onConfirm = { targetWidth, saveMode, padSquare, padColor ->
                         showResizeDialog = false
-                        batchResize(selectedImageUris.toList(), targetWidth, saveMode, padSquare, padBlack)
+                        batchResize(selectedImageUris.toList(), targetWidth, saveMode, padSquare, padColor)
                     }
                 )
             }
@@ -3829,23 +3825,29 @@ internal object FileUtils {
 
 /**
  * Batch resize options dialog.
- * Lets the user choose a target width (500 / 1000 / 2000 / custom),
- * whether to replace the original or save a copy with "_resized" suffix,
- * and an optional square pad (letterbox onto a square canvas) with a
- * white or black background.
+ * Lets the user choose a target width (500 / 1000 / 2000 / custom), pad the
+ * result onto a square canvas (white / black / custom color, like the collage
+ * background picker) and whether to replace the original or save a copy with a
+ * "_resized" suffix. The target width is also the square's side, so it stays
+ * meaningful while padding is enabled.
  */
 @Composable
 internal fun ResizeOptionsDialog(
     imageCount: Int,
     onDismiss: () -> Unit,
-    onConfirm: (targetWidth: Int, saveMode: String, padSquare: Boolean, padBlack: Boolean) -> Unit
+    onConfirm: (targetWidth: Int, saveMode: String, padSquare: Boolean, padColor: Int) -> Unit
 ) {
     var selectedWidth by remember { mutableIntStateOf(500) }
     var customWidth by remember { mutableStateOf("") }
     var saveMode by remember { mutableStateOf("replace") }
     var useCustom by remember { mutableStateOf(false) }
     var padSquare by remember { mutableStateOf(false) }
-    var padBlack by remember { mutableStateOf(false) }
+    var padColor by remember { mutableIntStateOf(android.graphics.Color.WHITE) }
+    var useCustomPad by remember { mutableStateOf(false) }
+    var customR by remember { mutableIntStateOf(255) }
+    var customG by remember { mutableIntStateOf(255) }
+    var customB by remember { mutableIntStateOf(255) }
+    val effectiveWidth = if (useCustom) customWidth.toIntOrNull() ?: 500 else selectedWidth
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3879,6 +3881,98 @@ internal fun ResizeOptionsDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+
+                Spacer(Modifier.height(16.dp))
+
+                // Pad to square — above Save mode; background color is pickable
+                // (white / black / custom), mirroring the collage options.
+                Row(
+                    modifier = Modifier.clickable { padSquare = !padSquare },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = padSquare,
+                        onCheckedChange = { padSquare = it }
+                    )
+                    Text("Pad to square", modifier = Modifier.padding(start = 4.dp))
+                }
+                if (padSquare) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Output: ${effectiveWidth} × ${effectiveWidth} px — image centered on the chosen background",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CollageBgPresets.forEach { (_, color) ->
+                            val selected = !useCustomPad && padColor == color.toArgb()
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(color)
+                                    .border(
+                                        width = if (selected) 3.dp else 1.dp,
+                                        color = if (selected) MaterialTheme.colorScheme.primary else Color.Gray,
+                                        shape = CircleShape
+                                    )
+                                    .clickable {
+                                        useCustomPad = false
+                                        padColor = color.toArgb()
+                                    }
+                            )
+                        }
+                        // Custom color swatch — rainbow hint until a custom color is picked
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .then(
+                                    if (useCustomPad) {
+                                        Modifier.background(Color(customR, customG, customB))
+                                    } else {
+                                        Modifier.background(
+                                            Brush.linearGradient(
+                                                listOf(
+                                                    Color.Red, Color.Yellow, Color.Green,
+                                                    Color.Cyan, Color.Blue, Color.Magenta
+                                                )
+                                            )
+                                        )
+                                    }
+                                )
+                                .border(
+                                    width = if (useCustomPad) 3.dp else 1.dp,
+                                    color = if (useCustomPad) MaterialTheme.colorScheme.primary else Color.Gray,
+                                    shape = CircleShape
+                                )
+                                .clickable {
+                                    useCustomPad = true
+                                    padColor = Color(customR, customG, customB).toArgb()
+                                }
+                        )
+                    }
+                    if (useCustomPad) {
+                        Spacer(Modifier.height(8.dp))
+                        RgbSliderRow("R", customR) {
+                            customR = it
+                            padColor = Color(customR, customG, customB).toArgb()
+                        }
+                        RgbSliderRow("G", customG) {
+                            customG = it
+                            padColor = Color(customR, customG, customB).toArgb()
+                        }
+                        RgbSliderRow("B", customB) {
+                            customB = it
+                            padColor = Color(customR, customG, customB).toArgb()
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(16.dp))
                 Text("Save mode", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(8.dp))
@@ -3896,39 +3990,12 @@ internal fun ResizeOptionsDialog(
                     )
                     Text("Save as copy with \"_resized\" suffix", modifier = Modifier.padding(start = 4.dp))
                 }
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.clickable { padSquare = !padSquare },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Checkbox(
-                        checked = padSquare,
-                        onCheckedChange = { padSquare = it }
-                    )
-                    Text("Pad to square", modifier = Modifier.padding(start = 4.dp))
-                }
-                if (padSquare) {
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = !padBlack,
-                            onClick = { padBlack = false },
-                            label = { Text("White background") }
-                        )
-                        FilterChip(
-                            selected = padBlack,
-                            onClick = { padBlack = true },
-                            label = { Text("Black background") }
-                        )
-                    }
-                }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    val w = if (useCustom) customWidth.toIntOrNull() ?: 500 else selectedWidth
-                    onConfirm(w, saveMode, padSquare, padBlack)
+                    onConfirm(effectiveWidth, saveMode, padSquare, padColor)
                 },
                 enabled = !useCustom || customWidth.toIntOrNull() != null
             ) {
@@ -3947,8 +4014,8 @@ internal fun ResizeOptionsDialog(
  * Resize one image to [targetWidth] pixels wide. [saveMode] is either
  * "replace" (re-compress the original MediaStore row in place) or "suffix"
  * (save a new "_resized" copy). [padSquare] pads the scaled image onto a
- * square canvas (side = larger result edge, image centered); the pad
- * background is white, or black when [padBlack] is true.
+ * square canvas of [targetWidth] × [targetWidth] px, image centered and
+ * scaled to fit, on a [padColor] (ARGB) background.
  * Shared by the album batch menu and the single-image detail panel.
  * Returns true on success.
  */
@@ -3958,7 +4025,7 @@ internal suspend fun resizeSingleImageToWidth(
     targetWidth: Int,
     saveMode: String,
     padSquare: Boolean = false,
-    padBlack: Boolean = false
+    padColor: Int = android.graphics.Color.WHITE
 ): Boolean {
     return withContext(Dispatchers.IO) {
         try {
@@ -3982,16 +4049,25 @@ internal suspend fun resizeSingleImageToWidth(
             val sampled = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOpts) } ?: return@withContext false
             val scaled = Bitmap.createScaledBitmap(sampled, fw, fh, true)
             sampled.recycle()
-            // Square pad: side = larger result edge, image centered on a
-            // white (default) or black canvas.
+            // Square pad: the square's side is the requested target width, so
+            // the width choice stays meaningful with padding on. The image is
+            // scaled to fit inside the square (portrait photos shrink) and
+            // centered on the chosen background color.
             val resized = if (padSquare) {
-                val side = maxOf(fw, fh)
+                val side = targetWidth.coerceAtLeast(1)
                 val square = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
                 val padCanvas = android.graphics.Canvas(square)
-                val padColor = if (padBlack) android.graphics.Color.BLACK else android.graphics.Color.WHITE
                 padCanvas.drawColor(padColor)
-                padCanvas.drawBitmap(scaled, (side - fw) / 2f, (side - fh) / 2f, null)
-                scaled.recycle()
+                val fitScale = minOf(side.toFloat() / fw, side.toFloat() / fh)
+                val drawW = (fw * fitScale).toInt().coerceAtLeast(1)
+                val drawH = (fh * fitScale).toInt().coerceAtLeast(1)
+                val fitted = if (drawW == fw && drawH == fh) scaled else {
+                    val b = Bitmap.createScaledBitmap(scaled, drawW, drawH, true)
+                    scaled.recycle()
+                    b
+                }
+                padCanvas.drawBitmap(fitted, (side - drawW) / 2f, (side - drawH) / 2f, null)
+                fitted.recycle()
                 square
             } else {
                 scaled

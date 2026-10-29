@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -52,8 +53,11 @@ private enum class SelectionMode { RECT, BRUSH }
  * Coordinates are 0f..1f relative to the image itself (not the container),
  * accounting for letterboxing from ContentScale.Fit.
  *
- * Two fingers pinch-zoom / pan the PREVIEW only: strokes are stored in
+ * Two fingers pinch-zoom the PREVIEW only: strokes are stored in
  * image-normalized space, so the selection tracks the image at any zoom.
+ * Once zoomed, a single-finger drag pans the view (clamped to the image), and
+ * the toolbar toggles between "Move view" and "Draw" so fine painting is still
+ * possible; two-finger panning keeps working in either mode.
  * Every completed stroke is APPENDED to the list — painting several times
  * accumulates all brushed areas (undo pops the newest stroke).
  */
@@ -78,6 +82,10 @@ fun AreaSelectionDialog(
     var zoom by remember { mutableFloatStateOf(1f) }
     var panX by remember { mutableFloatStateOf(0f) }
     var panY by remember { mutableFloatStateOf(0f) }
+    // While zoomed, one-finger drags PAN the view instead of drawing; this is
+    // switched on when the user zooms in and can be toggled with the toolbar
+    // "Move view"/"Draw" button.
+    var panMode by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     // Load intrinsic image dimensions so we can compute the actual
@@ -139,6 +147,23 @@ fun AreaSelectionDialog(
         return Offset(n.x * containerSize.width, n.y * containerSize.height)
     }
 
+    /** Pan the zoomed preview by a device-pixel delta, clamped so the image
+     *  always covers the viewport (it can never be dragged out of view). */
+    fun panBy(dx: Float, dy: Float) {
+        if (zoom <= 1f || containerSize.width <= 0f || containerSize.height <= 0f) return
+        val maxX = (zoom - 1f) * containerSize.width / 2f
+        val maxY = (zoom - 1f) * containerSize.height / 2f
+        panX = (panX + dx).coerceIn(-maxX, maxX)
+        panY = (panY + dy).coerceIn(-maxY, maxY)
+    }
+
+    fun resetZoom() {
+        zoom = 1f
+        panX = 0f
+        panY = 0f
+        panMode = false
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -176,11 +201,15 @@ fun AreaSelectionDialog(
                         }) { Text("Undo", color = Color.White) }
                     }
                     if (zoom > 1f) {
-                        TextButton(onClick = {
-                            zoom = 1f
-                            panX = 0f
-                            panY = 0f
-                        }) { Text("Reset zoom", color = Color.White) }
+                        TextButton(onClick = { panMode = !panMode }) {
+                            Text(
+                                if (panMode) "Draw" else "Move view",
+                                color = Color.White
+                            )
+                        }
+                        TextButton(onClick = { resetZoom() }) {
+                            Text("Reset", color = Color.White)
+                        }
                     }
                 }
 
@@ -232,8 +261,14 @@ fun AreaSelectionDialog(
                             awaitEachGesture {
                                 val down = awaitFirstDown(requireUnconsumed = false)
                                 if (mode == SelectionMode.RECT) {
-                                    dragStart = down.position
-                                    dragEnd = down.position
+                                    // While zoomed, one-finger drags move the view
+                                    // (much easier than two-finger panning); the
+                                    // toolbar "Draw" button returns to selecting.
+                                    val dragPans = panMode && zoom > 1f
+                                    if (!dragPans) {
+                                        dragStart = down.position
+                                        dragEnd = down.position
+                                    }
                                     var pinch = false
                                     do {
                                         val event = awaitPointerEvent()
@@ -243,19 +278,29 @@ fun AreaSelectionDialog(
                                         if (!pinch) {
                                             val change = event.changes.firstOrNull { it.pressed }
                                             if (change != null) {
+                                                if (dragPans) {
+                                                    val d = change.positionChange()
+                                                    panBy(d.x * zoom, d.y * zoom)
+                                                } else {
+                                                    dragEnd = change.position
+                                                }
                                                 change.consume()
-                                                dragEnd = change.position
                                             }
                                         } else {
                                             val zoomChange = event.calculateZoom()
                                             val panChange = event.calculatePan()
-                                            zoom = (zoom * zoomChange).coerceIn(1f, 8f)
-                                            if (zoom > 1f) {
-                                                panX += panChange.x
-                                                panY += panChange.y
+                                            val wasZoomed = zoom > 1f
+                                            val newZoom = (zoom * zoomChange).coerceIn(1f, 8f)
+                                            zoom = newZoom
+                                            if (newZoom > 1f) {
+                                                panBy(panChange.x * newZoom, panChange.y * newZoom)
+                                                // Entering zoom: default to one-finger panning
+                                                // (the Draw button still opts back into drawing).
+                                                if (!wasZoomed) panMode = true
                                             } else {
                                                 panX = 0f
                                                 panY = 0f
+                                                panMode = false
                                             }
                                             event.changes.forEach {
                                                 if (it.positionChanged()) it.consume()
@@ -263,6 +308,7 @@ fun AreaSelectionDialog(
                                         }
                                     } while (event.changes.any { it.pressed })
                                 } else {
+                                    val paintPans = panMode && zoom > 1f
                                     val pts = mutableListOf<BrushStrokePoint>()
                                     fun addPoint(pos: Offset) {
                                         val n = normalizedPoint(pos)
@@ -282,7 +328,9 @@ fun AreaSelectionDialog(
                                             eraser = eraser
                                         )
                                     }
-                                    addPoint(down.position)
+                                    if (!paintPans) {
+                                        addPoint(down.position)
+                                    }
                                     var pinch = false
                                     do {
                                         val event = awaitPointerEvent()
@@ -306,19 +354,29 @@ fun AreaSelectionDialog(
                                         if (!pinch) {
                                             val change = event.changes.firstOrNull { it.pressed }
                                             if (change != null) {
+                                                if (paintPans) {
+                                                    val d = change.positionChange()
+                                                    panBy(d.x * zoom, d.y * zoom)
+                                                } else {
+                                                    addPoint(change.position)
+                                                }
                                                 change.consume()
-                                                addPoint(change.position)
                                             }
                                         } else {
                                             val zoomChange = event.calculateZoom()
                                             val panChange = event.calculatePan()
-                                            zoom = (zoom * zoomChange).coerceIn(1f, 8f)
-                                            if (zoom > 1f) {
-                                                panX += panChange.x
-                                                panY += panChange.y
+                                            val wasZoomed = zoom > 1f
+                                            val newZoom = (zoom * zoomChange).coerceIn(1f, 8f)
+                                            zoom = newZoom
+                                            if (newZoom > 1f) {
+                                                panBy(panChange.x * newZoom, panChange.y * newZoom)
+                                                // Entering zoom: default to one-finger panning
+                                                // (the Draw button still opts back into drawing).
+                                                if (!wasZoomed) panMode = true
                                             } else {
                                                 panX = 0f
                                                 panY = 0f
+                                                panMode = false
                                             }
                                             event.changes.forEach {
                                                 if (it.positionChanged()) it.consume()
@@ -474,9 +532,9 @@ fun AreaSelectionDialog(
                             ) {
                                 Text(
                                     if (mode == SelectionMode.RECT)
-                                        "Drag to select area — pinch with two fingers to zoom"
+                                        "Drag to select area — pinch to zoom, one-finger drag moves the view"
                                     else
-                                        "Paint to select area — pinch with two fingers to zoom",
+                                        "Paint to select area — pinch to zoom, one-finger drag moves the view",
                                     color = Color.White,
                                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)
                                 )

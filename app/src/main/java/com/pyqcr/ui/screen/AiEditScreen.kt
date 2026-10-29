@@ -6,9 +6,11 @@ import android.media.ExifInterface
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -80,7 +82,7 @@ import java.util.Locale
  * First/second images marked in the album's batch select menu are imported
  * once when the screen opens.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun AiEditScreen(
     onBack: () -> Unit
@@ -108,6 +110,9 @@ fun AiEditScreen(
 
     // Area selection dialog state
     var areaDialogUri by remember { mutableStateOf<String?>(null) }
+    // Source removal is deliberate: long-press a selected source thumbnail and
+    // confirm — a stray tap no longer drops the image.
+    var pendingRemoveSourceUri by remember { mutableStateOf<String?>(null) }
 
     // Background job state (WorkManager) — mirrors AiRatingScreen's polling
     var bgRunning by remember { mutableStateOf(false) }
@@ -540,7 +545,7 @@ fun AiEditScreen(
                         if (selectedSourceAreas.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                text = "Selected (tap ✕ to remove):",
+                                text = "Selected (tap to edit the area, long-press to remove):",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -560,10 +565,17 @@ fun AiEditScreen(
                                     Box(
                                         modifier = Modifier
                                             .aspectRatio(1f)
-                                            .clickable {
-                                                // Refine the selection (re-open area dialog)
-                                                areaDialogUri = image.uri
-                                            }
+                                            // Tap = refine the selection. Removal only
+                                            // via long-press + confirmation, so a tap
+                                            // aimed at the image never deletes it.
+                                            .combinedClickable(
+                                                onClick = {
+                                                    areaDialogUri = image.uri
+                                                },
+                                                onLongClick = {
+                                                    pendingRemoveSourceUri = image.uri
+                                                }
+                                            )
                                     ) {
                                         ImageThumbnail(
                                             imageUri = image.uri,
@@ -597,19 +609,6 @@ fun AiEditScreen(
                                                     fontSize = MaterialTheme.typography.labelSmall.fontSize
                                                 )
                                             }
-                                        }
-                                        // Remove button — clickable, propagates before tile
-                                        Box(
-                                            modifier = Modifier
-                                                .align(Alignment.TopEnd)
-                                                .background(Color.Red, RoundedCornerShape(50))
-                                                .padding(2.dp)
-                                                .clickable {
-                                                    selectedSourceAreas = selectedSourceAreas - image.uri
-                                                    AiEditSelectionStore.saveSourceUris(context, selectedSourceAreas.keys)
-                                                }
-                                        ) {
-                                            Text("✕", color = Color.White, fontSize = MaterialTheme.typography.labelSmall.fontSize)
                                         }
                                         // Rect area label
                                         if (sel?.hasCrop == true) {
@@ -1090,6 +1089,30 @@ fun AiEditScreen(
             },
             onDismiss = {
                 areaDialogUri = null
+            }
+        )
+    }
+
+    // Long-press removal confirmation for a selected source image — makes
+    // dropping an image a deliberate act instead of an easy mis-tap.
+    pendingRemoveSourceUri?.let { uri ->
+        AlertDialog(
+            onDismissRequest = { pendingRemoveSourceUri = null },
+            title = { Text("Remove this image?") },
+            text = { Text("It will be removed from the first-image selection.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    selectedSourceAreas = selectedSourceAreas - uri
+                    AiEditSelectionStore.saveSourceUris(context, selectedSourceAreas.keys)
+                    pendingRemoveSourceUri = null
+                }) {
+                    Text("Remove", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemoveSourceUri = null }) {
+                    Text("Cancel")
+                }
             }
         )
     }
