@@ -109,7 +109,6 @@ fun ImageDetailScreen(
     var rating by remember { mutableFloatStateOf(0f) }
     var newTagName by remember { mutableStateOf("") }
     var showAddTag by remember { mutableStateOf(false) }
-    var showControls by remember { mutableStateOf(true) }  // Toggle top/bottom bar
     var showDetailPanel by remember { mutableStateOf(false) } // Swipe-up action bar
     var showInfoDialog by remember { mutableStateOf(false) }  // Details (metadata/rating)
     var showTagsDialog by remember { mutableStateOf(false) }  // Tags editor
@@ -581,26 +580,11 @@ fun ImageDetailScreen(
         }
     }
 
-    // Toggle between "show image only" and "show image + detail panel"
-    // Toggle between "show image only" and "show image + detail panel"
-    // (threshold replaced by swipeThreshold)
+    // Full-screen viewer: no top bar at all (no title, no back arrow) — the
+    // image uses every pixel. Swipe down or system Back leaves the viewer.
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = {
-            if (showControls && !showDetailPanel) {
-                TopAppBar(
-                    // Full-screen viewer: the file name is intentionally not
-                    // shown here — only the back arrow.
-                    title = {},
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = "Back")
-                        }
-                    }
-                )
-            }
-        }
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Box(
             modifier = Modifier
@@ -680,7 +664,6 @@ fun ImageDetailScreen(
                                     onBack()
                                 } else if (verticalAccum < -swipeThreshold) {
                                     showDetailPanel = true
-                                    showControls = false
                                 } else if (horizontalAccum < -swipeThreshold) {
                                     onNextImage()
                                 } else if (horizontalAccum > swipeThreshold) {
@@ -778,7 +761,6 @@ fun ImageDetailScreen(
                                 onDragEnd = {
                                     if (dragVerticalAccum > swipeThreshold) {
                                         showDetailPanel = false
-                                        showControls = true
                                     }
                                     dragVerticalAccum = 0f
                                 },
@@ -788,10 +770,11 @@ fun ImageDetailScreen(
                                 }
                             )
                         },
-                    shape = RoundedCornerShape(26.dp),
-                    color = Color(0xCC1A1A1A),
+                    shape = RoundedCornerShape(22.dp),
+                    // Semi-transparent so the image stays visible behind the bar.
+                    color = Color(0x99000000),
                     tonalElevation = 0.dp,
-                    shadowElevation = 12.dp
+                    shadowElevation = 8.dp
                 ) {
                     Column {
                         Box(

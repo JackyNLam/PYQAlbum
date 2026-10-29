@@ -300,45 +300,45 @@ fun VaultScreen(onBack: () -> Unit) {
         )
     }
 
-    // Resolve the viewable path for [entry]: the plaintext path directly, or
-    // the decrypted cache file when the entry is encrypted. The saved
-    // encryption key is tried first; [pwd] (the vault password) is only a
-    // legacy fallback for entries encrypted before the separate key existed.
-    val resolveViewPath: (VaultEntry, String?) -> String? = { entry, pwd ->
+    // Resolve the viewable path for [entry]. Encrypted entries are NOT viewable:
+    // their bytes are AES-encrypted on disk and are only readable after an
+    // explicit decrypt (which rebuilds the plaintext file in the vault).
+    val resolveViewPath: (VaultEntry, String?) -> String? = { entry, _ ->
         if (entry.encrypted) {
-            var path: String? = null
-            VaultStorage.savedEncryptionKey(context)?.let { key ->
-                path = VaultStorage.decryptToCache(context, entry, key)
-            }
-            if (path == null && !pwd.isNullOrEmpty()) {
-                path = VaultStorage.decryptToCache(context, entry, pwd)
-            }
-            path
+            null
         } else {
             VaultStorage.entryFile(context, entry).absolutePath
         }
     }
 
-    /** Open the viewer for [entry]; encrypted entries prompt for the password. */
+    /**
+     * Open the viewer for [entry]. An encrypted entry cannot be viewed before
+     * it is decrypted, so tapping it asks for the encryption key first.
+     */
     val openViewer: (VaultEntry) -> Unit = { entry ->
-        viewingEntry = entry
-        viewPath = null
-        viewError = null
-        showVaultActions = false
-        viewerScale = 1f
-        viewerOffset = Offset.Zero
-        if (entry.encrypted && !authed) {
-            pendingAction = VaultAction.VIEW to entry
-            enteredPassword = ""
+        if (entry.encrypted) {
+            Toast.makeText(
+                context,
+                "Encrypted file — decrypt it before viewing",
+                Toast.LENGTH_SHORT
+            ).show()
+            pendingDecryptIds = setOf(entry.id)
+            decryptKeyInput = ""
             dialogError = null
-            showPasswordDialog = true
+            showDecryptKeyDialog = true
         } else {
+            viewingEntry = entry
+            viewPath = null
+            viewError = null
+            showVaultActions = false
+            viewerScale = 1f
+            viewerOffset = Offset.Zero
             scope.launch {
                 viewPath = withContext(Dispatchers.IO) {
                     resolveViewPath(entry, password)
                 }
                 if (viewPath == null) {
-                    viewError = "Wrong encryption key or corrupted file"
+                    viewError = "Could not read this file"
                 }
             }
         }
@@ -371,18 +371,18 @@ fun VaultScreen(onBack: () -> Unit) {
                         if (VaultStorage.encryptEntryWithSavedKey(context, entry)) "encrypted" else null
                     }
                     VaultAction.DECRYPT -> {
-                        // [pwd] is the encryption key the user typed.
-                        if (VaultStorage.decryptEntry(context, entry, pwd)) "decrypted" else null
+                        // [pwd] is the encryption key the user typed; decrypt
+                        // material is SHA-256(typed key).
+                        if (VaultStorage.decryptEntryWithTypedKey(context, entry, pwd)) "decrypted" else null
                     }
                     VaultAction.MOVE_OUT -> {
-                        val key = VaultStorage.savedEncryptionKey(context)
-                        val moved = if (entry.encrypted) {
-                            (key != null && VaultStorage.moveOut(context, entry, key)) ||
-                                (!pwd.isNullOrEmpty() && VaultStorage.moveOut(context, entry, pwd))
+                        // Encrypted files must be decrypted first — they can
+                        // never leave the vault while still encrypted.
+                        if (entry.encrypted) {
+                            null
                         } else {
-                            VaultStorage.moveOut(context, entry, null)
+                            if (VaultStorage.moveOut(context, entry, null)) "moved" else null
                         }
-                        if (moved) "moved" else null
                     }
                 }
             }
@@ -450,6 +450,13 @@ fun VaultScreen(onBack: () -> Unit) {
         } else if (action == VaultAction.DECRYPT) {
             // Decrypting always asks the user to type the encryption key.
             requestDecrypt(listOf(entry))
+        } else if (action == VaultAction.MOVE_OUT && entry.encrypted) {
+            // Encrypted files cannot leave the vault before being decrypted.
+            Toast.makeText(
+                context,
+                "Decrypt this file before moving it out",
+                Toast.LENGTH_SHORT
+            ).show()
         } else if (action == VaultAction.ENCRYPT && !VaultStorage.hasEncryptionKey(context)) {
             // The media encryption key must exist before anything is encrypted.
             pendingAction = VaultAction.ENCRYPT to entry
@@ -486,9 +493,9 @@ fun VaultScreen(onBack: () -> Unit) {
                                 VaultStorage.encryptEntryWithSavedKey(context, entry)
                             } else true
                             VaultAction.MOVE_OUT -> if (entry.encrypted) {
-                                val key = VaultStorage.savedEncryptionKey(context)
-                                (key != null && VaultStorage.moveOut(context, entry, key)) ||
-                                    VaultStorage.moveOut(context, entry, password)
+                                // Must be decrypted first — encrypted bytes
+                                // never leave the vault.
+                                false
                             } else {
                                 VaultStorage.moveOut(context, entry, null)
                             }
@@ -1835,35 +1842,49 @@ fun VaultScreen(onBack: () -> Unit) {
                     } else {
                         val key = decryptKeyInput
                         val ids = pendingDecryptIds
-                        scope.launch {
-                            val targets = entries.filter { it.id in ids && it.encrypted }
-                            var ok = 0
-                            for (entry in targets) {
-                                val done = withContext(Dispatchers.IO) {
-                                    VaultStorage.decryptEntry(context, entry, key)
+                        // Fail fast on a wrong key: the typed key is hashed and
+                        // compared with the saved hash before any file is touched.
+                        if (VaultStorage.hasEncryptionKey(context) &&
+                            !VaultStorage.verifyEncryptionKey(context, key)
+                        ) {
+                            dialogError = "Wrong encryption key — nothing was changed"
+                        } else {
+                            scope.launch {
+                                val targets = entries.filter { it.id in ids && it.encrypted }
+                                var ok = 0
+                                for (entry in targets) {
+                                    val done = withContext(Dispatchers.IO) {
+                                        // AES material = SHA-256(typed key). The
+                                        // vault password is only a legacy fallback
+                                        // for entries encrypted by older builds.
+                                        VaultStorage.decryptEntryWithTypedKey(
+                                            context, entry, key
+                                        ) || (password.isNotEmpty() &&
+                                            VaultStorage.decryptEntry(context, entry, password))
+                                    }
+                                    if (done) ok++
                                 }
-                                if (done) ok++
-                            }
-                            refreshEntries()
-                            if (ok == 0) {
-                                // Every file reverted to its encrypted state.
-                                dialogError = "Wrong encryption key — nothing was changed"
-                            } else {
-                                showDecryptKeyDialog = false
-                                decryptKeyInput = ""
-                                dialogError = null
-                                pendingDecryptIds = emptySet()
-                                vaultMultiSelect = false
-                                vaultSelection = emptySet()
-                                Toast.makeText(
-                                    context,
-                                    if (ok == targets.size) {
-                                        "Decrypted $ok file(s)"
-                                    } else {
-                                        "Decrypted $ok of ${targets.size} — the rest are unchanged"
-                                    },
-                                    Toast.LENGTH_SHORT
-                                ).show()
+                                refreshEntries()
+                                if (ok == 0) {
+                                    // Every file reverted to its encrypted state.
+                                    dialogError = "Wrong encryption key — nothing was changed"
+                                } else {
+                                    showDecryptKeyDialog = false
+                                    decryptKeyInput = ""
+                                    dialogError = null
+                                    pendingDecryptIds = emptySet()
+                                    vaultMultiSelect = false
+                                    vaultSelection = emptySet()
+                                    Toast.makeText(
+                                        context,
+                                        if (ok == targets.size) {
+                                            "Decrypted $ok file(s)"
+                                        } else {
+                                            "Decrypted $ok of ${targets.size} — the rest are unchanged"
+                                        },
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
                             }
                         }
                     }
@@ -2390,39 +2411,64 @@ fun verifyVaultPassword(context: Context, password: String): Boolean {
 
 // ===================== Separate encryption key =====================
 // The vault password unlocks the vault UI; this SECOND secret is what media is
-// actually encrypted with. It can only be set / changed while the vault is
-// unlocked (vault password verified), is stored in the same
-// EncryptedSharedPreferences, and is never shown back to the user — encrypting
-// uses it silently, decrypting requires the user to type it.
+// actually encrypted with. Only its SHA-256 HASH is ever stored — the typed key
+// itself is never persisted (nor displayed), and the hash is the AES key
+// material used for the file-data encryption (AES-256-GCM).
+//
+//   encrypt: material = SHA-256(saved key)          → silent, no prompt
+//   decrypt: material = SHA-256(user-typed key)     → must match the saved hash
 
-/** True once a storage encryption key has been saved. */
-fun hasVaultEncryptionKey(context: Context): Boolean {
-    return getVaultPrefs(context)?.getString("vault_enc_key", null) != null
+private const val ENC_KEY_HASH_PREFIX = "sha256:"
+
+/** Hex SHA-256 of a key — the only form that is stored or used as key material. */
+fun hashedEncryptionKey(key: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(key.toByteArray(Charsets.UTF_8))
+    return digest.joinToString("") { b -> "%02x".format(b.toInt() and 0xFF) }
 }
 
-/** Save (or replace) the storage encryption key. Requires an unlocked vault. */
+/** Stored hash, or null when no encryption key has been set. */
+private fun storedEncryptionKeyHash(context: Context): String? {
+    val stored = try {
+        getVaultPrefs(context)?.getString("vault_enc_key", null)
+    } catch (e: Exception) {
+        null
+    } ?: return null
+    return if (stored.startsWith(ENC_KEY_HASH_PREFIX)) {
+        stored.removePrefix(ENC_KEY_HASH_PREFIX)
+    } else {
+        // Migration from the earlier raw-value format (never shipped): hash it
+        // so the same typed key keeps verifying.
+        hashedEncryptionKey(stored)
+    }
+}
+
+/** True once a storage encryption key hash has been saved. */
+fun hasVaultEncryptionKey(context: Context): Boolean {
+    return storedEncryptionKeyHash(context) != null
+}
+
+/** Save only SHA-256(key); requires an unlocked vault. */
 fun setVaultEncryptionKey(context: Context, key: String) {
+    val stored = ENC_KEY_HASH_PREFIX + hashedEncryptionKey(key)
     try {
-        getVaultPrefs(context)?.edit()?.putString("vault_enc_key", key)?.apply()
+        getVaultPrefs(context)?.edit()?.putString("vault_enc_key", stored)?.apply()
     } catch (_: Exception) {
     }
 }
 
-/** The saved encryption key, or null when none has been set. Internal use only. */
-fun vaultEncryptionKey(context: Context): String? {
-    return try {
-        getVaultPrefs(context)?.getString("vault_enc_key", null)
-    } catch (e: Exception) {
-        null
-    }
-}
+/** The stored hash used as AES key material; null when none is configured. */
+fun vaultEncryptionKey(context: Context): String? = storedEncryptionKeyHash(context)
 
-/** Constant-time check of a typed encryption key against the saved one. */
+/** Hash a typed key for use as decrypt material. */
+fun encryptionKeyMaterial(typedKey: String): String = hashedEncryptionKey(typedKey)
+
+/** Constant-time check of a typed key against the stored hash. */
 fun verifyVaultEncryptionKey(context: Context, key: String): Boolean {
-    val stored = vaultEncryptionKey(context) ?: return false
+    val stored = storedEncryptionKeyHash(context) ?: return false
     return MessageDigest.isEqual(
         stored.toByteArray(Charsets.UTF_8),
-        key.toByteArray(Charsets.UTF_8)
+        hashedEncryptionKey(key).toByteArray(Charsets.UTF_8)
     )
 }
 
@@ -2464,11 +2510,18 @@ object VaultStorage {
     fun verifyEncryptionKey(context: Context, key: String): Boolean =
         verifyVaultEncryptionKey(context, key)
 
-    /** Encrypt using the saved key — no prompt, the key is never exposed. */
+    /** Encrypt using the saved key hash — no prompt, the key is never exposed. */
     fun encryptEntryWithSavedKey(context: Context, entry: VaultEntry): Boolean {
-        val key = vaultEncryptionKey(context) ?: return false
-        return encryptEntry(context, entry, key)
+        val material = vaultEncryptionKey(context) ?: return false
+        return encryptEntry(context, entry, material)
     }
+
+    /** Decrypt with SHA-256([typedKey]) — the material encryption used. */
+    fun decryptEntryWithTypedKey(
+        context: Context,
+        entry: VaultEntry,
+        typedKey: String
+    ): Boolean = decryptEntry(context, entry, encryptionKeyMaterial(typedKey))
 
     /** List vault entries, newest first. Orphaned entries (missing data file) are skipped. */
     fun listEntries(context: Context): List<VaultEntry> {
@@ -2876,6 +2929,10 @@ object VaultStorage {
     fun changeEncryptionKey(context: Context, oldKey: String, newKey: String): Int {
         if (!verifyVaultEncryptionKey(context, oldKey)) return -1
         if (newKey.isBlank() || newKey.length < 4) return -3
+        // The stored value is already a SHA-256 hash, used directly as the AES
+        // key material; only the hash of the NEW key is stored afterwards.
+        val oldMaterial = vaultEncryptionKey(context) ?: return -1
+        val newMaterial = encryptionKeyMaterial(newKey)
         val dir = vaultDir(context)
         val encryptedEntries = listEntries(context).filter { it.encrypted }
         val temps = mutableListOf<Pair<File, File>>()
@@ -2883,8 +2940,8 @@ object VaultStorage {
             try {
                 val finalFile = File(dir, "${entry.id}.vault")
                 val data = finalFile.readBytes()
-                val plain = VaultCrypto.decryptBytes(data, oldKey) ?: return -2
-                val reEnc = VaultCrypto.encryptBytes(plain, newKey)
+                val plain = VaultCrypto.decryptBytes(data, oldMaterial) ?: return -2
+                val reEnc = VaultCrypto.encryptBytes(plain, newMaterial)
                 val tempFile = File(dir, "${entry.id}.vault.tmp")
                 tempFile.writeBytes(reEnc)
                 if (!tempFile.exists() || tempFile.length() == 0L) {

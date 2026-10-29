@@ -11,6 +11,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -37,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
+import androidx.compose.foundation.rememberScrollState
 import coil3.compose.AsyncImage
 import com.pyqcr.ai.BrushMask
 import com.pyqcr.ai.BrushStroke
@@ -87,10 +89,10 @@ fun AreaSelectionDialog(
     var zoom by remember { mutableFloatStateOf(1f) }
     var panX by remember { mutableFloatStateOf(0f) }
     var panY by remember { mutableFloatStateOf(0f) }
-    // While zoomed, one-finger drags PAN the view instead of drawing; this is
-    // switched on when the user zooms in and can be toggled with the toolbar
-    // "Move view"/"Draw" button.
-    var panMode by remember { mutableStateOf(false) }
+    // One-finger drags PAN / pinch-zoom by default; selecting or painting is
+    // only possible after switching the toolbar to "Draw". In Move view the
+    // image can never be edited by accident.
+    var panMode by remember { mutableStateOf(true) }
     val context = LocalContext.current
 
     // Load intrinsic image dimensions so we can compute the actual
@@ -207,6 +209,10 @@ fun AreaSelectionDialog(
                         )
                         if (mode == SelectionMode.BRUSH && strokes.isNotEmpty()) {
                             TextButton(onClick = {
+                                strokes.clear()
+                                activeStroke = null
+                            }) { Text("Clear all", color = Color.White) }
+                            TextButton(onClick = {
                                 strokes.removeAt(strokes.lastIndex)
                                 activeStroke = null
                             }) { Text("Undo", color = Color.White) }
@@ -242,10 +248,10 @@ fun AreaSelectionDialog(
                             selected = mode == SelectionMode.BRUSH
                         ) { mode = SelectionMode.BRUSH }
                         Spacer(Modifier.weight(1f))
-                        OverlayChip(
-                            text = if (panMode) "Move view" else "Draw",
-                            selected = panMode
-                        ) { panMode = !panMode }
+                        // Gesture mode: Move (default, pans + pinch-zooms, never
+                        // edits) or Draw (select / paint).
+                        OverlayChip("Move", selected = panMode) { panMode = true }
+                        OverlayChip("Draw", selected = !panMode) { panMode = false }
                     }
                 }
 
@@ -267,10 +273,10 @@ fun AreaSelectionDialog(
                             awaitEachGesture {
                                 val down = awaitFirstDown(requireUnconsumed = false)
                                 if (mode == SelectionMode.RECT) {
-                                    // While zoomed, one-finger drags move the view
-                                    // (much easier than two-finger panning); the
-                                    // toolbar "Draw" button returns to selecting.
-                                    val dragPans = panMode && zoom > 1f
+                                    // "Move view" always pans — it never starts a
+                                    // selection, at any zoom level. Only "Draw"
+                                    // mode selects.
+                                    val dragPans = panMode
                                     if (!dragPans) {
                                         dragStart = down.position
                                         dragEnd = down.position
@@ -295,18 +301,13 @@ fun AreaSelectionDialog(
                                         } else {
                                             val zoomChange = event.calculateZoom()
                                             val panChange = event.calculatePan()
-                                            val wasZoomed = zoom > 1f
                                             val newZoom = (zoom * zoomChange).coerceIn(1f, 8f)
                                             zoom = newZoom
                                             if (newZoom > 1f) {
                                                 panBy(panChange.x * newZoom, panChange.y * newZoom)
-                                                // Entering zoom: default to one-finger panning
-                                                // (the Draw button still opts back into drawing).
-                                                if (!wasZoomed) panMode = true
                                             } else {
                                                 panX = 0f
                                                 panY = 0f
-                                                panMode = false
                                             }
                                             event.changes.forEach {
                                                 if (it.positionChanged()) it.consume()
@@ -314,7 +315,7 @@ fun AreaSelectionDialog(
                                         }
                                     } while (event.changes.any { it.pressed })
                                 } else {
-                                    val paintPans = panMode && zoom > 1f
+                                    val paintPans = panMode
                                     val pts = mutableListOf<BrushStrokePoint>()
                                     fun addPoint(pos: Offset) {
                                         val n = normalizedPoint(pos)
@@ -371,18 +372,13 @@ fun AreaSelectionDialog(
                                         } else {
                                             val zoomChange = event.calculateZoom()
                                             val panChange = event.calculatePan()
-                                            val wasZoomed = zoom > 1f
                                             val newZoom = (zoom * zoomChange).coerceIn(1f, 8f)
                                             zoom = newZoom
                                             if (newZoom > 1f) {
                                                 panBy(panChange.x * newZoom, panChange.y * newZoom)
-                                                // Entering zoom: default to one-finger panning
-                                                // (the Draw button still opts back into drawing).
-                                                if (!wasZoomed) panMode = true
                                             } else {
                                                 panX = 0f
                                                 panY = 0f
-                                                panMode = false
                                             }
                                             event.changes.forEach {
                                                 if (it.positionChanged()) it.consume()
@@ -537,10 +533,14 @@ fun AreaSelectionDialog(
                                 shape = RoundedCornerShape(8.dp)
                             ) {
                                 Text(
-                                    if (mode == SelectionMode.RECT)
-                                        "Drag to select area — pinch to zoom, one-finger drag moves the view"
-                                    else
-                                        "Paint to select area — pinch to zoom, one-finger drag moves the view",
+                                    when {
+                                        panMode ->
+                                            "Move view — drag to pan, pinch to zoom, tap Draw to select"
+                                        mode == SelectionMode.RECT ->
+                                            "Drag to select the area to edit"
+                                        else ->
+                                            "Paint the area to keep — tap Move to pan the view"
+                                    },
                                     color = Color.White,
                                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)
                                 )
@@ -573,7 +573,10 @@ fun AreaSelectionDialog(
                             color = Color(0xCC1A1A1A)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
@@ -583,7 +586,7 @@ fun AreaSelectionDialog(
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 BrushSizeDots(brushSize) { brushSize = it }
-                                Spacer(Modifier.weight(1f))
+                                Spacer(Modifier.width(8.dp))
                                 OverlayChip("Erase", eraser) { eraser = !eraser }
                                 Spacer(Modifier.width(4.dp))
                                 OverlayChip(
@@ -596,7 +599,7 @@ fun AreaSelectionDialog(
                                 }
                                 Spacer(Modifier.width(4.dp))
                                 OverlayChip(
-                                    "Clear",
+                                    "Clear all",
                                     selected = false,
                                     enabled = strokes.isNotEmpty()
                                 ) {
