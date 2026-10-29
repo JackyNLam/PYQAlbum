@@ -29,6 +29,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -109,7 +110,9 @@ fun ImageDetailScreen(
     var newTagName by remember { mutableStateOf("") }
     var showAddTag by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(true) }  // Toggle top/bottom bar
-    var showDetailPanel by remember { mutableStateOf(false) } // Swipe-up panel
+    var showDetailPanel by remember { mutableStateOf(false) } // Swipe-up action bar
+    var showInfoDialog by remember { mutableStateOf(false) }  // Details (metadata/rating)
+    var showTagsDialog by remember { mutableStateOf(false) }  // Tags editor
     val coroutineScope = rememberCoroutineScope()
 
     // Used to detect gesture directions with thresholds
@@ -587,7 +590,9 @@ fun ImageDetailScreen(
         topBar = {
             if (showControls && !showDetailPanel) {
                 TopAppBar(
-                    title = { Text(imageItem?.displayName ?: mediaFileName ?: "Image") },
+                    // Full-screen viewer: the file name is intentionally not
+                    // shown here — only the back arrow.
+                    title = {},
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.Default.ArrowBack, contentDescription = "Back")
@@ -603,18 +608,11 @@ fun ImageDetailScreen(
                 .padding(paddingValues)
         ) {
             // ===================== IMAGE AREA =====================
-            // Fill the available space: if detail panel is visible, take top half;
-            // otherwise fill entire screen.
-            val imageModifier = if (showDetailPanel) {
-                Modifier
-                    .fillMaxWidth()
-                    .fillMaxHeight(0.5f)
-                    .align(Alignment.TopCenter)
-            } else {
-                Modifier
-                    .fillMaxSize()
-                    .align(Alignment.Center)
-            }
+            // The image always fills the whole screen; the swipe-up action bar
+            // floats over it instead of splitting the screen.
+            val imageModifier = Modifier
+                .fillMaxSize()
+                .align(Alignment.Center)
 
             Box(
                 modifier = imageModifier
@@ -765,411 +763,346 @@ fun ImageDetailScreen(
                 }
             }
 
-            // ===================== DETAIL PANEL (swipe-up) =====================
+// ===================== ACTION BAR (swipe-up) =====================
+            // Compact semi-transparent icon bar: every single-image action is
+            // one tap away; anything needing detail opens a dialog on top.
             if (showDetailPanel) {
                 Surface(
                     modifier = Modifier
+                        .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .fillMaxHeight(0.62f)
-                        .align(Alignment.BottomCenter),
-                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 3.dp,
-                    shadowElevation = 16.dp
+                        .padding(horizontal = 10.dp)
+                        .padding(bottom = 26.dp)
+                        .pointerInput(Unit) {
+                            detectVerticalDragGestures(
+                                onDragEnd = {
+                                    if (dragVerticalAccum > swipeThreshold) {
+                                        showDetailPanel = false
+                                        showControls = true
+                                    }
+                                    dragVerticalAccum = 0f
+                                },
+                                onVerticalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    dragVerticalAccum += dragAmount
+                                }
+                            )
+                        },
+                    shape = RoundedCornerShape(26.dp),
+                    color = Color(0xCC1A1A1A),
+                    tonalElevation = 0.dp,
+                    shadowElevation = 12.dp
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .navigationBarsPadding()
-                            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp)
-                    ) {
-                        // Handle area + pull-down hint
+                    Column {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .pointerInput(Unit) {
-                                    detectVerticalDragGestures(
-                                        onDragEnd = {
-                                            if (dragVerticalAccum > swipeThreshold) {
-                                                // swipe down on panel → hide panel
-                                                showDetailPanel = false
-                                                showControls = true
-                                            }
-                                            dragVerticalAccum = 0f
-                                        },
-                                        onVerticalDrag = { change, dragAmount ->
-                                            change.consume()
-                                            dragVerticalAccum += dragAmount
-                                        }
-                                    )
-                                },
+                                .padding(top = 6.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(44.dp)
-                                        .height(4.dp)
-                                        .background(
-                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
-                                            shape = RoundedCornerShape(2.dp)
-                                        )
-                                )
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    "Swipe down to close",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                )
-                            }
-                        }
-
-                        Spacer(Modifier.height(10.dp))
-
-                    // ====== Metadata ======
-                    Text(
-                        text = imageItem?.displayName ?: "",
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                    ) {
-                        DetailChip("📁 ${imageItem?.folderName ?: "Unknown"}")
-                        if (imageItem?.width != null && imageItem?.height != null) {
-                            DetailChip("${imageItem?.width} × ${imageItem?.height}")
-                        }
-                        DetailChip(formatFileSize(imageItem?.sizeBytes ?: 0L))
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = fullPath ?: imageUri,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                        )
-                    }
-
-                    Spacer(Modifier.height(14.dp))
-
-                    // ====== Rating ======
-                    DetailSectionTitle("Rating")
-                    RatingBar(
-                        rating = rating,
-                        onRatingChange = { newRating ->
-                            rating = newRating
-                            coroutineScope.launch {
-                                repository.updateRating(imageUri, newRating)
-                            }
-                        }
-                    )
-
-                    // AI Score
-                    imageItem?.aiScore?.let { aiScore ->
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "AI Score: ${String.format("%.1f", aiScore)}/100",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        imageItem?.aiReason?.let { reason ->
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = reason,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            Box(
+                                modifier = Modifier
+                                    .width(36.dp)
+                                    .height(4.dp)
+                                    .background(
+                                        Color.White.copy(alpha = 0.35f),
+                                        shape = RoundedCornerShape(2.dp)
+                                    )
                             )
                         }
-                    }
-
-                    Spacer(Modifier.height(16.dp))
-
-                    // ====== Tags ======
-                    DetailSectionTitle("Tags")
-
-                    if (tags.isNotEmpty()) {
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.padding(vertical = 8.dp)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 4.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            items(tags) { tag ->
-                                TagChip(
-                                    text = tag.name,
-                                    onRemove = {
-                                        coroutineScope.launch {
-                                            tagDao.removeTagFromImage(imageUri, tag.id)
-                                            // Auto-delete tag if it has no images left
-                                            val remaining = tagDao.getImageUrisForTag(tag.id)
-                                            if (remaining.isEmpty()) {
-                                                tagDao.deleteTagById(tag.id)
-                                            }
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    } else {
-                        Text(
-                            text = "No tags",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(vertical = 8.dp)
-                        )
-                    }
-
-                    // Add tag — pick from existing or create new
-                    if (!showAddTag) {
-                        OutlinedButton(
-                            onClick = { showAddTag = true },
-                            modifier = Modifier.padding(top = 4.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Add,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text("Add Tag")
-                        }
-                    } else {
-                        Column(modifier = Modifier.padding(top = 8.dp)) {
-                            // Existing tags not already applied to this image
-                            val existingTagNames = tags.map { it.name }.toSet()
-                            val availableTags = allTags.filter { it.name !in existingTagNames }
-
-                            if (availableTags.isNotEmpty()) {
-                                Text(
-                                    text = "Select existing tag:",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(Modifier.height(4.dp))
-                                // Show available tags in a wrap layout built with FlowRow-like Row
-                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    availableTags.chunked(3).forEach { row ->
-                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                            row.forEach { tag ->
-                                                SuggestionChip(
-                                                    onClick = {
-                                                        coroutineScope.launch {
-                                                            if (tagDao.hasTag(imageUri, tag.id) == 0) {
-                                                                tagDao.addTagToImage(
-                                                                    ImageTagCrossRef(imageUri = imageUri, tagId = tag.id)
-                                                                )
-                                                            }
-                                                            showAddTag = false
-                                                        }
-                                                    },
-                                                    label = { Text(tag.name, style = MaterialTheme.typography.bodySmall) }
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            Spacer(Modifier.height(8.dp))
-
-                            // Create new tag input
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                OutlinedTextField(
-                                    value = newTagName,
-                                    onValueChange = { newTagName = it },
-                                    label = { Text("Create new tag") },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Button(
-                                    onClick = {
-                                        if (newTagName.isNotBlank()) {
-                                            coroutineScope.launch {
-                                                val tag = tagDao.getTagByName(newTagName.trim())
-                                                val tagId = if (tag != null) {
-                                                    tag.id
-                                                } else {
-                                                    tagDao.insertTag(TagEntity(name = newTagName.trim()))
-                                                }
-                                                if (tagDao.hasTag(imageUri, tagId) == 0) {
-                                                    tagDao.addTagToImage(
-                                                        ImageTagCrossRef(imageUri = imageUri, tagId = tagId)
-                                                    )
-                                                }
-                                                newTagName = ""
-                                                showAddTag = false
-                                            }
-                                        }
-                                    }
-                                ) {
-                                    Text("Add")
-                                }
-                            }
-
-                            Spacer(Modifier.height(4.dp))
-                            TextButton(onClick = { showAddTag = false }) {
-                                Text("Cancel", color = MaterialTheme.colorScheme.error)
-                            }
-                        }
-                    }
-
-                    Spacer(Modifier.height(16.dp))
-
-                    // ====== AI actions (below the tag area) — toggles, like the batch menu ======
-                    DetailSectionTitle("AI Actions")
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        // AI Rating — toggle this image in/out of the rating queue
-                        Button(
-                            onClick = toggleAiRanking,
-                            modifier = Modifier.weight(1f),
-                            colors = if (imageUri in aiSelectedUris) {
-                                ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.primary
-                                )
-                            } else {
-                                ButtonDefaults.buttonColors()
-                            }
-                        ) {
-                            Icon(
+                            DetailIconButton(Icons.Default.Info, "Info") { showInfoDialog = true }
+                            DetailIconButton(Icons.Default.Label, "Tags") { showTagsDialog = true }
+                            DetailIconButton(
                                 Icons.Default.AutoAwesome,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(if (imageUri in aiSelectedUris) "AI Rating ✓" else "AI Rating")
-                        }
-                        // AI Edit — toggle source/target role via a small dialog
-                        Button(
-                            onClick = { showAiEditRoleDialog = true },
-                            modifier = Modifier.weight(1f),
-                            colors = if (aiEditSource || aiEditTarget) {
-                                ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.primary
-                                )
-                            } else {
-                                ButtonDefaults.buttonColors()
-                            }
-                        ) {
-                            Icon(
+                                "AI Rating",
+                                active = imageUri in aiSelectedUris
+                            ) { toggleAiRanking() }
+                            DetailIconButton(
                                 Icons.Default.Edit,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(if (aiEditSource || aiEditTarget) "AI Edit ✓" else "AI Edit")
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    // Favourite — platform flag other apps (WeChat, Google Photos) can read
-                    OutlinedButton(
-                        onClick = toggleFavourite,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(
-                            Icons.Default.Favorite,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                            tint = if (isFavourite) Color(0xFFE91E63) else LocalContentColor.current
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(if (isFavourite) "Favourite ✓" else "Mark as Favourite")
-                    }
-
-                    Spacer(Modifier.height(16.dp))
-
-                    // ====== More actions (same as the album's batch select menu) ======
-                    DetailSectionTitle("More Actions")
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        DetailActionButton(
-                            icon = Icons.Default.PhotoSizeSelectLarge,
-                            label = "Resize",
-                            onClick = { showResizeDialog = true },
-                            modifier = Modifier.weight(1f)
-                        )
-                        DetailActionButton(
-                            icon = Icons.Default.DriveFileRenameOutline,
-                            label = "Rename",
-                            onClick = { openRenameDialog() },
-                            modifier = Modifier.weight(1f)
-                        )
-                        DetailActionButton(
-                            icon = Icons.Default.SaveAlt,
-                            label = "Copy",
-                            onClick = {
+                                "AI Edit",
+                                active = aiEditSource || aiEditTarget
+                            ) { showAiEditRoleDialog = true }
+                            DetailIconButton(
+                                Icons.Default.Favorite,
+                                "Favourite",
+                                active = isFavourite,
+                                tint = if (isFavourite) Color(0xFFE91E63) else Color.White
+                            ) { toggleFavourite() }
+                            DetailIconButton(Icons.Default.PhotoSizeSelectLarge, "Resize") {
+                                showResizeDialog = true
+                            }
+                            DetailIconButton(Icons.Default.DriveFileRenameOutline, "Rename") {
+                                openRenameDialog()
+                            }
+                            DetailIconButton(Icons.Default.SaveAlt, "Copy") {
                                 destinationDialogOp = "copy"
                                 folderBrowserDir = Environment.getExternalStorageDirectory()
                                 showDestinationDialog = true
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        DetailActionButton(
-                            icon = Icons.Default.Forward,
-                            label = "Move",
-                            onClick = {
+                            }
+                            DetailIconButton(Icons.Default.Forward, "Move") {
                                 destinationDialogOp = "move"
                                 folderBrowserDir = Environment.getExternalStorageDirectory()
                                 showDestinationDialog = true
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        DetailActionButton(
-                            icon = Icons.Default.Lock,
-                            label = "Vault",
-                            onClick = {
+                            }
+                            DetailIconButton(Icons.Default.Lock, "Vault") {
                                 coroutineScope.launch {
                                     val name = VaultStorage.galleryDisplayName(context, imageUri)
                                     val imported = withContext(Dispatchers.IO) {
                                         VaultStorage.importFromGallery(context, imageUri, name)
                                     }
                                     if (imported) {
-                                        trashUris(listOf(imageUri), "Moved to photo vault", "Moved to photo vault")
+                                        trashUris(
+                                            listOf(imageUri),
+                                            "Moved to photo vault",
+                                            "Moved to photo vault"
+                                        )
                                     } else {
                                         snackbarHostState.showSnackbar("Could not move to the vault")
                                     }
                                 }
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        DetailActionButton(
-                            icon = Icons.Default.Delete,
-                            label = "Delete",
-                            onClick = {
-                                trashUris(listOf(imageUri), "Moved to the recycle bin", "Deleted permanently")
-                            },
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.weight(1f)
-                        )
+                            }
+                            DetailIconButton(
+                                Icons.Default.Delete,
+                                "Delete",
+                                tint = Color(0xFFFF6E6E)
+                            ) {
+                                trashUris(
+                                    listOf(imageUri),
+                                    "Moved to the recycle bin",
+                                    "Deleted permanently"
+                                )
+                            }
+                        }
                     }
+                }
+            }
 
+            // Info dialog — metadata, path, rating and AI score (everything the
+            // old full-height swipe-up panel used to show).
+            if (showInfoDialog) {
+                AlertDialog(
+                    onDismissRequest = { showInfoDialog = false },
+                    title = { Text("Details") },
+                    text = {
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 460.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.horizontalScroll(rememberScrollState())
+                            ) {
+                                DetailChip("📁 ${imageItem?.folderName ?: "Unknown"}")
+                                if ((imageItem?.width ?: 0) > 0 && (imageItem?.height ?: 0) > 0) {
+                                    DetailChip("${imageItem?.width} × ${imageItem?.height}")
+                                }
+                                DetailChip(formatFileSize(imageItem?.sizeBytes ?: 0L))
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = fullPath ?: imageUri,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                            Spacer(Modifier.height(14.dp))
+                            DetailSectionTitle("Rating")
+                            Spacer(Modifier.height(6.dp))
+                            RatingBar(
+                                rating = rating,
+                                onRatingChange = { newRating ->
+                                    rating = newRating
+                                    coroutineScope.launch {
+                                        repository.updateRating(imageUri, newRating)
+                                    }
+                                }
+                            )
+                            imageItem?.aiScore?.let { aiScore ->
+                                Spacer(Modifier.height(10.dp))
+                                Text(
+                                    text = "AI Score: ${String.format("%.1f", aiScore)}/100",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                imageItem?.aiReason?.let { reason ->
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        text = reason,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { showInfoDialog = false }) { Text("Close") }
+                    }
+                )
+            }
+
+            // Tags dialog — same tag list / add-tag flow as before, opened from
+            // the bar's Tags icon.
+            if (showTagsDialog) {
+                AlertDialog(
+                    onDismissRequest = {
+                        showTagsDialog = false
+                        showAddTag = false
+                    },
+                    title = { Text("Tags") },
+                    text = {
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 440.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            if (tags.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    tags.forEach { tag ->
+                                        TagChip(
+                                            text = tag.name,
+                                            onRemove = {
+                                                coroutineScope.launch {
+                                                    tagDao.removeTagFromImage(imageUri, tag.id)
+                                                    val remaining = tagDao.getImageUrisForTag(tag.id)
+                                                    if (remaining.isEmpty()) {
+                                                        tagDao.deleteTagById(tag.id)
+                                                    }
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            } else {
+                                Text(
+                                    text = "No tags",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            if (!showAddTag) {
+                                OutlinedButton(onClick = { showAddTag = true }) {
+                                    Icon(
+                                        Icons.Default.Add,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Add Tag")
+                                }
+                            } else {
+                                val existingTagNames = tags.map { it.name }.toSet()
+                                val availableTags = allTags.filter { it.name !in existingTagNames }
+                                if (availableTags.isNotEmpty()) {
+                                    Text(
+                                        text = "Select existing tag:",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        availableTags.chunked(3).forEach { row ->
+                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                row.forEach { tag ->
+                                                    SuggestionChip(
+                                                        onClick = {
+                                                            coroutineScope.launch {
+                                                                if (tagDao.hasTag(imageUri, tag.id) == 0) {
+                                                                    tagDao.addTagToImage(
+                                                                        ImageTagCrossRef(
+                                                                            imageUri = imageUri,
+                                                                            tagId = tag.id
+                                                                        )
+                                                                    )
+                                                                }
+                                                                showAddTag = false
+                                                            }
+                                                        },
+                                                        label = {
+                                                            Text(
+                                                                tag.name,
+                                                                style = MaterialTheme.typography.bodySmall
+                                                            )
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    OutlinedTextField(
+                                        value = newTagName,
+                                        onValueChange = { newTagName = it },
+                                        label = { Text("Create new tag") },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Button(
+                                        onClick = {
+                                            if (newTagName.isNotBlank()) {
+                                                coroutineScope.launch {
+                                                    val tag = tagDao.getTagByName(newTagName.trim())
+                                                    val tagId = if (tag != null) {
+                                                        tag.id
+                                                    } else {
+                                                        tagDao.insertTag(
+                                                            TagEntity(name = newTagName.trim())
+                                                        )
+                                                    }
+                                                    if (tagDao.hasTag(imageUri, tagId) == 0) {
+                                                        tagDao.addTagToImage(
+                                                            ImageTagCrossRef(
+                                                                imageUri = imageUri,
+                                                                tagId = tagId
+                                                            )
+                                                        )
+                                                    }
+                                                    newTagName = ""
+                                                    showAddTag = false
+                                                }
+                                            }
+                                        }
+                                    ) { Text("Add") }
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                TextButton(onClick = { showAddTag = false }) {
+                                    Text("Cancel", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showTagsDialog = false
+                            showAddTag = false
+                        }) { Text("Done") }
+                    }
+                )
+            }
                     // AI Edit role dialog — same source/target roles as the batch menu
                     if (showAiEditRoleDialog) {
                         AlertDialog(
@@ -1419,9 +1352,6 @@ fun ImageDetailScreen(
                     }
                 }
             }
-        }
-    }
-}
 
 /** Small rounded label used for the metadata row in the swipe-up panel. */
 @Composable
@@ -1451,32 +1381,37 @@ private fun DetailSectionTitle(text: String) {
     )
 }
 
-/** Compact icon + label action tile used in the swipe-up panel's action grid. */
+/** One icon + caption cell in the floating swipe-up action bar. */
 @Composable
-private fun DetailActionButton(
+private fun DetailIconButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    tint: Color = MaterialTheme.colorScheme.onSurface
+    active: Boolean = false,
+    tint: Color = Color.White,
+    onClick: () -> Unit
 ) {
-    OutlinedButton(
-        onClick = onClick,
-        modifier = modifier.height(48.dp),
-        contentPadding = PaddingValues(horizontal = 4.dp)
+    val fg = if (active) Color(0xFF7FD4FF) else tint
+    Column(
+        modifier = Modifier
+            .width(62.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(
             icon,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = tint
+            contentDescription = label,
+            modifier = Modifier.size(22.dp),
+            tint = fg
         )
-        Spacer(Modifier.width(4.dp))
+        Spacer(Modifier.height(3.dp))
         Text(
-            label,
-            style = MaterialTheme.typography.labelMedium,
-            color = tint,
-            maxLines = 1
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = fg.copy(alpha = 0.9f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

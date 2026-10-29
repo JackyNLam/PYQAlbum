@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -171,6 +172,19 @@ fun VaultScreen(onBack: () -> Unit) {
     var newVaultPassword by remember { mutableStateOf("") }
     var newVaultPasswordConfirm by remember { mutableStateOf("") }
 
+    // Storage encryption key — a SECOND secret (separate from the vault
+    // password) used for the media bytes. It can only be set/changed while the
+    // vault is unlocked and is never displayed back to the user.
+    var showEncryptionKeyDialog by remember { mutableStateOf(false) }
+    var encKeyCurrent by remember { mutableStateOf("") }
+    var encKeyNew by remember { mutableStateOf("") }
+    var encKeyConfirm by remember { mutableStateOf("") }
+
+    // Decrypt prompt — the user must type the encryption key.
+    var showDecryptKeyDialog by remember { mutableStateOf(false) }
+    var decryptKeyInput by remember { mutableStateOf("") }
+    var pendingDecryptIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
     val scope = rememberCoroutineScope()
 
     // Originals of moved images leave the gallery — recycle bin first (API 30+,
@@ -285,11 +299,19 @@ fun VaultScreen(onBack: () -> Unit) {
     }
 
     // Resolve the viewable path for [entry]: the plaintext path directly, or
-    // the decrypted cache file when the entry is encrypted (needs [pwd]).
+    // the decrypted cache file when the entry is encrypted. The saved
+    // encryption key is tried first; [pwd] (the vault password) is only a
+    // legacy fallback for entries encrypted before the separate key existed.
     val resolveViewPath: (VaultEntry, String?) -> String? = { entry, pwd ->
         if (entry.encrypted) {
-            if (pwd.isNullOrEmpty()) null
-            else VaultStorage.decryptToCache(context, entry, pwd)
+            var path: String? = null
+            VaultStorage.savedEncryptionKey(context)?.let { key ->
+                path = VaultStorage.decryptToCache(context, entry, key)
+            }
+            if (path == null && !pwd.isNullOrEmpty()) {
+                path = VaultStorage.decryptToCache(context, entry, pwd)
+            }
+            path
         } else {
             VaultStorage.entryFile(context, entry).absolutePath
         }
@@ -314,7 +336,7 @@ fun VaultScreen(onBack: () -> Unit) {
                     resolveViewPath(entry, password)
                 }
                 if (viewPath == null) {
-                    viewError = "Wrong password or corrupted file"
+                    viewError = "Wrong encryption key or corrupted file"
                 }
             }
         }
@@ -342,19 +364,29 @@ fun VaultScreen(onBack: () -> Unit) {
                 when (action) {
                     VaultAction.VIEW -> resolveViewPath(entry, pwd)
                     VaultAction.ENCRYPT -> {
-                        if (VaultStorage.encryptEntry(context, entry, pwd)) "encrypted" else null
+                        // Encryption uses the saved key silently — the user
+                        // never has to retype it.
+                        if (VaultStorage.encryptEntryWithSavedKey(context, entry)) "encrypted" else null
                     }
                     VaultAction.DECRYPT -> {
+                        // [pwd] is the encryption key the user typed.
                         if (VaultStorage.decryptEntry(context, entry, pwd)) "decrypted" else null
                     }
                     VaultAction.MOVE_OUT -> {
-                        if (VaultStorage.moveOut(context, entry, pwd)) "moved" else null
+                        val key = VaultStorage.savedEncryptionKey(context)
+                        val moved = if (entry.encrypted) {
+                            (key != null && VaultStorage.moveOut(context, entry, key)) ||
+                                (!pwd.isNullOrEmpty() && VaultStorage.moveOut(context, entry, pwd))
+                        } else {
+                            VaultStorage.moveOut(context, entry, null)
+                        }
+                        if (moved) "moved" else null
                     }
                 }
             }
             if (action == VaultAction.VIEW) {
                 if (result == null) {
-                    viewError = "Wrong password or corrupted file"
+                    viewError = "Wrong encryption key or corrupted file"
                 } else {
                     viewPath = result
                 }
@@ -366,15 +398,37 @@ fun VaultScreen(onBack: () -> Unit) {
                 Toast.makeText(
                     context,
                     when (result) {
-                        "encrypted" -> "Encrypted — password required to view now"
-                        "decrypted" -> "Decrypted — visible without a password"
+                        "encrypted" -> "Encrypted — the encryption key is required to decrypt"
+                        "decrypted" -> "Decrypted — visible without a key"
                         "moved" -> "Moved back to its original folder"
-                        else -> "Operation failed — wrong password?"
+                        else -> "Operation failed — wrong encryption key?"
                     },
                     Toast.LENGTH_SHORT
                 ).show()
             }
         }
+    }
+
+    /** Ask for the encryption key, then decrypt [targets] (single or batch). */
+    val requestDecrypt: (List<VaultEntry>) -> Unit = { targets ->
+        val encryptedTargets = targets.filter { it.encrypted }
+        if (encryptedTargets.isEmpty()) {
+            Toast.makeText(context, "Nothing to decrypt", Toast.LENGTH_SHORT).show()
+        } else {
+            pendingDecryptIds = encryptedTargets.map { it.id }.toSet()
+            decryptKeyInput = ""
+            dialogError = null
+            showDecryptKeyDialog = true
+        }
+    }
+
+    /** Open the set/change dialog for the storage encryption key. */
+    val openEncryptionKeyDialog: () -> Unit = {
+        encKeyCurrent = ""
+        encKeyNew = ""
+        encKeyConfirm = ""
+        dialogError = null
+        showEncryptionKeyDialog = true
     }
 
     /** Run [action] for [entry], requesting the vault password when needed. */
@@ -391,42 +445,65 @@ fun VaultScreen(onBack: () -> Unit) {
             enteredPassword = ""
             dialogError = null
             showPasswordDialog = true
+        } else if (action == VaultAction.DECRYPT) {
+            // Decrypting always asks the user to type the encryption key.
+            requestDecrypt(listOf(entry))
+        } else if (action == VaultAction.ENCRYPT && !VaultStorage.hasEncryptionKey(context)) {
+            // The media encryption key must exist before anything is encrypted.
+            pendingAction = VaultAction.ENCRYPT to entry
+            openEncryptionKeyDialog()
         } else {
             runVaultAction(action, entry, password)
         }
     }
 
     /**
-     * Run a batch encrypt/decrypt/move-out over the current vault selection
-     * using the verified vault password (the vault is already unlocked when
-     * the folder grids are visible).
+     * Run a batch encrypt/decrypt/move-out over the current vault selection.
+     * Encrypt uses the saved key; decrypt asks for the key (typed) so a wrong
+     * entry never touches the files.
      */
     val runVaultBatch: (VaultAction) -> Unit = { action ->
         val selected = entries.filter { it.id in vaultSelection }
-        if (selected.isNotEmpty()) {
-            scope.launch {
-                var ok = 0
-                for (entry in selected) {
-                    val result = when (action) {
-                        VaultAction.ENCRYPT -> if (!entry.encrypted) {
-                            VaultStorage.encryptEntry(context, entry, password)
-                        } else true
-                        VaultAction.DECRYPT -> if (entry.encrypted) {
-                            VaultStorage.decryptEntry(context, entry, password)
-                        } else true
-                        VaultAction.MOVE_OUT -> VaultStorage.moveOut(context, entry, password)
-                        VaultAction.VIEW -> false
-                    }
-                    if (result) ok++
-                }
-                refreshEntries()
-                vaultMultiSelect = false
-                vaultSelection = emptySet()
+        when {
+            selected.isEmpty() -> Unit
+            action == VaultAction.DECRYPT -> requestDecrypt(selected)
+            action == VaultAction.ENCRYPT && !VaultStorage.hasEncryptionKey(context) -> {
                 Toast.makeText(
                     context,
-                    "$ok of ${selected.size} updated",
+                    "Set an encryption key first",
                     Toast.LENGTH_SHORT
                 ).show()
+                openEncryptionKeyDialog()
+            }
+            else -> {
+                scope.launch {
+                    var ok = 0
+                    for (entry in selected) {
+                        val result = when (action) {
+                            VaultAction.ENCRYPT -> if (!entry.encrypted) {
+                                VaultStorage.encryptEntryWithSavedKey(context, entry)
+                            } else true
+                            VaultAction.MOVE_OUT -> if (entry.encrypted) {
+                                val key = VaultStorage.savedEncryptionKey(context)
+                                (key != null && VaultStorage.moveOut(context, entry, key)) ||
+                                    VaultStorage.moveOut(context, entry, password)
+                            } else {
+                                VaultStorage.moveOut(context, entry, null)
+                            }
+                            VaultAction.DECRYPT -> true
+                            VaultAction.VIEW -> false
+                        }
+                        if (result) ok++
+                    }
+                    refreshEntries()
+                    vaultMultiSelect = false
+                    vaultSelection = emptySet()
+                    Toast.makeText(
+                        context,
+                        "$ok of ${selected.size} updated",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         }
     }
@@ -469,6 +546,12 @@ fun VaultScreen(onBack: () -> Unit) {
                 },
                 actions = {
                     if (authed) {
+                        IconButton(onClick = { openEncryptionKeyDialog() }) {
+                            Icon(
+                                Icons.Default.VpnKey,
+                                contentDescription = "Storage encryption key"
+                            )
+                        }
                         IconButton(onClick = {
                             oldVaultPassword = ""
                             newVaultPassword = ""
@@ -544,6 +627,25 @@ fun VaultScreen(onBack: () -> Unit) {
                             )
                             Spacer(Modifier.width(6.dp))
                             Text("Move from Gallery")
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        // Second secret, separate from the vault password: it
+                        // can be set/changed here but is never shown again.
+                        TextButton(onClick = { openEncryptionKeyDialog() }) {
+                            Icon(
+                                Icons.Default.VpnKey,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                if (VaultStorage.hasEncryptionKey(context)) {
+                                    "Encryption key"
+                                } else {
+                                    "Set encryption key"
+                                },
+                                style = MaterialTheme.typography.labelLarge
+                            )
                         }
                     }
 
@@ -1180,7 +1282,7 @@ fun VaultScreen(onBack: () -> Unit) {
                             }
                             if (entry.encrypted) {
                                 Text(
-                                    text = "🔒 Encrypted — password required to view",
+                                    text = "🔒 Encrypted — encryption key required to decrypt",
                                     color = Color.White.copy(alpha = 0.8f),
                                     style = MaterialTheme.typography.labelSmall
                                 )
@@ -1321,7 +1423,16 @@ fun VaultScreen(onBack: () -> Unit) {
                             val pending = pendingAction
                             pendingAction = null
                             if (pending != null) {
-                                runVaultAction(pending.first, pending.second, newPassword)
+                                if (pending.first == VaultAction.ENCRYPT &&
+                                    !VaultStorage.hasEncryptionKey(context)
+                                ) {
+                                    // The second secret has not been created
+                                    // yet — ask for it before encrypting.
+                                    pendingAction = pending
+                                    openEncryptionKeyDialog()
+                                } else {
+                                    runVaultAction(pending.first, pending.second, newPassword)
+                                }
                             } else {
                                 refreshEntries()
                             }
@@ -1512,6 +1623,258 @@ fun VaultScreen(onBack: () -> Unit) {
                 TextButton(onClick = {
                     showChangePasswordDialog = false
                     dialogError = null
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // ===================== Storage encryption key (set / change) =====================
+    // Only reachable while the vault is unlocked. The key itself is never
+    // displayed — after saving, the user can only replace it.
+    if (showEncryptionKeyDialog) {
+        val hasKey = VaultStorage.hasEncryptionKey(context)
+        AlertDialog(
+            onDismissRequest = {
+                showEncryptionKeyDialog = false
+                dialogError = null
+                if (pendingAction?.first == VaultAction.ENCRYPT) pendingAction = null
+            },
+            title = { Text(if (hasKey) "Change encryption key" else "Set encryption key") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = "This is a SECOND password, separate from the vault password. " +
+                            "Media is encrypted with it automatically; decrypting requires " +
+                            "typing it. It is stored encrypted and cannot be viewed again — " +
+                            "remember it or write it down. Without it, encrypted files stay locked.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    if (hasKey) {
+                        OutlinedTextField(
+                            value = encKeyCurrent,
+                            onValueChange = {
+                                encKeyCurrent = it
+                                dialogError = null
+                            },
+                            label = { Text("Current encryption key") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    OutlinedTextField(
+                        value = encKeyNew,
+                        onValueChange = {
+                            encKeyNew = it
+                            dialogError = null
+                        },
+                        label = {
+                            Text(if (hasKey) "New encryption key" else "Encryption key")
+                        },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = encKeyConfirm,
+                        onValueChange = {
+                            encKeyConfirm = it
+                            dialogError = null
+                        },
+                        label = { Text("Confirm encryption key") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    if (dialogError != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = dialogError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    when {
+                        hasKey && encKeyCurrent.isBlank() -> {
+                            dialogError = "Enter the current encryption key"
+                        }
+                        encKeyNew.length < 4 -> {
+                            dialogError = "Key must be at least 4 characters"
+                        }
+                        encKeyNew != encKeyConfirm -> {
+                            dialogError = "Keys do not match"
+                        }
+                        else -> {
+                            val newKey = encKeyNew
+                            if (hasKey) {
+                                val currentKey = encKeyCurrent
+                                scope.launch {
+                                    val count = withContext(Dispatchers.IO) {
+                                        VaultStorage.changeEncryptionKey(
+                                            context, currentKey, newKey
+                                        )
+                                    }
+                                    when (count) {
+                                        -1 -> dialogError = "Wrong current encryption key"
+                                        -2 -> dialogError = "Some encrypted files could not be " +
+                                            "re-encrypted — key unchanged"
+                                        else -> {
+                                            showEncryptionKeyDialog = false
+                                            dialogError = null
+                                            Toast.makeText(
+                                                context,
+                                                if (count == 0) "Encryption key changed"
+                                                else "Encryption key changed — $count file(s) re-encrypted",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                            val pending = pendingAction
+                                            pendingAction = null
+                                            if (pending != null &&
+                                                pending.first == VaultAction.ENCRYPT
+                                            ) {
+                                                runVaultAction(
+                                                    pending.first, pending.second, newKey
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                VaultStorage.setEncryptionKey(context, newKey)
+                                showEncryptionKeyDialog = false
+                                dialogError = null
+                                Toast.makeText(
+                                    context,
+                                    "Encryption key saved — it cannot be viewed again",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                val pending = pendingAction
+                                pendingAction = null
+                                if (pending != null && pending.first == VaultAction.ENCRYPT) {
+                                    runVaultAction(pending.first, pending.second, newKey)
+                                }
+                            }
+                        }
+                    }
+                }) {
+                    Text(if (hasKey) "Change" else "Save key")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showEncryptionKeyDialog = false
+                    dialogError = null
+                    if (pendingAction?.first == VaultAction.ENCRYPT) pendingAction = null
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // ===================== Decrypt: type the encryption key =====================
+    if (showDecryptKeyDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showDecryptKeyDialog = false
+                decryptKeyInput = ""
+                dialogError = null
+                pendingDecryptIds = emptySet()
+            },
+            title = { Text("Enter encryption key") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = "Type the storage encryption key to decrypt. A wrong key " +
+                            "changes nothing — every file stays encrypted exactly as before.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = decryptKeyInput,
+                        onValueChange = {
+                            decryptKeyInput = it
+                            dialogError = null
+                        },
+                        label = { Text("Encryption key") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    if (dialogError != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = dialogError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (decryptKeyInput.isEmpty()) {
+                        dialogError = "Enter the encryption key"
+                    } else {
+                        val key = decryptKeyInput
+                        val ids = pendingDecryptIds
+                        scope.launch {
+                            val targets = entries.filter { it.id in ids && it.encrypted }
+                            var ok = 0
+                            for (entry in targets) {
+                                val done = withContext(Dispatchers.IO) {
+                                    VaultStorage.decryptEntry(context, entry, key)
+                                }
+                                if (done) ok++
+                            }
+                            refreshEntries()
+                            if (ok == 0) {
+                                // Every file reverted to its encrypted state.
+                                dialogError = "Wrong encryption key — nothing was changed"
+                            } else {
+                                showDecryptKeyDialog = false
+                                decryptKeyInput = ""
+                                dialogError = null
+                                pendingDecryptIds = emptySet()
+                                vaultMultiSelect = false
+                                vaultSelection = emptySet()
+                                Toast.makeText(
+                                    context,
+                                    if (ok == targets.size) {
+                                        "Decrypted $ok file(s)"
+                                    } else {
+                                        "Decrypted $ok of ${targets.size} — the rest are unchanged"
+                                    },
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }
+                }) {
+                    Text("Decrypt")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showDecryptKeyDialog = false
+                    decryptKeyInput = ""
+                    dialogError = null
+                    pendingDecryptIds = emptySet()
                 }) {
                     Text("Cancel")
                 }
@@ -2023,6 +2386,44 @@ fun verifyVaultPassword(context: Context, password: String): Boolean {
     }
 }
 
+// ===================== Separate encryption key =====================
+// The vault password unlocks the vault UI; this SECOND secret is what media is
+// actually encrypted with. It can only be set / changed while the vault is
+// unlocked (vault password verified), is stored in the same
+// EncryptedSharedPreferences, and is never shown back to the user — encrypting
+// uses it silently, decrypting requires the user to type it.
+
+/** True once a storage encryption key has been saved. */
+fun hasVaultEncryptionKey(context: Context): Boolean {
+    return getVaultPrefs(context)?.getString("vault_enc_key", null) != null
+}
+
+/** Save (or replace) the storage encryption key. Requires an unlocked vault. */
+fun setVaultEncryptionKey(context: Context, key: String) {
+    try {
+        getVaultPrefs(context)?.edit()?.putString("vault_enc_key", key)?.apply()
+    } catch (_: Exception) {
+    }
+}
+
+/** The saved encryption key, or null when none has been set. Internal use only. */
+fun vaultEncryptionKey(context: Context): String? {
+    return try {
+        getVaultPrefs(context)?.getString("vault_enc_key", null)
+    } catch (e: Exception) {
+        null
+    }
+}
+
+/** Constant-time check of a typed encryption key against the saved one. */
+fun verifyVaultEncryptionKey(context: Context, key: String): Boolean {
+    val stored = vaultEncryptionKey(context) ?: return false
+    return MessageDigest.isEqual(
+        stored.toByteArray(Charsets.UTF_8),
+        key.toByteArray(Charsets.UTF_8)
+    )
+}
+
 // ===================== Vault storage =====================
 
 object VaultStorage {
@@ -2048,6 +2449,24 @@ object VaultStorage {
 
     fun verifyPassword(context: Context, password: String): Boolean =
         verifyVaultPassword(context, password)
+
+    // ---- Separate storage encryption key (see the top-level helpers) ----
+
+    fun hasEncryptionKey(context: Context): Boolean = hasVaultEncryptionKey(context)
+
+    fun setEncryptionKey(context: Context, key: String) = setVaultEncryptionKey(context, key)
+
+    /** Saved key used silently when encrypting; null when none is configured. */
+    fun savedEncryptionKey(context: Context): String? = vaultEncryptionKey(context)
+
+    fun verifyEncryptionKey(context: Context, key: String): Boolean =
+        verifyVaultEncryptionKey(context, key)
+
+    /** Encrypt using the saved key — no prompt, the key is never exposed. */
+    fun encryptEntryWithSavedKey(context: Context, entry: VaultEntry): Boolean {
+        val key = vaultEncryptionKey(context) ?: return false
+        return encryptEntry(context, entry, key)
+    }
 
     /** List vault entries, newest first. Orphaned entries (missing data file) are skipped. */
     fun listEntries(context: Context): List<VaultEntry> {
@@ -2180,22 +2599,34 @@ object VaultStorage {
      * success.
      */
     fun encryptEntry(context: Context, entry: VaultEntry, password: String): Boolean {
+        if (entry.encrypted || password.isEmpty()) return false
+        val tempFile = File(vaultDir(context), "${entry.id}.vault.tmp")
         return try {
-            if (entry.encrypted || password.isEmpty()) return false
             val src = entryFile(context, entry)
             val bytes = src.readBytes()
             if (bytes.isEmpty()) return false
             val enc = VaultCrypto.encryptBytes(bytes, password)
-            val vaultFile = File(vaultDir(context), "${entry.id}.vault")
-            vaultFile.writeBytes(enc)
-            if (!vaultFile.exists() || vaultFile.length() == 0L) {
-                vaultFile.delete()
+            tempFile.writeBytes(enc)
+            if (!tempFile.exists() || tempFile.length() == 0L) {
+                tempFile.delete()
                 return false
             }
-            src.delete()
-            updateMeta(context, entry.id) { it.copy(encrypted = true) }
-            true
+            val vaultFile = File(vaultDir(context), "${entry.id}.vault")
+            if (!tempFile.renameTo(vaultFile)) {
+                tempFile.delete()
+                return false
+            }
+            if (src.delete()) {
+                updateMeta(context, entry.id) { it.copy(encrypted = true) }
+                true
+            } else {
+                // Could not drop the plaintext copy — undo the encryption so
+                // the entry keeps exactly one readable copy.
+                vaultFile.delete()
+                false
+            }
         } catch (e: Exception) {
+            tempFile.delete()
             false
         }
     }
@@ -2204,22 +2635,40 @@ object VaultStorage {
      * Remove the password protection of an encrypted entry in place: decrypt
      * with [password] back to the plaintext file and drop the ".vault" copy.
      * Returns true on success (false = wrong password / corrupted file).
+     *
+     * The plaintext is written to a temp file and only swapped in after its
+     * length matches the decrypted payload, so a wrong password (or a partial
+     * write) leaves the encrypted entry exactly as it was — the "revert to the
+     * state before decrypt" guarantee.
      */
     fun decryptEntry(context: Context, entry: VaultEntry, password: String): Boolean {
+        if (!entry.encrypted || password.isEmpty()) return false
+        val tempFile = File(vaultDir(context), "${entry.id}.plain.tmp")
         return try {
-            if (!entry.encrypted) return false
             val vaultFile = entryFile(context, entry)
             val data = vaultFile.readBytes()
             val plain = VaultCrypto.decryptBytes(data, password) ?: return false
-            val plainFile = File(vaultDir(context), entry.id).apply { writeBytes(plain) }
-            if (!plainFile.exists() || plainFile.length() == 0L) {
+            if (plain.isEmpty()) return false
+            tempFile.writeBytes(plain)
+            if (!tempFile.exists() || tempFile.length() != plain.size.toLong()) {
+                tempFile.delete()
+                return false
+            }
+            val plainFile = File(vaultDir(context), entry.id)
+            if (!tempFile.renameTo(plainFile)) {
+                tempFile.delete()
+                return false
+            }
+            if (!vaultFile.delete()) {
+                // Keep the plaintext? No — restoring the encrypted copy is the
+                // only way to keep the entry consistent; re-encrypt instead.
                 plainFile.delete()
                 return false
             }
-            vaultFile.delete()
             updateMeta(context, entry.id) { it.copy(encrypted = false) }
             true
         } catch (e: Exception) {
+            tempFile.delete()
             false
         }
     }
@@ -2408,6 +2857,52 @@ object VaultStorage {
             }
         }
         setVaultPassword(context, newPassword)
+        return encryptedEntries.size
+    }
+
+    /**
+     * Change the STORAGE ENCRYPTION KEY (the second secret used for the media
+     * bytes themselves). Every encrypted entry is decrypted with [oldKey] and
+     * re-encrypted with [newKey] into temp files first; the stored key is
+     * replaced only when all of them succeeded, so a failure leaves the old
+     * key valid and every entry readable.
+     *
+     * @return number of entries re-encrypted; -1 wrong current key;
+     *     -2 at least one encrypted entry could not be re-encrypted (aborted);
+     *     -3 the new key is too short.
+     */
+    fun changeEncryptionKey(context: Context, oldKey: String, newKey: String): Int {
+        if (!verifyVaultEncryptionKey(context, oldKey)) return -1
+        if (newKey.isBlank() || newKey.length < 4) return -3
+        val dir = vaultDir(context)
+        val encryptedEntries = listEntries(context).filter { it.encrypted }
+        val temps = mutableListOf<Pair<File, File>>()
+        for (entry in encryptedEntries) {
+            try {
+                val finalFile = File(dir, "${entry.id}.vault")
+                val data = finalFile.readBytes()
+                val plain = VaultCrypto.decryptBytes(data, oldKey) ?: return -2
+                val reEnc = VaultCrypto.encryptBytes(plain, newKey)
+                val tempFile = File(dir, "${entry.id}.vault.tmp")
+                tempFile.writeBytes(reEnc)
+                if (!tempFile.exists() || tempFile.length() == 0L) {
+                    tempFile.delete()
+                    for ((t, _) in temps) t.delete()
+                    return -2
+                }
+                temps.add(tempFile to finalFile)
+            } catch (e: Exception) {
+                for ((t, _) in temps) t.delete()
+                return -2
+            }
+        }
+        for ((temp, finalFile) in temps) {
+            if (!temp.renameTo(finalFile)) {
+                for ((t, _) in temps) t.delete()
+                return -2
+            }
+        }
+        setVaultEncryptionKey(context, newKey)
         return encryptedEntries.size
     }
 

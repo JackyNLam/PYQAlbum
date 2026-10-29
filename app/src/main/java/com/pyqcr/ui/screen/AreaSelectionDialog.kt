@@ -5,6 +5,8 @@ import android.graphics.BitmapFactory
 import android.media.ExifInterface
 import android.net.Uri
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -17,6 +19,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -32,6 +36,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import com.pyqcr.ai.BrushMask
 import com.pyqcr.ai.BrushStroke
@@ -75,7 +80,7 @@ fun AreaSelectionDialog(
     // so no stale-capture path can drop earlier strokes.
     val strokes = remember { mutableStateListOf<BrushStroke>() }
     var activeStroke by remember { mutableStateOf<BrushStroke?>(null) }
-    var brushSize by remember { mutableFloatStateOf(0.04f) }
+    var brushSize by remember { mutableFloatStateOf(0.05f) }
     var eraser by remember { mutableStateOf(false) }
     var containerSize by remember { mutableStateOf(Size.Zero) }
     var imageDims by remember { mutableStateOf<Pair<Int, Int>?>(null) }
@@ -172,75 +177,77 @@ fun AreaSelectionDialog(
             modifier = Modifier.fillMaxSize(),
             color = Color.Black
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Top bar: close, title, undo (brush), zoom reset
-                Row(
+            Box(modifier = Modifier.fillMaxSize()) {
+                // ---- Floating top toolbar, drawn OVER the image ----
+                // It used to sit above the image in a Column: once the image was
+                // pinch-zoomed the toolbar ended up covered / hard to reach.
+                // zIndex keeps it tappable at any zoom level.
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .align(Alignment.TopCenter)
+                        .zIndex(2f)
+                        .background(Color(0xB3000000))
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
-                    IconButton(onClick = onDismiss) {
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = "Cancel",
-                            tint = Color.White
-                        )
-                    }
-                    Text(
-                        if (mode == SelectionMode.RECT) "Select area to edit" else "Paint area to keep",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color.White,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1
-                    )
-                    if (mode == SelectionMode.BRUSH && strokes.isNotEmpty()) {
-                        TextButton(onClick = {
-                            strokes.removeAt(strokes.lastIndex)
-                            activeStroke = null
-                        }) { Text("Undo", color = Color.White) }
-                    }
-                    if (zoom > 1f) {
-                        TextButton(onClick = { panMode = !panMode }) {
-                            Text(
-                                if (panMode) "Draw" else "Move view",
-                                color = Color.White
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onDismiss) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Cancel",
+                                tint = Color.White
                             )
                         }
-                        TextButton(onClick = { resetZoom() }) {
-                            Text("Reset", color = Color.White)
+                        Text(
+                            if (mode == SelectionMode.RECT) "Select area to edit" else "Paint area to keep",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1
+                        )
+                        if (mode == SelectionMode.BRUSH && strokes.isNotEmpty()) {
+                            TextButton(onClick = {
+                                strokes.removeAt(strokes.lastIndex)
+                                activeStroke = null
+                            }) { Text("Undo", color = Color.White) }
+                        }
+                        if (zoom > 1f) {
+                            TextButton(onClick = { resetZoom() }) {
+                                Text("Reset", color = Color.White)
+                            }
                         }
                     }
-                }
-
-                // Rectangle / Brush tool switcher
-                SingleChoiceSegmentedButtonRow(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
-                ) {
-                    SegmentedButton(
-                        selected = mode == SelectionMode.RECT,
-                        onClick = {
+                    // Tool switch (Rectangle / Brush) plus the explicit gesture
+                    // mode switch (Draw / Move view) — always visible so the
+                    // user can choose, instead of it only appearing after a
+                    // pinch.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 4.dp, end = 4.dp, bottom = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OverlayChip(
+                            text = "Rectangle",
+                            selected = mode == SelectionMode.RECT
+                        ) {
                             mode = SelectionMode.RECT
                             dragStart = null
                             dragEnd = null
                             activeStroke = null
-                        },
-                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
-                    ) {
-                        Text("Rectangle")
-                    }
-                    SegmentedButton(
-                        selected = mode == SelectionMode.BRUSH,
-                        onClick = { mode = SelectionMode.BRUSH },
-                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
-                    ) {
-                        Text("Brush")
+                        }
+                        OverlayChip(
+                            text = "Brush",
+                            selected = mode == SelectionMode.BRUSH
+                        ) { mode = SelectionMode.BRUSH }
+                        Spacer(Modifier.weight(1f))
+                        OverlayChip(
+                            text = if (panMode) "Move view" else "Draw",
+                            selected = panMode
+                        ) { panMode = !panMode }
                     }
                 }
-
-                Spacer(Modifier.height(8.dp))
 
                 // Full-screen image area with gesture handling for the active
                 // tool. graphicsLayer applies the pinch-zoom and pointerInput
@@ -249,8 +256,7 @@ fun AreaSelectionDialog(
                 // image with no manual transform math.
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
+                        .fillMaxSize()
                         .graphicsLayer {
                             scaleX = zoom
                             scaleY = zoom
@@ -543,80 +549,157 @@ fun AreaSelectionDialog(
                     }
                 }
 
-                // Brush tool controls (size / eraser / undo / clear)
-                if (mode == SelectionMode.BRUSH) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Size ${(brushSize * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                            modifier = Modifier.width(64.dp)
-                        )
-                        Slider(
-                            value = brushSize,
-                            onValueChange = { brushSize = it },
-                            valueRange = 0.01f..0.15f,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        FilterChip(
-                            selected = eraser,
-                            onClick = { eraser = !eraser },
-                            label = { Text("Eraser") }
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        TextButton(
-                            onClick = { strokes.clear(); activeStroke = null },
-                            enabled = strokes.isNotEmpty()
-                        ) {
-                            Text("Clear", color = Color.White)
-                        }
-                    }
-                }
-
-                // Action row — fixed generous bottom padding (some ROMs deliver
-                // no window insets into Dialog composables; HONOR Parallel Space
-                // overlays its gesture area at the very bottom, which made the
-                // buttons untappable at 24.dp).
-                Row(
+                // ---- Floating bottom controls, also over the image ----
+                // A single column keeps the (new, rounded) brush bar directly
+                // above the Cancel/Confirm row; the generous fixed bottom
+                // padding clears ROMs that deliver no window insets (HONOR
+                // Parallel Space overlays its gesture area at the very bottom).
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 56.dp),
-                    horizontalArrangement = Arrangement.End
+                        .align(Alignment.BottomCenter)
+                        .zIndex(2f)
+                        .padding(horizontal = 12.dp)
+                        .padding(bottom = 88.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("Cancel", color = Color.White)
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            when (mode) {
-                                SelectionMode.RECT -> {
-                                    val s = dragStart ?: return@Button
-                                    val e = dragEnd ?: return@Button
-                                    if (containerSize.width <= 0 || containerSize.height <= 0) return@Button
-                                    val rect = dragToCropRect(
-                                        s, e, containerSize, imageDims
-                                    )
-                                    if (rect.isValid()) onConfirm(EditSelection(cropRect = rect))
+                    // Brush controls: preset size dots + eraser/undo/clear
+                    // pills in a rounded translucent bar (replaces the old
+                    // slider row, which was cramped and ugly).
+                    if (mode == SelectionMode.BRUSH) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(20.dp),
+                            color = Color(0xCC1A1A1A)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Brush",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White.copy(alpha = 0.6f)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                BrushSizeDots(brushSize) { brushSize = it }
+                                Spacer(Modifier.weight(1f))
+                                OverlayChip("Erase", eraser) { eraser = !eraser }
+                                Spacer(Modifier.width(4.dp))
+                                OverlayChip(
+                                    "Undo",
+                                    selected = false,
+                                    enabled = strokes.isNotEmpty()
+                                ) {
+                                    strokes.removeAt(strokes.lastIndex)
+                                    activeStroke = null
                                 }
-                                SelectionMode.BRUSH -> {
-                                    if (strokes.isEmpty()) return@Button
-                                    onConfirm(EditSelection(mask = BrushMask(strokes.toList())))
+                                Spacer(Modifier.width(4.dp))
+                                OverlayChip(
+                                    "Clear",
+                                    selected = false,
+                                    enabled = strokes.isNotEmpty()
+                                ) {
+                                    strokes.clear()
+                                    activeStroke = null
                                 }
                             }
-                        },
-                        enabled = when (mode) {
-                            SelectionMode.RECT -> dragStart != null && dragEnd != null
-                            SelectionMode.BRUSH -> strokes.isNotEmpty()
                         }
-                    ) { Text("Confirm") }
+                        Spacer(Modifier.height(10.dp))
+                    }
+
+                    Surface(shape = RoundedCornerShape(24.dp), color = Color(0xB3000000)) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(onClick = onDismiss) {
+                                Text("Cancel", color = Color.White)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    when (mode) {
+                                        SelectionMode.RECT -> {
+                                            val s = dragStart ?: return@Button
+                                            val e = dragEnd ?: return@Button
+                                            if (containerSize.width <= 0 || containerSize.height <= 0) return@Button
+                                            val rect = dragToCropRect(
+                                                s, e, containerSize, imageDims
+                                            )
+                                            if (rect.isValid()) onConfirm(EditSelection(cropRect = rect))
+                                        }
+                                        SelectionMode.BRUSH -> {
+                                            if (strokes.isEmpty()) return@Button
+                                            onConfirm(EditSelection(mask = BrushMask(strokes.toList())))
+                                        }
+                                    }
+                                },
+                                enabled = when (mode) {
+                                    SelectionMode.RECT -> dragStart != null && dragEnd != null
+                                    SelectionMode.BRUSH -> strokes.isNotEmpty()
+                                }
+                            ) { Text("Confirm") }
+                        }
+                    }
                 }
+            }
+        }
+    }
+}
+
+/** Small translucent pill button used by the floating selection toolbar. */
+@Composable
+private fun OverlayChip(
+    text: String,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) Color.White else Color(0x33FFFFFF))
+            .clickable(enabled = enabled, onClick = onClick)
+            .alpha(if (enabled) 1f else 0.4f)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text = text,
+            color = if (selected) Color.Black else Color.White,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1
+        )
+    }
+}
+
+/** Row of tapering brush-size presets (small dot → large dot). */
+@Composable
+private fun BrushSizeDots(current: Float, onSelect: (Float) -> Unit) {
+    val sizes = listOf(0.015f, 0.03f, 0.05f, 0.08f, 0.12f)
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        sizes.forEach { s ->
+            val selected = kotlin.math.abs(current - s) < 0.001f
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(if (selected) Color(0x33FFFFFF) else Color.Transparent)
+                    .clickable { onSelect(s) },
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size((10f + (s / 0.12f) * 14f).dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(
+                            if (selected) Color.White else Color.White.copy(alpha = 0.55f)
+                        )
+                )
             }
         }
     }
