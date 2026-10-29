@@ -117,7 +117,14 @@ fun AppNavGraph() {
             val previousUri = getPreviousImageUri(imageUri)
             ImageDetailScreen(
                 imageUriRaw = imageUriRaw,
-                onBack = { navController.popBackStack() },
+                onBack = {
+                    // Only pop while this viewer is on top: a duplicate close
+                    // (e.g. two fast swipe-downs) must never also pop the album
+                    // and leave a blank screen.
+                    if (navController.currentDestination?.route == Routes.IMAGE_DETAIL) {
+                        navController.popBackStack()
+                    }
+                },
                 onNextImage = {
                     nextUri?.let { next ->
                         viewerEnterDirection = 1

@@ -9,6 +9,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -71,6 +72,7 @@ import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.MotionPhotoExtractor
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -148,74 +150,69 @@ fun ImageDetailScreen(
     var scale by rememberSaveable { mutableFloatStateOf(1f) }
     var offset by rememberSaveable(stateSaver = OffsetSaver) { mutableStateOf(Offset.Zero) }
 
-    // Live swipe feedback: the image tracks the finger and slides off-screen in
-    // the swipe direction before navigating (short, keeps the gesture tactile).
-    // Plain state (not Animatable) because the pointer loop below runs inside
-    // awaitEachGesture, whose restricted suspension scope cannot call
-    // Animatable.snapTo/animateTo — the settling animation runs in an effect.
-    var swipeDx by remember { mutableFloatStateOf(0f) }
-    var swipeDy by remember { mutableFloatStateOf(0f) }
+    // Swipe feedback: the photo itself never moves. A soft directional arrow
+    // fades in while the finger travels so the user knows which way the swipe
+    // is heading, and fades out once the gesture has been carried out.
+    var hintActive by remember { mutableStateOf(false) }
+    // 1 = right, -1 = left, 2 = up, 3 = down (kept after the hint fades so the
+    // arrow does not flip while it is animating out).
+    var hintArrow by remember { mutableIntStateOf(1) }
     // Decided when a scale-1 gesture ends: 0 none, 1 next, 2 previous, 3 back,
-    // 4 reveal the action bar, 5 settle back in place.
+    // 4 reveal the action bar, 5 settle in place. Plain state (not Animatable)
+    // because the pointer loop runs inside awaitEachGesture, whose restricted
+    // suspension scope cannot call ordinary suspend functions — the outcome is
+    // carried out in the effect below.
     var pendingSwipe by remember { mutableIntStateOf(0) }
+    // One outcome at a time: a second swipe that finishes while the first is
+    // still being applied must not pop the back stack again (double swipe-down
+    // used to pop both the viewer and the album, leaving a blank screen).
+    // Keyed on the photo so swiping to a neighbour re-arms it.
+    var swipeLocked by remember(imageUri) { mutableStateOf(false) }
 
     // Size of the image viewport (px) — used to clamp the pan so the zoomed
     // image can never be dragged entirely out of view.
     var viewSize by remember { mutableStateOf(Size.Zero) }
 
-    /** Animates the swipe translation from its current value to the target. */
-    suspend fun slideSwipeTo(targetX: Float, targetY: Float, durationMillis: Int) {
-        val startX = swipeDx
-        val startY = swipeDy
-        animate(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec = tween(durationMillis)
-        ) { fraction, _ ->
-            swipeDx = startX + (targetX - startX) * fraction
-            swipeDy = startY + (targetY - startY) * fraction
-        }
-    }
-
     // Runs the swipe outcome OUTSIDE the pointer-input restricted scope.
     LaunchedEffect(pendingSwipe) {
-        val widthPx = if (viewSize.width > 0f) viewSize.width else 1080f
-        val heightPx = if (viewSize.height > 0f) viewSize.height else 1920f
-        when (pendingSwipe) {
-            1 -> {
-                slideSwipeTo(-widthPx, 0f, 170)
-                onNextImage()
+        if (pendingSwipe != 0) {
+            swipeLocked = true
+            when (pendingSwipe) {
+                // A beat of the direction hint first, then navigate.
+                1 -> {
+                    delay(110)
+                    onNextImage()
+                }
+                2 -> {
+                    delay(110)
+                    onPreviousImage()
+                }
+                3 -> {
+                    delay(110)
+                    onBack()
+                }
+                4 -> showDetailPanel = true
             }
-            2 -> {
-                slideSwipeTo(widthPx, 0f, 170)
-                onPreviousImage()
-            }
-            3 -> {
-                slideSwipeTo(0f, heightPx * 0.35f, 150)
-                onBack()
-            }
-            4 -> {
-                slideSwipeTo(0f, 0f, 180)
-                showDetailPanel = true
-            }
-            5 -> slideSwipeTo(0f, 0f, 200)
+            hintActive = false
+            // 1/2/3 leave or replace this screen; 4/5 keep it on-screen and
+            // should accept the next gesture.
+            if (pendingSwipe == 4 || pendingSwipe == 5) swipeLocked = false
+            pendingSwipe = 0
         }
-        pendingSwipe = 0
     }
 
-    // Slide a newly opened neighbour in from the side it was swiped from.
-    var enterSlideDone by remember(imageUri) { mutableStateOf(false) }
+    // A freshly swiped-in photo fades in from a dimmed state — a quiet cue that
+    // the swipe worked, without moving the image.
+    var enterFade by remember(imageUri) { mutableFloatStateOf(1f) }
     LaunchedEffect(imageUri, viewSize.width) {
-        if (!enterSlideDone && enterDirection != 0 && viewSize.width > 0f) {
-            enterSlideDone = true
-            val from = viewSize.width * 0.28f * enterDirection
-            swipeDx = from
+        if (enterDirection != 0 && viewSize.width > 0f) {
+            enterFade = 0.35f
             animate(
                 initialValue = 0f,
                 targetValue = 1f,
-                animationSpec = tween(200)
+                animationSpec = tween(180)
             ) { fraction, _ ->
-                swipeDx = from * (1f - fraction)
+                enterFade = 0.35f + 0.65f * fraction
             }
         }
     }
@@ -700,15 +697,10 @@ fun ImageDetailScreen(
                     .graphicsLayer {
                         scaleX = scale
                         scaleY = scale
-                        // The saved pan offset plus the in-progress swipe
-                        // translation — swiping at scale 1 drags the photo with
-                        // the finger before it settles / leaves the screen.
-                        translationX = offset.x + swipeDx
-                        translationY = offset.y + swipeDy
-                        val width = if (viewSize.width > 0f) viewSize.width else 1f
-                        val swipeFraction =
-                            (kotlin.math.abs(swipeDx) / width).coerceIn(0f, 1f)
-                        alpha = 1f - swipeFraction * 0.45f
+                        // Pan offset only — swiping never translates the photo.
+                        translationX = offset.x
+                        translationY = offset.y
+                        alpha = enterFade
                     }
                     .pointerInput(Unit) {
                         // Unified gesture handling:
@@ -753,9 +745,17 @@ fun ImageDetailScreen(
                                     if (change.positionChanged()) {
                                         verticalAccum += change.positionChange().y
                                         horizontalAccum += change.positionChange().x
-                                        // Live feedback: the photo follows the finger.
-                                        swipeDx = horizontalAccum
-                                        swipeDy = verticalAccum
+                                        // Directional hint only: the photo stays
+                                        // put while the finger moves.
+                                        hintArrow =
+                                            if (kotlin.math.abs(horizontalAccum) >
+                                                kotlin.math.abs(verticalAccum)
+                                            ) {
+                                                if (horizontalAccum < 0f) -1 else 1
+                                            } else {
+                                                if (verticalAccum < 0f) 2 else 3
+                                            }
+                                        hintActive = true
                                         change.consume()
                                     }
                                 }
@@ -764,7 +764,11 @@ fun ImageDetailScreen(
                             // here. Animating/navigating must happen outside the
                             // restricted awaitEachGesture scope (see the
                             // pendingSwipe effect above).
-                            if (!transformMode) {
+                            if (!transformMode && !swipeLocked) {
+                                // Lock synchronously so a second gesture that
+                                // ends before the outcome effect runs cannot
+                                // queue a duplicate navigation.
+                                swipeLocked = true
                                 pendingSwipe = when {
                                     verticalAccum > swipeThreshold -> 3
                                     verticalAccum < -swipeThreshold -> 4
@@ -773,6 +777,11 @@ fun ImageDetailScreen(
                                         if (hasPreviousImage) 2 else 5
                                     else -> 5
                                 }
+                            } else {
+                                // Pan/zoom gesture, or an outcome is already being
+                                // applied — drop this gesture's hint without
+                                // queueing a second navigation.
+                                hintActive = false
                             }
                         }
                     }
@@ -847,6 +856,44 @@ fun ImageDetailScreen(
                             onClose = { showMotionVideo = false }
                         )
                     }
+                }
+            }
+
+// ===================== SWIPE DIRECTION HINT =====================
+            // The photo itself never moves. A soft arrow fades in toward the
+            // swipe direction so the gesture reads clearly, then fades out once
+            // the outcome has been carried out.
+            val hintAlpha by animateFloatAsState(
+                targetValue = if (hintActive) 1f else 0f,
+                animationSpec = tween(durationMillis = 140),
+                label = "swipeHintAlpha"
+            )
+            if (hintAlpha > 0.01f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(88.dp)
+                        .graphicsLayer {
+                            alpha = hintAlpha
+                            val s = 0.88f + 0.12f * hintAlpha
+                            scaleX = s
+                            scaleY = s
+                        }
+                        .clip(RoundedCornerShape(percent = 50))
+                        .background(Color.Black.copy(alpha = 0.30f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = when (hintArrow) {
+                            -1 -> Icons.Default.KeyboardArrowLeft
+                            1 -> Icons.Default.KeyboardArrowRight
+                            2 -> Icons.Default.KeyboardArrowUp
+                            else -> Icons.Default.KeyboardArrowDown
+                        },
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(52.dp)
+                    )
                 }
             }
 

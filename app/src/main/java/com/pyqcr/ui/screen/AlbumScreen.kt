@@ -3472,7 +3472,10 @@ private fun GridScrollBar(
         }
         Box(
             modifier = Modifier
-                .align(Alignment.CenterEnd)
+                // Anchored to the TOP of the grid: offset() is applied from the
+                // aligned position, so CenterEnd would start the thumb halfway
+                // down the screen at scroll position 0.
+                .align(Alignment.TopEnd)
                 .offset(y = maxTop * progress)
                 .padding(end = 3.dp)
                 .width(5.dp)
