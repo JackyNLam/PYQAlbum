@@ -33,6 +33,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -555,6 +556,20 @@ fun VaultScreen(onBack: () -> Unit) {
                 },
                 actions = {
                     if (authed) {
+                        // Import entry (formerly a toolbar row above the grid).
+                        IconButton(
+                            onClick = {
+                                showImportPicker = true
+                                importSelection = emptySet()
+                                importFolderFilter = null
+                            },
+                            enabled = !importing
+                        ) {
+                            Icon(
+                                Icons.Default.AddPhotoAlternate,
+                                contentDescription = "Move from Gallery"
+                            )
+                        }
                         IconButton(onClick = { openEncryptionKeyDialog() }) {
                             Icon(
                                 Icons.Default.VpnKey,
@@ -614,50 +629,6 @@ fun VaultScreen(onBack: () -> Unit) {
                 }
             } else {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    // Toolbar row
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Button(
-                            onClick = {
-                                showImportPicker = true
-                                importSelection = emptySet()
-                                importFolderFilter = null
-                            },
-                            enabled = !importing
-                        ) {
-                            Icon(
-                                Icons.Default.Image,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Move from Gallery")
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        // Second secret, separate from the vault password: it
-                        // can be set/changed here but is never shown again.
-                        TextButton(onClick = { openEncryptionKeyDialog() }) {
-                            Icon(
-                                Icons.Default.VpnKey,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                if (VaultStorage.hasEncryptionKey(context)) {
-                                    "Encryption key"
-                                } else {
-                                    "Set encryption key"
-                                },
-                                style = MaterialTheme.typography.labelLarge
-                            )
-                        }
-                    }
-
                     val encryptedCount = entries.count { it.encrypted }
 
                     Text(
@@ -670,7 +641,7 @@ fun VaultScreen(onBack: () -> Unit) {
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp)
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
 
                     if (entries.isEmpty()) {

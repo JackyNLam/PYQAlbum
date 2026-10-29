@@ -7,6 +7,14 @@ import android.os.Environment
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -27,6 +35,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,6 +78,15 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
+ * Saves the zoom pan offset across activity recreation (switching to another
+ * app and coming back), so the viewer keeps the exact framing.
+ */
+private val OffsetSaver = listSaver<Offset, Float>(
+    save = { listOf(it.x, it.y) },
+    restore = { Offset(it[0], it[1]) }
+)
+
+/**
  * Full-screen image detail view.
  *
  * - Swipe down anywhere on the image → go back to the thumbnail grid.
@@ -85,7 +104,12 @@ fun ImageDetailScreen(
     onNextImage: () -> Unit = {},
     onPreviousImage: () -> Unit = {},
     onOpenAiRating: () -> Unit = {},
-    onOpenAiEdit: () -> Unit = {}
+    onOpenAiEdit: () -> Unit = {},
+    hasNextImage: Boolean = true,
+    hasPreviousImage: Boolean = true,
+    // +1 = arrived by swiping left (slide in from the right), -1 = arrived by
+    // swiping right, 0 = opened from the grid (no slide).
+    enterDirection: Int = 0
 ) {
     // URL-decode the URI — Navigation Compose encodes it to avoid path-segment issues
     val imageUri = Uri.decode(imageUriRaw)
@@ -109,7 +133,7 @@ fun ImageDetailScreen(
     var rating by remember { mutableFloatStateOf(0f) }
     var newTagName by remember { mutableStateOf("") }
     var showAddTag by remember { mutableStateOf(false) }
-    var showDetailPanel by remember { mutableStateOf(false) } // Swipe-up action bar
+    var showDetailPanel by rememberSaveable { mutableStateOf(false) } // Swipe-up action bar
     var showInfoDialog by remember { mutableStateOf(false) }  // Details (metadata/rating)
     var showTagsDialog by remember { mutableStateOf(false) }  // Tags editor
     val coroutineScope = rememberCoroutineScope()
@@ -120,13 +144,29 @@ fun ImageDetailScreen(
 
     // Pinch-zoom state for the enlarged image (scale 1 = fitted, >1 = zoomed in).
     // Swipe navigation is only active while scale == 1; while zoomed, single-finger
-    // drags pan the image instead.
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
+    // drags pan the image instead. Both values are saveable so the viewer keeps
+    // the same framing after the activity is recreated.
+    var scale by rememberSaveable { mutableFloatStateOf(1f) }
+    var offset by rememberSaveable(stateSaver = OffsetSaver) { mutableStateOf(Offset.Zero) }
+
+    // Live swipe feedback: the image tracks the finger and slides off-screen in
+    // the swipe direction before navigating (short, keeps the gesture tactile).
+    val swipeX = remember { Animatable(0f) }
+    val swipeY = remember { Animatable(0f) }
 
     // Size of the image viewport (px) — used to clamp the pan so the zoomed
     // image can never be dragged entirely out of view.
     var viewSize by remember { mutableStateOf(Size.Zero) }
+
+    // Slide a newly opened neighbour in from the side it was swiped from.
+    var enterSlideDone by remember(imageUri) { mutableStateOf(false) }
+    LaunchedEffect(imageUri, viewSize.width) {
+        if (!enterSlideDone && enterDirection != 0 && viewSize.width > 0f) {
+            enterSlideDone = true
+            swipeX.snapTo(viewSize.width * 0.28f * enterDirection)
+            swipeX.animateTo(0f, tween(200))
+        }
+    }
 
     // Motion-photo state: [motionVideoPath] is the cache file with the embedded
     // MP4 (null = not a motion photo); [showMotionVideo] toggles the video surface.
@@ -608,8 +648,15 @@ fun ImageDetailScreen(
                     .graphicsLayer {
                         scaleX = scale
                         scaleY = scale
-                        translationX = offset.x
-                        translationY = offset.y
+                        // The saved pan offset plus the in-progress swipe
+                        // translation — swiping at scale 1 drags the photo with
+                        // the finger before it settles / leaves the screen.
+                        translationX = offset.x + swipeX.value
+                        translationY = offset.y + swipeY.value
+                        val width = if (viewSize.width > 0f) viewSize.width else 1f
+                        val swipeFraction =
+                            (kotlin.math.abs(swipeX.value) / width).coerceIn(0f, 1f)
+                        alpha = 1f - swipeFraction * 0.45f
                     }
                     .pointerInput(Unit) {
                         // Unified gesture handling:
@@ -654,20 +701,51 @@ fun ImageDetailScreen(
                                     if (change.positionChanged()) {
                                         verticalAccum += change.positionChange().y
                                         horizontalAccum += change.positionChange().x
+                                        // Live feedback: the photo follows the finger.
+                                        swipeX.snapTo(horizontalAccum)
+                                        swipeY.snapTo(verticalAccum)
                                         change.consume()
                                     }
                                 }
                             } while (event.changes.any { it.pressed })
                             // Gesture ended at scale 1 — decide swipe navigation
                             if (!transformMode) {
-                                if (verticalAccum > swipeThreshold) {
-                                    onBack()
-                                } else if (verticalAccum < -swipeThreshold) {
-                                    showDetailPanel = true
-                                } else if (horizontalAccum < -swipeThreshold) {
-                                    onNextImage()
-                                } else if (horizontalAccum > swipeThreshold) {
-                                    onPreviousImage()
+                                val widthPx = if (viewSize.width > 0f) viewSize.width else 1080f
+                                val heightPx = if (viewSize.height > 0f) viewSize.height else 1920f
+                                when {
+                                    verticalAccum > swipeThreshold -> {
+                                        // Swipe down → leave the viewer: let the
+                                        // photo slide down a little first.
+                                        swipeY.animateTo(heightPx * 0.35f, tween(150))
+                                        onBack()
+                                    }
+                                    verticalAccum < -swipeThreshold -> {
+                                        // Swipe up → settle back, then reveal the
+                                        // action bar with its own slide-up.
+                                        swipeY.animateTo(0f, spring())
+                                        showDetailPanel = true
+                                    }
+                                    horizontalAccum < -swipeThreshold -> {
+                                        if (hasNextImage) {
+                                            swipeX.animateTo(-widthPx, tween(170))
+                                            onNextImage()
+                                        } else {
+                                            swipeX.animateTo(0f, spring())
+                                        }
+                                    }
+                                    horizontalAccum > swipeThreshold -> {
+                                        if (hasPreviousImage) {
+                                            swipeX.animateTo(widthPx, tween(170))
+                                            onPreviousImage()
+                                        } else {
+                                            swipeX.animateTo(0f, spring())
+                                        }
+                                    }
+                                    else -> {
+                                        // Not far enough — spring back into place.
+                                        swipeX.animateTo(0f, spring())
+                                        swipeY.animateTo(0f, spring())
+                                    }
                                 }
                             }
                         }
@@ -749,34 +827,44 @@ fun ImageDetailScreen(
 // ===================== ACTION BAR (swipe-up) =====================
             // Compact semi-transparent icon bar: every single-image action is
             // one tap away; anything needing detail opens a dialog on top.
-            if (showDetailPanel) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp)
-                        .padding(bottom = 26.dp)
-                        .pointerInput(Unit) {
-                            detectVerticalDragGestures(
-                                onDragEnd = {
-                                    if (dragVerticalAccum > swipeThreshold) {
-                                        showDetailPanel = false
-                                    }
-                                    dragVerticalAccum = 0f
-                                },
-                                onVerticalDrag = { change, dragAmount ->
-                                    change.consume()
-                                    dragVerticalAccum += dragAmount
-                                }
-                            )
-                        },
-                    shape = RoundedCornerShape(22.dp),
-                    // Semi-transparent so the image stays visible behind the bar.
-                    color = Color(0x99000000),
-                    tonalElevation = 0.dp,
-                    shadowElevation = 8.dp
+            AnimatedVisibility(
+                    visible = showDetailPanel,
+                    enter = slideInVertically(
+                        initialOffsetY = { it },
+                        animationSpec = tween(220)
+                    ) + fadeIn(tween(160)),
+                    exit = slideOutVertically(
+                        targetOffsetY = { it },
+                        animationSpec = tween(180)
+                    ) + fadeOut(tween(140)),
+                    modifier = Modifier.align(Alignment.BottomCenter)
                 ) {
-                    Column {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp)
+                            .padding(bottom = 26.dp)
+                            .pointerInput(Unit) {
+                                detectVerticalDragGestures(
+                                    onDragEnd = {
+                                        if (dragVerticalAccum > swipeThreshold) {
+                                            showDetailPanel = false
+                                        }
+                                        dragVerticalAccum = 0f
+                                    },
+                                    onVerticalDrag = { change, dragAmount ->
+                                        change.consume()
+                                        dragVerticalAccum += dragAmount
+                                    }
+                                )
+                            },
+                        shape = RoundedCornerShape(22.dp),
+                        // Semi-transparent so the image stays visible behind the bar.
+                        color = Color(0x99000000),
+                        tonalElevation = 0.dp,
+                        shadowElevation = 8.dp
+                    ) {
+                        Column {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()

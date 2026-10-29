@@ -9,6 +9,8 @@ import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -69,6 +71,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.delay
 import android.content.ContentValues
 import androidx.activity.compose.BackHandler
 import android.graphics.Bitmap
@@ -1136,21 +1139,26 @@ fun AlbumScreen(
     var savedJustifiedIndex by rememberSaveable { mutableIntStateOf(-1) }
     var savedJustifiedOffset by rememberSaveable { mutableIntStateOf(0) }
 
-    // Restore saved scroll position when returning from detail view
-    LaunchedEffect(savedGridIndex) {
-        if (savedGridIndex >= 0) {
+    // Restore saved scroll position when returning from detail view. The
+    // restore waits until the images are actually in the list: after the
+    // process was restarted (user switched apps and Android reclaimed the
+    // activity) the images arrive asynchronously, and scrolling to an index
+    // while the grid is still empty would silently clamp back to the top.
+    val gridRestoreReady = folderItems.isNotEmpty()
+    LaunchedEffect(savedGridIndex, gridRestoreReady) {
+        if (gridRestoreReady && savedGridIndex >= 0) {
             gridState.scrollToItem(savedGridIndex, savedGridOffset)
             savedGridIndex = -1
         }
     }
-    LaunchedEffect(savedWaterfallIndex) {
-        if (savedWaterfallIndex >= 0) {
+    LaunchedEffect(savedWaterfallIndex, gridRestoreReady) {
+        if (gridRestoreReady && savedWaterfallIndex >= 0) {
             waterfallState.scrollToItem(savedWaterfallIndex, savedWaterfallOffset)
             savedWaterfallIndex = -1
         }
     }
-    LaunchedEffect(savedJustifiedIndex) {
-        if (savedJustifiedIndex >= 0) {
+    LaunchedEffect(savedJustifiedIndex, gridRestoreReady) {
+        if (gridRestoreReady && savedJustifiedIndex >= 0) {
             justifiedState.scrollToItem(savedJustifiedIndex, savedJustifiedOffset)
             savedJustifiedIndex = -1
         }
@@ -3272,8 +3280,9 @@ private fun ImageGridView(
         }
     }
 
-    when (viewLayout) {
-        ViewLayout.GRID -> {
+    Box(modifier = Modifier.fillMaxSize()) {
+        when (viewLayout) {
+            ViewLayout.GRID -> {
             if (groupByMode != GroupByMode.NONE && groups.isNotEmpty()) {
                 LazyVerticalGrid(
                     state = gridState,
@@ -3369,6 +3378,108 @@ private fun ImageGridView(
                 modifier = Modifier.fillMaxSize()
             )
         }
+        }
+
+        // Thumb-style scroll bar — only visible while the grid is being scrolled.
+        GridScrollBar(
+            viewLayout = viewLayout,
+            gridState = gridState,
+            waterfallState = waterfallState,
+            justifiedState = justifiedState
+        )
+    }
+}
+
+/**
+ * Thin floating scroll indicator for the image grids. It follows the active
+ * scroll state, slides with the content and fades out shortly after the
+ * gesture ends, so it helps orientation without cluttering the photos.
+ */
+@Composable
+private fun GridScrollBar(
+    viewLayout: ViewLayout,
+    gridState: LazyGridState,
+    waterfallState: LazyStaggeredGridState,
+    justifiedState: LazyListState
+) {
+    var visible by remember { mutableStateOf(false) }
+
+    val metrics = remember(viewLayout) {
+        derivedStateOf {
+            when (viewLayout) {
+                ViewLayout.GRID -> {
+                    val info = gridState.layoutInfo
+                    Triple(
+                        info.visibleItemsInfo.firstOrNull()?.index ?: 0,
+                        info.visibleItemsInfo.size,
+                        info.totalItemsCount
+                    )
+                }
+                ViewLayout.WATERFALL -> {
+                    val info = waterfallState.layoutInfo
+                    Triple(
+                        info.visibleItemsInfo.firstOrNull()?.index ?: 0,
+                        info.visibleItemsInfo.size,
+                        info.totalItemsCount
+                    )
+                }
+                ViewLayout.JUSTIFIED -> {
+                    val info = justifiedState.layoutInfo
+                    Triple(
+                        info.visibleItemsInfo.firstOrNull()?.index ?: 0,
+                        info.visibleItemsInfo.size,
+                        info.totalItemsCount
+                    )
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(viewLayout) {
+        val scrolling = when (viewLayout) {
+            ViewLayout.GRID -> snapshotFlow { gridState.isScrollInProgress }
+            ViewLayout.WATERFALL -> snapshotFlow { waterfallState.isScrollInProgress }
+            ViewLayout.JUSTIFIED -> snapshotFlow { justifiedState.isScrollInProgress }
+        }
+        scrolling.collect { inProgress ->
+            if (inProgress) {
+                visible = true
+            } else {
+                delay(900)
+                visible = false
+            }
+        }
+    }
+
+    val alpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(durationMillis = 220),
+        label = "scrollBarAlpha"
+    )
+    if (alpha <= 0.01f) return
+
+    val (firstIndex, visibleCount, totalCount) = metrics.value
+    if (totalCount <= 0 || visibleCount <= 0) return
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val thumbFraction = (visibleCount.toFloat() / totalCount).coerceIn(0.06f, 1f)
+        val thumbHeight = maxHeight * thumbFraction
+        val maxTop = maxHeight - thumbHeight
+        val progress = if (totalCount > visibleCount) {
+            (firstIndex.toFloat() / (totalCount - visibleCount)).coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .offset(y = maxTop * progress)
+                .padding(end = 3.dp)
+                .width(5.dp)
+                .height(thumbHeight)
+                .clip(RoundedCornerShape(50))
+                .background(Color(0xFF1A1A1A).copy(alpha = 0.55f * alpha))
+        )
     }
 }
 

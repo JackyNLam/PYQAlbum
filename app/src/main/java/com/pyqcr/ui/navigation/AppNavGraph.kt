@@ -44,6 +44,9 @@ fun AppNavGraph() {
     // Track current image list so ImageDetailScreen can navigate prev/next
     var currentImages by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
     var currentImageIndex by remember { mutableIntStateOf(-1) }
+    // Direction of the last viewer swipe: +1 = left (next), -1 = right (previous),
+    // 0 = opened from the grid. Drives the short slide-in of the new photo.
+    var viewerEnterDirection by remember { mutableIntStateOf(0) }
 
     fun getNextImageUri(currentUri: String): String? {
         val idx = currentImages.indexOf(currentUri)
@@ -70,6 +73,7 @@ fun AppNavGraph() {
                 onImageClick = { imageUri, imageList ->
                     currentImages = imageList
                     currentImageIndex = imageList.indexOf(imageUri)
+                    viewerEnterDirection = 0
                     navController.navigate(Routes.imageDetail(imageUri))
                 },
                 onNavigateToAiSelection = {
@@ -109,25 +113,32 @@ fun AppNavGraph() {
             val imageUriRaw = backStackEntry.arguments?.getString("imageUri") ?: return@composable
             val imageUri = Uri.decode(imageUriRaw)
             val context = LocalContext.current
+            val nextUri = getNextImageUri(imageUri)
+            val previousUri = getPreviousImageUri(imageUri)
             ImageDetailScreen(
                 imageUriRaw = imageUriRaw,
                 onBack = { navController.popBackStack() },
                 onNextImage = {
-                    getNextImageUri(imageUri)?.let { nextUri ->
-                        navController.navigate(Routes.imageDetail(nextUri)) {
+                    nextUri?.let { next ->
+                        viewerEnterDirection = 1
+                        navController.navigate(Routes.imageDetail(next)) {
                             popUpTo(Routes.ALBUM) { inclusive = false }
                             launchSingleTop = true
                         }
                     }
                 },
                 onPreviousImage = {
-                    getPreviousImageUri(imageUri)?.let { prevUri ->
-                        navController.navigate(Routes.imageDetail(prevUri)) {
+                    previousUri?.let { prev ->
+                        viewerEnterDirection = -1
+                        navController.navigate(Routes.imageDetail(prev)) {
                             popUpTo(Routes.ALBUM) { inclusive = false }
                             launchSingleTop = true
                         }
                     }
                 },
+                hasNextImage = nextUri != null,
+                hasPreviousImage = previousUri != null,
+                enterDirection = viewerEnterDirection,
                 onOpenAiRating = {
                     navController.navigate(Routes.aiRating(imageUri))
                 },
