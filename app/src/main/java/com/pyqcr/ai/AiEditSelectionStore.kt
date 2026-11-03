@@ -1,6 +1,8 @@
 package com.pyqcr.ai
 
 import android.content.Context
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 
 /**
  * Persistence for the AI Edit screen's image selections (first/source,
@@ -17,6 +19,44 @@ object AiEditSelectionStore {
     private const val KEY_SOURCE_URIS = "ai_edit_source_uris"
     private const val KEY_TARGET_URIS = "ai_edit_target_uris"
     private const val KEY_THIRD_URIS = "ai_edit_third_uris"
+    private const val KEY_SOURCE_AREAS = "ai_edit_source_areas"
+
+    private val gson = Gson()
+
+    /**
+     * The per-image area selection (crop rect / brush strokes), keyed by URI.
+     * Persisted as JSON so leaving AI Edit for another screen (or the process
+     * being recreated) does not throw away hours of brushing.
+     */
+    fun loadSourceAreas(context: Context): Map<String, EditSelection> {
+        val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_SOURCE_AREAS, null) ?: return emptyMap()
+        return try {
+            val type = object : TypeToken<Map<String, EditSelection>>() {}.type
+            gson.fromJson<Map<String, EditSelection>>(json, type) ?: emptyMap()
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    fun saveSourceAreas(context: Context, areas: Map<String, EditSelection>) {
+        val json = try {
+            gson.toJson(areas)
+        } catch (e: Exception) {
+            return
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_SOURCE_AREAS, json).apply()
+    }
+
+    fun saveSourceArea(context: Context, uri: String, selection: EditSelection) {
+        saveSourceAreas(context, loadSourceAreas(context) + (uri to selection))
+    }
+
+    fun removeSourceArea(context: Context, uri: String) {
+        val areas = loadSourceAreas(context)
+        if (uri in areas) saveSourceAreas(context, areas - uri)
+    }
 
     fun loadSourceUris(context: Context): Set<String> {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -55,6 +95,7 @@ object AiEditSelectionStore {
             .remove(KEY_SOURCE_URIS)
             .remove(KEY_TARGET_URIS)
             .remove(KEY_THIRD_URIS)
+            .remove(KEY_SOURCE_AREAS)
             .apply()
     }
 

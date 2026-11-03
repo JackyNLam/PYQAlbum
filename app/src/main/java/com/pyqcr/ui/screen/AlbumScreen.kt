@@ -96,6 +96,7 @@ import com.pyqcr.ui.viewmodel.FolderListSortMode
 import com.pyqcr.ui.viewmodel.GroupByMode
 import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.ImageUtil
+import com.pyqcr.util.QrCodeReader
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -257,6 +258,30 @@ fun AlbumScreen(
         mutableStateOf<Triple<String, List<String>, Map<String, String>>?>(null)
     }
 
+    // QR code reading (folder view): decode the selected images off the main
+    // thread, then show the payload with Copy buttons.
+    var qrScanning by remember { mutableStateOf(false) }
+    var qrResults by remember { mutableStateOf<List<QrScanResult>?>(null) }
+    var qrEmpty by remember { mutableStateOf(false) }
+
+    fun scanQrCodes(uris: List<String>) {
+        if (uris.isEmpty() || qrScanning) return
+        scope.launch {
+            qrScanning = true
+            val found = withContext(Dispatchers.IO) {
+                uris.mapNotNull { uri ->
+                    val text = QrCodeReader.decode(context, uri) ?: return@mapNotNull null
+                    val label = runCatching {
+                        FileOperationHelper.getFileName(context, uri)
+                    }.getOrDefault("Image")
+                    QrScanResult(label, text)
+                }
+            }
+            qrScanning = false
+            if (found.isEmpty()) qrEmpty = true else qrResults = found
+        }
+    }
+
     /** Re-point tag cross-refs to the new URI of each image that was just moved. */
     fun remapMovedTags(oldToNew: Map<String, String>) {
         if (oldToNew.isEmpty()) return
@@ -325,6 +350,7 @@ fun AlbumScreen(
                     }
                     val successCount = results.count { it.second.success }
                     val folderLabel = destinationFolderLabel(destDir, treeUri)
+                    var keepOriginalsNote = ""
 
                     // Move: collect sources copied via SAF/MediaStore that need system-delete
                     // confirmation. On API 30+ one createTrashRequest dialog covers them all —
@@ -365,9 +391,14 @@ fun AlbumScreen(
                                     return@launch
                                 }
                             }
-                            // API < 30 or request creation failed: delete directly
-                            FileOperationHelper.deleteMediaDirect(context, sourcesToDelete)
+                            // No recoverable trash available (API < 30 or the
+                            // request could not be built). NEVER fall back to a
+                            // permanent delete of the originals: the verified
+                            // copies are in the destination, so leaving the
+                            // originals in place is a safe "move = copy" and
+                            // the user stays in control of the deletion.
                             remapMovedTags(deferredRemap)
+                            keepOriginalsNote = " — originals kept (recycle bin unavailable)"
                         }
                     }
 
@@ -377,6 +408,7 @@ fun AlbumScreen(
                         if (failures.isNotEmpty()) {
                             append("\n${failures.size} failed — ${failures.first()}")
                         }
+                        append(keepOriginalsNote)
                     }
                     snackbarHostState.showSnackbar(copyMoveMessage)
                     isMultiSelectMode = false
@@ -759,8 +791,10 @@ fun AlbumScreen(
      * trash request, recoverable), falling back to a permanent delete on older
      * APIs or when the trash request cannot be built. [trashTemplate] / 
      * [directTemplate] are the success messages ({n} = count).
+     * [allowDirectDelete] must be false for move sources: if no recycle bin is
+     * available the originals are KEPT instead of being permanently deleted.
      */
-    val trashOrDelete: (List<String>, String, String) -> Unit = { uris, trashTemplate, directTemplate ->
+    val trashOrDelete: (List<String>, String, String, Boolean) -> Unit = { uris, trashTemplate, directTemplate, allowDirectDelete ->
         val deleteDirectly: () -> Unit = {
             scope.launch {
                 val n = FileOperationHelper.deleteMediaDirect(context, uris)
@@ -780,8 +814,17 @@ fun AlbumScreen(
                 pendingDeleteUris = uris
                 deleteSuccessMessage = trashTemplate
                 deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
-            } else {
+            } else if (allowDirectDelete) {
                 deleteDirectly()
+            } else {
+                // Move source with no recycle bin available: keep the
+                // original (the verified copy is already at the destination)
+                // instead of an irreversible permanent delete.
+                snackbarHostState.showSnackbar(
+                    "Copied to the destination — originals kept (recycle bin unavailable)"
+                )
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
             }
         }
     }
@@ -859,7 +902,8 @@ fun AlbumScreen(
             trashOrDelete(
                 uris,
                 "Moved {n} image(s) to the recycle bin",
-                "Deleted {n} image(s) permanently"
+                "Deleted {n} image(s) permanently",
+                true
             )
         }
     }
@@ -1789,7 +1833,8 @@ fun AlbumScreen(
                                     trashOrDelete(
                                         importedUris,
                                         "Moved {n} image(s) to the vault",
-                                        "Moved {n} image(s) to the vault"
+                                        "Moved {n} image(s) to the vault",
+                                        false
                                     )
                                     if (fail > 0) {
                                         snackbarHostState.showSnackbar("$fail image(s) failed to copy to the vault")
@@ -1813,6 +1858,9 @@ fun AlbumScreen(
                         },
                         onAiEdit = {
                             showAiEditRoleDialog = true
+                        },
+                        onReadQr = {
+                            scanQrCodes(selectedImageUris.toList())
                         },
                         onFavourite = {
                             scope.launch {
@@ -2873,6 +2921,16 @@ fun AlbumScreen(
                     }
                 )
             }
+            // QR code result (folder view) — payload text with Copy buttons
+            qrResults?.let { results ->
+                QrCodeResultDialog(
+                    results = results,
+                    onDismiss = { qrResults = null }
+                )
+            }
+            if (qrEmpty) {
+                QrCodeEmptyDialog(onDismiss = { qrEmpty = false })
+            }
             // Rename-file dialog (batch ⋮ menu, single selection)
             if (showRenameDialog) {
                 AlertDialog(
@@ -3039,6 +3097,7 @@ private fun BatchMultiSelectBar(
     onResize: () -> Unit,
     onRename: () -> Unit,
     onAiEdit: () -> Unit,
+    onReadQr: () -> Unit,
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit,
     onMoveToVault: () -> Unit,
@@ -3127,6 +3186,11 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onAiEdit() },
                         text = { Text("AI Edit") },
                         leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onReadQr() },
+                        text = { Text("Read QR code") },
+                        leadingIcon = { Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     HorizontalDivider()
                     DropdownMenuItem(

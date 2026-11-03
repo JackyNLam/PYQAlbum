@@ -453,10 +453,12 @@ fun ImageDetailScreen(
 
     /**
      * Send [uris] to the recycle bin first (system trash request, API 30+),
-     * falling back to a permanent direct delete on older APIs. Mirrors the
-     * album batch menu's trashOrDelete.
+     * falling back to a permanent direct delete on older APIs only when
+     * [allowDirectDelete] is true (an explicit user Delete). Move sources pass
+     * false so an original is never permanently deleted without a trash bin.
+     * Mirrors the album batch menu's trashOrDelete.
      */
-    val trashUris: (List<String>, String, String) -> Unit = { uris, trashMsg, directMsg ->
+    val trashUris: (List<String>, String, String, Boolean) -> Unit = { uris, trashMsg, directMsg, allowDirectDelete ->
         val deleteDirectly: () -> Unit = {
             coroutineScope.launch {
                 FileOperationHelper.deleteMediaDirect(context, uris)
@@ -477,8 +479,20 @@ fun ImageDetailScreen(
                 pendingDeleteUris = uris
                 pendingDeleteMessage = trashMsg
                 deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
-            } else {
+            } else if (allowDirectDelete) {
                 deleteDirectly()
+            } else {
+                // A move/copy source must never be permanently deleted just
+                // because no recycle bin is available — keep the original and
+                // tell the user the operation was a copy.
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(
+                        "Copied — original kept (recycle bin unavailable)"
+                    )
+                    withContext(Dispatchers.IO) {
+                        repository.refreshImagesFromMediaStore()
+                    }
+                }
             }
         }
     }
@@ -523,7 +537,7 @@ fun ImageDetailScreen(
                     }
                 }
                 if (needTrash.isNotEmpty()) {
-                    trashUris(needTrash, "Moved image(s)", "Moved image(s)")
+                    trashUris(needTrash, "Moved image(s)", "Moved image(s)", false)
                 } else {
                     withContext(Dispatchers.IO) {
                         repository.refreshImagesFromMediaStore()
@@ -721,7 +735,7 @@ fun ImageDetailScreen(
                                     if (pressedCount >= 2) {
                                         val zoomChange = event.calculateZoom()
                                         val panChange = event.calculatePan()
-                                        val newScale = (scale * zoomChange).coerceIn(1f, 5f)
+                                        val newScale = (scale * zoomChange).coerceIn(1f, 12f)
                                         scale = newScale
                                         offset = if (newScale > 1f)
                                             clampPanOffset(offset + panChange * newScale, newScale)
@@ -824,7 +838,11 @@ fun ImageDetailScreen(
                     SubcomposeAsyncImage(
                         model = ImageRequest.Builder(context)
                             .data(imageUri)
-                            .size(1600)
+                            // Decode at the file's real resolution: a fixed
+                            // 1600 px bitmap turned visibly soft once the
+                            // image was pinched in (10x+ zoom uses the extra
+                            // detail).
+                            .size(coil3.size.Size.ORIGINAL)
                             .crossfade(true)
                             .build(),
                         contentDescription = imageItem?.displayName ?: mediaFileName,
@@ -1005,7 +1023,8 @@ fun ImageDetailScreen(
                                         trashUris(
                                             listOf(imageUri),
                                             "Moved to photo vault",
-                                            "Moved to photo vault"
+                                            "Moved to photo vault",
+                                            false
                                         )
                                     } else {
                                         snackbarHostState.showSnackbar("Could not move to the vault")
@@ -1020,7 +1039,8 @@ fun ImageDetailScreen(
                                 trashUris(
                                     listOf(imageUri),
                                     "Moved to the recycle bin",
-                                    "Deleted permanently"
+                                    "Deleted permanently",
+                                    true
                                 )
                             }
                         }

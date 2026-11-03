@@ -137,8 +137,17 @@ fun AiEditScreen(
     LaunchedEffect(Unit) {
         val sources = AiEditSelectionStore.loadSourceUris(context)
         if (sources.isNotEmpty()) {
+            // Restore the exact crop/brush area saved for each source — the
+            // screen can be left and re-entered, and the brushed shapes must
+            // still be there. Sources that never had an area get the default
+            // whole-image rect.
+            val storedAreas = AiEditSelectionStore.loadSourceAreas(context)
             selectedSourceAreas = sources.associateWith {
-                EditSelection(cropRect = CropRect(0f, 0f, 1f, 1f))
+                storedAreas[it] ?: EditSelection(cropRect = CropRect(0f, 0f, 1f, 1f))
+            }
+            // Drop stale entries for images that are no longer sources.
+            if (storedAreas.keys.any { it !in sources }) {
+                AiEditSelectionStore.saveSourceAreas(context, selectedSourceAreas)
             }
         }
         val target = AiEditSelectionStore.loadTargetUris(context).firstOrNull()
@@ -1085,6 +1094,7 @@ fun AiEditScreen(
             onConfirm = { selection ->
                 selectedSourceAreas = selectedSourceAreas + (uri to selection)
                 AiEditSelectionStore.saveSourceUris(context, selectedSourceAreas.keys)
+                AiEditSelectionStore.saveSourceArea(context, uri, selection)
                 areaDialogUri = null
             },
             onDismiss = {
@@ -1104,6 +1114,7 @@ fun AiEditScreen(
                 TextButton(onClick = {
                     selectedSourceAreas = selectedSourceAreas - uri
                     AiEditSelectionStore.saveSourceUris(context, selectedSourceAreas.keys)
+                    AiEditSelectionStore.removeSourceArea(context, uri)
                     pendingRemoveSourceUri = null
                 }) {
                     Text("Remove", color = MaterialTheme.colorScheme.error)

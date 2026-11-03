@@ -281,6 +281,16 @@ object FileOperationHelper {
                 )
             }
             val destFile = resolveConflict(File(destDir, fileName))
+            val sourcePath = resolveFilePath(context, sourceUri)
+            if (sourcePath != null && File(sourcePath).absolutePath == destFile.absolutePath) {
+                return@withContext FileOpResult(
+                    false, null,
+                    "Source and destination are the same file — nothing was changed"
+                )
+            }
+            // Expected byte count, so a truncated write is detected before a
+            // move ever deletes the original.
+            val expectedSize = sizeOf(context, contentUri)
 
             // Remember the source's modified time so we can restore it on the copy
             val sourceLastModified = if (preserveLastModified)
@@ -292,6 +302,19 @@ object FileOperationHelper {
             }
             input.use { i ->
                 FileOutputStream(destFile).use { output -> i.copyTo(output) }
+            }
+
+            // Read the written file back (length must match the source) — a
+            // short/failed write must never be reported as a successful copy.
+            val written = destFile.length()
+            if (written <= 0L ||
+                (expectedSize != null && expectedSize > 0L && written != expectedSize)
+            ) {
+                destFile.delete()
+                return@withContext FileOpResult(
+                    false, null,
+                    "The copy is incomplete (${written}B of ${expectedSize ?: "?"}B) — original kept"
+                )
             }
 
             // Preserve the original modified date when copying (used by move fallback)
@@ -323,19 +346,27 @@ object FileOperationHelper {
                 )
             }
             val destFile = resolveConflict(File(destDir, fileName))
+            val sourceExpectedSize = sizeOf(context, contentUri)
 
             // Strategy 1: true file move via renameTo (same volume) — same inode, modified date intact
             val realPath = resolveFilePath(context, sourceUri)
             if (realPath != null) {
                 val sourceFile = File(realPath)
+                val sourceLength = sourceFile.length()
                 if (sourceFile.exists() && sourceFile.renameTo(destFile)) {
                     // Virtualised filesystems (HONOR Parallel Space) can ACK a
                     // rename yet leave nothing real at the target. Never drop the
                     // stale row unless the bytes actually landed — otherwise the
                     // file is un-indexed AND un-moved: data loss with no undo.
-                    if (!destFile.exists() || destFile.length() <= 0L) {
+                    // Also require the exact byte count: a partial file at the
+                    // destination is not a moved photo.
+                    val destLength = if (destFile.exists()) destFile.length() else -1L
+                    val expected = if (sourceLength > 0L) sourceLength
+                                   else sourceExpectedSize ?: -1L
+                    if (destLength <= 0L || (expected > 0L && destLength != expected)) {
                         val restored = destFile.exists() && destFile.renameTo(sourceFile)
-                        Log.w(TAG, "renameTo left no usable file at ${destFile.absolutePath} (restored=$restored) — move aborted")
+                        Log.w(TAG, "renameTo left no usable file at ${destFile.absolutePath} " +
+                            "($destLength B, expected $expected B, restored=$restored) — move aborted")
                         return@withContext FileOpResult(
                             false, null,
                             "The destination rejected the move (restricted storage) — original kept"
@@ -449,6 +480,18 @@ object FileOperationHelper {
                         false, null,
                         "MediaStore insert failed — cannot create file in $relativePath"
                     )
+
+                // Safety: some providers resolve an insert into the SAME row /
+                // on-disk file as the source (typically when the destination
+                // folder already holds that file name). Writing the output
+                // stream would then truncate the source itself, and deleting
+                // the "source" afterwards would destroy the only copy.
+                if (destUri == contentUri || sameMediaPath(context, destUri, contentUri)) {
+                    return@withContext FileOpResult(
+                        false, null,
+                        "Source and destination are the same file — nothing was changed"
+                    )
+                }
 
                 val input = context.contentResolver.openInputStream(contentUri)
                 val output = context.contentResolver.openOutputStream(destUri)
@@ -567,6 +610,33 @@ object FileOperationHelper {
     }
 
     // ---------- Destination verification (move must never eat the source) ----------
+
+    /**
+     * True when both content URIs resolve to the same on-disk file. Guards
+     * against a provider aliasing a fresh insert to the source row — writing
+     * that destination would overwrite the original.
+     */
+    private fun sameMediaPath(context: Context, a: Uri, b: Uri): Boolean {
+        if (a == b) return true
+        val pathA = mediaDataPath(context, a) ?: return false
+        val pathB = mediaDataPath(context, b) ?: return false
+        return pathA == pathB
+    }
+
+    private fun mediaDataPath(context: Context, uri: Uri): String? {
+        return try {
+            context.contentResolver.query(
+                uri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                    if (idx >= 0 && !cursor.isNull(idx)) cursor.getString(idx) else null
+                } else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     /** Query the SIZE column of a content URI (null when unreadable). */
     private fun sizeOf(context: Context, uri: Uri): Long? {

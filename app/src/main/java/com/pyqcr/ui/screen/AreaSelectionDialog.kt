@@ -464,7 +464,21 @@ fun AreaSelectionDialog(
                             val bmp = bitmap ?: return@Canvas
                             val nc = nativeCanvas ?: return@Canvas
                             bmp.eraseColor(0) // transparent
-                            val reference = minOf(size.width, size.height)
+                            // Stroke width must match the backend mask renderer:
+                            // radius is a fraction of the IMAGE's shorter side,
+                            // not the (possibly letterboxed) container's. Using
+                            // the container made the preview brush thicker or
+                            // thinner than the area the AI actually masked.
+                            val dims = imageDims
+                            val reference = if (dims != null && size.width > 0f && size.height > 0f) {
+                                val fit = minOf(
+                                    size.width / dims.first.toFloat(),
+                                    size.height / dims.second.toFloat()
+                                )
+                                minOf(dims.first * fit, dims.second * fit)
+                            } else {
+                                minOf(size.width, size.height)
+                            }
 
                             // Strokes render in temporal order: paint strokes add
                             // opaque white, eraser strokes punch holes (CLEAR)

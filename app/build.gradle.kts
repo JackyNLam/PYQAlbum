@@ -121,6 +121,9 @@ dependencies {
     // Gson
     implementation("com.google.code.gson:gson:2.11.0")
 
+    // QR code decoding (pure Java — no Play Services / network needed)
+    implementation("com.google.zxing:core:3.5.3")
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

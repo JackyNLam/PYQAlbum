@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.*
@@ -74,9 +75,13 @@ import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.ImageThumbnail
 import com.pyqcr.ui.component.MotionPhotoPlayer
+import com.pyqcr.ui.component.QrCodeEmptyDialog
+import com.pyqcr.ui.component.QrCodeResultDialog
+import com.pyqcr.ui.component.QrScanResult
 import com.pyqcr.ui.component.VideoPlayer
 import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.util.MotionPhotoExtractor
+import com.pyqcr.util.QrCodeReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -145,6 +150,11 @@ fun VaultScreen(onBack: () -> Unit) {
     var motionVideoPath by remember { mutableStateOf<String?>(null) }
     var showMotionVideo by remember { mutableStateOf(false) }
 
+    // QR code reading state (vault selection + viewer)
+    var qrScanning by remember { mutableStateOf(false) }
+    var qrResults by remember { mutableStateOf<List<QrScanResult>?>(null) }
+    var qrEmpty by remember { mutableStateOf(false) }
+
     // Folder drill-down state: null = vault folder list, otherwise one folder
     var currentFolder by remember { mutableStateOf<String?>(null) }
 
@@ -211,10 +221,14 @@ fun VaultScreen(onBack: () -> Unit) {
             if (trashRequest != null) {
                 trashLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
             } else {
-                scope.launch {
-                    val n = FileOperationHelper.deleteMediaDirect(context, uris)
-                    Toast.makeText(context, "Deleted $n original image(s)", Toast.LENGTH_SHORT).show()
-                }
+                // No recycle bin (API < 30): never permanently delete a move
+                // source — the verified vault copy exists, so keep the gallery
+                // original and tell the user it was a copy.
+                Toast.makeText(
+                    context,
+                    "Copied to the vault — originals kept (recycle bin unavailable)",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
     }
@@ -222,6 +236,50 @@ fun VaultScreen(onBack: () -> Unit) {
     // Refresh the entry list from disk whenever the vault is (re)opened
     fun refreshEntries() {
         entries = VaultStorage.listEntries(context)
+    }
+
+    /**
+     * Decode QR codes from the given (label → file path/URI) sources and show
+     * the payload text in a dialog with Copy buttons. Encrypted vault entries
+     * have no readable bytes, so callers pass only plaintext paths (the viewer
+     * already resolves a decrypted cache file).
+     */
+    fun scanQrSources(sources: List<Pair<String, String>>) {
+        if (sources.isEmpty() || qrScanning) return
+        scope.launch {
+            qrScanning = true
+            val found = withContext(Dispatchers.IO) {
+                sources.mapNotNull { (label, path) ->
+                    val text = QrCodeReader.decode(context, path) ?: return@mapNotNull null
+                    QrScanResult(label, text)
+                }
+            }
+            qrScanning = false
+            if (found.isEmpty()) qrEmpty = true else qrResults = found
+        }
+    }
+
+    /** Decode QR codes from the current vault multi-selection (plaintext entries only). */
+    fun scanSelectedQr() {
+        val selected = entries.filter { it.id in vaultSelection && !it.isVideo }
+        if (selected.isEmpty()) return
+        val readable = selected.filter { !it.encrypted }
+        if (readable.isEmpty()) {
+            Toast.makeText(
+                context,
+                "Encrypted files must be decrypted before their QR code can be read",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+        if (readable.size < selected.size) {
+            Toast.makeText(
+                context,
+                "${selected.size - readable.size} encrypted file(s) skipped",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+        scanQrSources(readable.map { it.displayName to VaultStorage.entryFile(context, it).absolutePath })
     }
 
     LaunchedEffect(Unit) {
@@ -750,6 +808,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                 onEncrypt = { runVaultBatch(VaultAction.ENCRYPT) },
                                 onDecrypt = { runVaultBatch(VaultAction.DECRYPT) },
                                 onMoveOut = { runVaultBatch(VaultAction.MOVE_OUT) },
+                                onReadQr = { scanSelectedQr() },
                                 onDelete = { runVaultBatchDelete() }
                             )
                         }
@@ -1076,7 +1135,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                                 val zoomChange = event.calculateZoom()
                                                 val panChange = event.calculatePan()
                                                 val newScale =
-                                                    (viewerScale * zoomChange).coerceIn(1f, 5f)
+                                                    (viewerScale * zoomChange).coerceIn(1f, 12f)
                                                 viewerScale = newScale
                                                 viewerOffset = if (newScale > 1f) {
                                                     clampViewerOffset(
@@ -1147,6 +1206,10 @@ fun VaultScreen(onBack: () -> Unit) {
                                 AsyncImage(
                                     model = ImageRequest.Builder(context)
                                         .data(currentPath)
+                                        // Full-resolution decode so deep zoom
+                                        // stays sharp instead of upscaling a
+                                        // screen-sized bitmap.
+                                        .size(coil3.size.Size.ORIGINAL)
                                         .crossfade(true)
                                         .build(),
                                     contentDescription = entry.displayName,
@@ -1231,6 +1294,16 @@ fun VaultScreen(onBack: () -> Unit) {
                                 }) {
                                     Text("Move out", color = Color.White)
                                 }
+                                if (!entry.isVideo && viewPath != null) {
+                                    TextButton(onClick = {
+                                        viewPath?.let { path ->
+                                            showVaultActions = false
+                                            scanQrSources(listOf(entry.displayName to path))
+                                        }
+                                    }) {
+                                        Text("Read QR", color = Color.White)
+                                    }
+                                }
                                 Spacer(Modifier.weight(1f))
                                 TextButton(onClick = { showVaultActions = false }) {
                                     Text("Hide", color = Color.White.copy(alpha = 0.7f))
@@ -1272,6 +1345,17 @@ fun VaultScreen(onBack: () -> Unit) {
                 }
             }
         }
+    }
+
+    // ===================== QR code results =====================
+    qrResults?.let { results ->
+        QrCodeResultDialog(
+            results = results,
+            onDismiss = { qrResults = null }
+        )
+    }
+    if (qrEmpty) {
+        QrCodeEmptyDialog(onDismiss = { qrEmpty = false })
     }
 
     // ===================== Vault password prompt (existing password) =====================
@@ -2065,6 +2149,7 @@ private fun VaultBatchBar(
     onEncrypt: () -> Unit,
     onDecrypt: () -> Unit,
     onMoveOut: () -> Unit,
+    onReadQr: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -2148,6 +2233,17 @@ private fun VaultBatchBar(
                             )
                         },
                         text = { Text("Move out") }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onReadQr() },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.QrCodeScanner,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        text = { Text("Read QR code") }
                     )
                     HorizontalDivider()
                     DropdownMenuItem(
@@ -2559,7 +2655,9 @@ object VaultStorage {
             val (folder, relPath) = sourceLocation(context, uri)
             val id = "v" + System.currentTimeMillis() + "_" + (Math.random() * 100000).toInt()
             val dataFile = File(vaultDir(context), id).apply { writeBytes(bytes) }
-            if (!dataFile.exists() || dataFile.length() == 0L) {
+            // Verify the exact byte count before the caller trashes the
+            // gallery original — a short write here would mean real data loss.
+            if (!dataFile.exists() || dataFile.length() != bytes.size.toLong()) {
                 dataFile.delete()
                 return false
             }
