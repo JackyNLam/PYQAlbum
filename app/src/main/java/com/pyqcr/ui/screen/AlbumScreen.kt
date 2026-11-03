@@ -820,9 +820,11 @@ fun AlbumScreen(
                 // Move source with no recycle bin available: keep the
                 // original (the verified copy is already at the destination)
                 // instead of an irreversible permanent delete.
-                snackbarHostState.showSnackbar(
-                    "Copied to the destination — originals kept (recycle bin unavailable)"
-                )
+                scope.launch {
+                    snackbarHostState.showSnackbar(
+                        "Copied to the destination — originals kept (recycle bin unavailable)"
+                    )
+                }
                 isMultiSelectMode = false
                 selectedImageUris = emptySet()
             }
