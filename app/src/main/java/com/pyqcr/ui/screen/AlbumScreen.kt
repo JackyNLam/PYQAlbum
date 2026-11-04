@@ -76,6 +76,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
 import android.content.ContentValues
 import androidx.activity.compose.BackHandler
 import android.graphics.Bitmap
@@ -596,6 +598,7 @@ fun AlbumScreen(
                 }
                 val pending = pendingFavouriteUris
                 val target = pendingFavouriteTarget
+                FavouriteStore.notifyFavouriteChanged(context, pending)
                 val applied = withContext(Dispatchers.IO) {
                     pending.count { FavouriteStore.isFavourite(context, it) == target }
                 }
@@ -1201,6 +1204,7 @@ fun AlbumScreen(
     // was at the top of the grid when it was opened. Stored as a URI (not an
     // index) so sorting, grouping and late-arriving videos cannot shift it.
     var savedAnchorUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var savedAnchorOffset by rememberSaveable { mutableIntStateOf(0) }
 
     // Long-press directly enters multi-select mode (no popup dialog)
 
@@ -1872,57 +1876,56 @@ fun AlbumScreen(
                                                 Pair(toAdd.toList(), true)
                                             }
                                         if (changeUris.isNotEmpty()) {
-                                            // PRIMARY marking method: the direct verified
-                                            // IS_FAVORITE write — in-app, no system dialog,
-                                            // and the flag does not need to show in other
-                                            // apps. Only rows the provider rejects fall
-                                            // back to the platform favourite-request dialog.
-                                            var ok = 0
-                                            val failed = mutableListOf<String>()
-                                            withContext(Dispatchers.IO) {
-                                                changeUris.forEach {
-                                                    if (FavouriteStore.setFavourite(
-                                                            context, it, changeTarget
-                                                        )
-                                                    ) {
-                                                        ok++
-                                                    } else {
-                                                        failed += it
-                                                    }
-                                                }
-                                            }
-                                            favouriteUris = withContext(Dispatchers.IO) {
-                                                FavouriteStore.loadFavouriteUris(context)
-                                            }
-                                            if (failed.isEmpty()) {
-                                                snackbarHostState.showSnackbar(
-                                                    "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}"
+                                            // Android 13+: the platform favourite-request
+                                            // dialog is the PRIMARY path — the media
+                                            // provider performs the write itself, which is
+                                            // what OEM galleries (HONOR "My favourites")
+                                            // sync into their own album. Android 11/12 has
+                                            // no favourite dialog, so the direct verified
+                                            // write runs first and only rejected rows fall
+                                            // back to a WRITE-ACCESS request.
+                                            val sender = FavouriteStore.createFavoriteRequest(
+                                                context, changeUris, changeTarget
+                                            )
+                                            if (sender != null) {
+                                                pendingFavouriteMessage = if (changeTarget)
+                                                    "${changeUris.size} marked as favourite"
+                                                else "${changeUris.size} removed from favourites"
+                                                pendingFavouriteUris = changeUris
+                                                pendingFavouriteTarget = changeTarget
+                                                pendingFavouriteNeedsWriteGrant = false
+                                                favouriteLauncher.launch(
+                                                    IntentSenderRequest.Builder(sender).build()
                                                 )
                                             } else {
-                                                if (ok > 0) {
-                                                    snackbarHostState.showSnackbar(
-                                                        "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}" +
-                                                            " — ${failed.size} need confirmation"
-                                                    )
+                                                var ok = 0
+                                                val failed = mutableListOf<String>()
+                                                withContext(Dispatchers.IO) {
+                                                    changeUris.forEach {
+                                                        if (FavouriteStore.setFavourite(
+                                                                context, it, changeTarget
+                                                            )
+                                                        ) {
+                                                            ok++
+                                                        } else {
+                                                            failed += it
+                                                        }
+                                                    }
                                                 }
-                                                // Fallback for rows the direct write could
-                                                // not touch: the platform favourite-request
-                                                // dialog (Android 13+), or a WRITE-ACCESS
-                                                // request (Android 11/12).
-                                                val sender = FavouriteStore.createFavoriteRequest(
-                                                    context, failed, changeTarget
-                                                )
-                                                if (sender != null) {
-                                                    pendingFavouriteMessage = if (changeTarget)
-                                                        "${failed.size} marked as favourite"
-                                                    else "${failed.size} removed from favourites"
-                                                    pendingFavouriteUris = failed
-                                                    pendingFavouriteTarget = changeTarget
-                                                    pendingFavouriteNeedsWriteGrant = false
-                                                    favouriteLauncher.launch(
-                                                        IntentSenderRequest.Builder(sender).build()
+                                                favouriteUris = withContext(Dispatchers.IO) {
+                                                    FavouriteStore.loadFavouriteUris(context)
+                                                }
+                                                if (failed.isEmpty()) {
+                                                    snackbarHostState.showSnackbar(
+                                                        "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}"
                                                     )
                                                 } else {
+                                                    if (ok > 0) {
+                                                        snackbarHostState.showSnackbar(
+                                                            "$ok ${if (changeTarget) "marked as favourite" else "removed from favourites"}" +
+                                                                " — ${failed.size} need confirmation"
+                                                        )
+                                                    }
                                                     val writeSender = FavouriteStore.createWriteAccessRequest(
                                                         context, failed
                                                     )
@@ -2100,8 +2103,11 @@ fun AlbumScreen(
                                         waterfallState = waterfallState,
                                         justifiedState = justifiedState,
                                         restoreAnchorUri = savedAnchorUri,
-                                        onRestoreConsumed = { savedAnchorUri = null },
-                                        onAnchorChanged = { savedAnchorUri = it },
+                                        restoreAnchorOffset = savedAnchorOffset,
+                                        onAnchorChanged = { uri, offset ->
+                                            savedAnchorUri = uri
+                                            savedAnchorOffset = offset
+                                        },
                                         onImageClick = { uri, imageList ->
                                             if (isMultiSelectMode) {
                                                 selectedImageUris = if (uri in selectedImageUris)
@@ -3186,8 +3192,8 @@ private fun ImageGridView(
     onMultiSelectImageToggle: ((String) -> Unit)? = null,
     onGroupBarLongPress: (List<ImageItem>) -> Unit = {},
     restoreAnchorUri: String? = null,
-    onRestoreConsumed: () -> Unit = {},
-    onAnchorChanged: (String) -> Unit = {}
+    restoreAnchorOffset: Int = 0,
+    onAnchorChanged: (String, Int) -> Unit = { _, _ -> }
 ) {
     val imageUris = remember(images) { images.map { it.uri } }
     // Group images by the requested criterion (date / rating / AI score)
@@ -3240,63 +3246,108 @@ private fun ImageGridView(
         }
     }
 
-    // Scroll restoration is ANCHOR-BASED (first visible image URI, not the
-    // numeric index): grouping inserts header rows and sorting/loading videos
-    // can shift every index, so a stored index would land somewhere else after
-    // returning from the viewer. The anchor URI is mapped back to the current
-    // lazy index at restore time.
-    val firstVisibleUri: () -> String? = {
-        when (viewLayout) {
-            ViewLayout.GRID ->
-                gridState.layoutInfo.visibleItemsInfo
-                    .firstOrNull { it.key is String }?.key as? String
-            ViewLayout.WATERFALL ->
-                waterfallState.layoutInfo.visibleItemsInfo
-                    .firstOrNull { it.key is String }?.key as? String
-            ViewLayout.JUSTIFIED ->
-                justifiedState.layoutInfo.visibleItemsInfo
-                    .firstOrNull { it.key is String }?.key as? String
+    // Scroll restoration is ANCHOR-BASED (the first visible image URI plus its
+    // pixel offset, never a numeric index): grouping inserts header rows, the
+    // Justified layout packs 3 images per row and late-loading videos shift
+    // every index, so a stored index lands somewhere else after returning from
+    // the viewer. The anchor URI is mapped back to the current lazy index at
+    // restore time.
+    //
+    // Capture runs continuously (one emit per scroll-idle position change), so
+    // the position is already stored before the viewer opens — restoring never
+    // depends on a click callback firing.
+    fun currentAnchor(): Pair<String, Int>? = when (viewLayout) {
+        ViewLayout.GRID -> {
+            val info = gridState.layoutInfo
+            val item = info.visibleItemsInfo.firstOrNull { it.key is String }
+            if (item == null) null
+            else (item.key as String) to (-item.offset.y).coerceAtLeast(0)
+        }
+        ViewLayout.WATERFALL -> {
+            val info = waterfallState.layoutInfo
+            val item = info.visibleItemsInfo.firstOrNull { it.key is String }
+            if (item == null) null
+            else (item.key as String) to (-item.offset.y).coerceAtLeast(0)
+        }
+        ViewLayout.JUSTIFIED -> {
+            val info = justifiedState.layoutInfo
+            // Justified rows are keyed by their first image URI.
+            val item = info.visibleItemsInfo.firstOrNull { it.key is String }
+            if (item == null) null
+            else (item.key as String) to (-item.offset).coerceAtLeast(0)
         }
     }
 
     // Remember the current top image whenever a photo is opened, so the return
     // from the viewer can put that same image back on top.
     val openImage: (String, List<String>) -> Unit = { uri, list ->
-        firstVisibleUri()?.let { onAnchorChanged(it) }
+        currentAnchor()?.let { onAnchorChanged(it.first, it.second) }
         onImageClick(uri, list)
     }
 
-    LaunchedEffect(restoreAnchorUri, images, viewLayout, groupByMode) {
-        val anchor = restoreAnchorUri ?: return@LaunchedEffect
+    // Restore runs once per composition — i.e. every time the grid comes back
+    // from the viewer. It waits for the image list (arrives asynchronously
+    // after a process restart) and is not consumed until a scroll happened.
+    var restoreDone by remember { mutableStateOf(false) }
+    LaunchedEffect(
+        restoreAnchorUri,
+        restoreAnchorOffset,
+        images.size,
+        viewLayout,
+        groupByMode,
+        restoreDone
+    ) {
+        if (restoreDone) return@LaunchedEffect
+        val anchor = restoreAnchorUri
+        if (anchor == null) {
+            restoreDone = true
+            return@LaunchedEffect
+        }
         if (images.isEmpty()) return@LaunchedEffect
-        val index = if (viewLayout == ViewLayout.GRID &&
-            groupByMode != GroupByMode.NONE && groups.isNotEmpty()
-        ) {
-            // Grouped grid: every group contributes one header item before its
-            // images, so walk the groups to find the anchor's lazy index.
-            var running = 0
-            var found = -1
-            for ((_, groupImages) in groups) {
-                running++ // header row
-                val i = groupImages.indexOfFirst { it.uri == anchor }
-                if (i >= 0) {
-                    found = running + i
-                    break
+        val imageIndex = images.indexOfFirst { it.uri == anchor }
+        val index = when (viewLayout) {
+            ViewLayout.GRID ->
+                if (groupByMode != GroupByMode.NONE && groups.isNotEmpty()) {
+                    // Grouped grid: every group contributes one header item
+                    // before its images, so walk the groups to find the index.
+                    var running = 0
+                    var found = -1
+                    for ((_, groupImages) in groups) {
+                        running++ // header row
+                        val i = groupImages.indexOfFirst { it.uri == anchor }
+                        if (i >= 0) {
+                            found = running + i
+                            break
+                        }
+                        running += groupImages.size
+                    }
+                    found
+                } else {
+                    imageIndex
                 }
-                running += groupImages.size
-            }
-            found
-        } else {
-            images.indexOfFirst { it.uri == anchor }
+            // The justified layout packs 3 images into each lazy row.
+            ViewLayout.JUSTIFIED -> if (imageIndex < 0) -1 else imageIndex / 3
+            ViewLayout.WATERFALL -> imageIndex
         }
         if (index >= 0) {
+            val offset = restoreAnchorOffset.coerceAtLeast(0)
             when (viewLayout) {
-                ViewLayout.GRID -> gridState.scrollToItem(index, 0)
-                ViewLayout.WATERFALL -> waterfallState.scrollToItem(index, 0)
-                ViewLayout.JUSTIFIED -> justifiedState.scrollToItem(index, 0)
+                ViewLayout.GRID -> gridState.scrollToItem(index, offset)
+                ViewLayout.WATERFALL -> waterfallState.scrollToItem(index, offset)
+                ViewLayout.JUSTIFIED -> justifiedState.scrollToItem(index, offset)
             }
         }
-        onRestoreConsumed()
+        restoreDone = true
+    }
+
+    // After the restore, keep the stored anchor in step with the real top item.
+    // Only the URI is recorded here (one update per row, not per scroll frame);
+    // the exact pixel offset is stored when a photo is opened.
+    LaunchedEffect(viewLayout, restoreDone) {
+        if (!restoreDone) return@LaunchedEffect
+        snapshotFlow { currentAnchor()?.first }
+            .distinctUntilChanged()
+            .collect { uri -> if (uri != null) onAnchorChanged(uri, 0) }
     }
 
     // Swipe-across selection: in multi-select mode a drag over thumbnails

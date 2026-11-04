@@ -278,6 +278,7 @@ fun ImageDetailScreen(
                     isFavourite = withContext(Dispatchers.IO) {
                         FavouriteStore.isFavourite(context, imageUri)
                     }
+                    FavouriteStore.notifyFavouriteChanged(context, listOf(imageUri))
                     snackbarHostState.showSnackbar(
                         if (ok) {
                             if (pendingFavouriteValue) "Marked as favourite" else "Removed from favourites"
@@ -294,6 +295,8 @@ fun ImageDetailScreen(
                 isFavourite = withContext(Dispatchers.IO) {
                     FavouriteStore.isFavourite(context, imageUri)
                 }
+                // Make the new flag visible to OEM galleries immediately.
+                FavouriteStore.notifyFavouriteChanged(context, listOf(imageUri))
                 if (result.resultCode == android.app.Activity.RESULT_OK) {
                     if (isFavourite == pendingFavouriteValue) {
                         snackbarHostState.showSnackbar(
@@ -324,36 +327,34 @@ fun ImageDetailScreen(
         }
     }
 
-    // Toggle the favourite flag (MediaStore IS_FAVORITE, API 30+). PRIMARY
-    // method: the direct verified IS_FAVORITE write — in-app only, no system
-    // dialog, and the flag does not need to show in other apps. The platform
-    // favourite-request dialog is only a fallback when the provider rejects
-    // the direct write (row owned by another app).
+    // Toggle the favourite flag (MediaStore IS_FAVORITE, API 30+).
+    // Android 13+: the platform favourite-request dialog is the PRIMARY path —
+    // the media provider performs the write itself, which is exactly what OEM
+    // galleries (HONOR "My favourites", Samsung, …) sync into their own album.
+    // Android 11/12 has no favourite dialog: direct verified write first, then
+    // the write-access bridge for rows this app does not own.
     val toggleFavourite: () -> Unit = {
         if (!FavouriteStore.supported) {
             coroutineScope.launch { snackbarHostState.showSnackbar("Favourite requires Android 11+") }
         } else {
             val newValue = !isFavourite
             coroutineScope.launch {
-                val ok = withContext(Dispatchers.IO) {
-                    FavouriteStore.setFavourite(context, imageUri, newValue)
-                }
-                if (ok) {
-                    isFavourite = newValue
-                    snackbarHostState.showSnackbar(
-                        if (newValue) "Marked as favourite" else "Removed from favourites"
-                    )
+                val sender = FavouriteStore.createFavoriteRequest(
+                    context, listOf(imageUri), newValue
+                )
+                if (sender != null) {
+                    pendingFavouriteValue = newValue
+                    pendingFavouriteNeedsWriteGrant = false
+                    favouriteLauncher.launch(IntentSenderRequest.Builder(sender).build())
                 } else {
-                    // Provider rejected the direct write — fall back to the
-                    // platform favourite-request dialog (Android 13+), or a
-                    // WRITE-ACCESS request (Android 11/12).
-                    val sender = FavouriteStore.createFavoriteRequest(
-                        context, listOf(imageUri), newValue
-                    )
-                    if (sender != null) {
-                        pendingFavouriteValue = newValue
-                        pendingFavouriteNeedsWriteGrant = false
-                        favouriteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                    val ok = withContext(Dispatchers.IO) {
+                        FavouriteStore.setFavourite(context, imageUri, newValue)
+                    }
+                    if (ok) {
+                        isFavourite = newValue
+                        snackbarHostState.showSnackbar(
+                            if (newValue) "Marked as favourite" else "Removed from favourites"
+                        )
                     } else {
                         val writeSender = FavouriteStore.createWriteAccessRequest(
                             context, listOf(imageUri)

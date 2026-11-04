@@ -44,14 +44,13 @@ object FavouriteStore {
     }
 
     /**
-     * PRIMARY marking method — set (true) or clear (false) the favourite flag
+     * PRIMARY (Android 11/12): set (true) or clear (false) the favourite flag
      * by writing IS_FAVORITE directly. Returns false when the provider rejects
-     * the write. The flag does NOT need to be visible in other apps, so the
-     * plain verified write is the preferred path: it is silent (no system
-     * dialog) and persists on rows this app owns (and, with All-files access,
-     * on foreign rows too). Callers fall back to the platform
-     * favourite-request dialog ([createFavoriteRequest]) only when this
-     * returns false.
+     * the write. On Android 13+ the platform favourite-request dialog
+     * ([createFavoriteRequest]) is preferred instead, because it makes the
+     * media provider perform the write itself — that is the path OEM galleries
+     * (HONOR "My favourites") sync from. Callers use this direct write on
+     * Android 11/12, and as the fallback when the dialog cannot be built.
      */
     fun setFavourite(context: Context, uri: String, favourite: Boolean): Boolean {
         if (!supported) return false
@@ -64,22 +63,46 @@ object FavouriteStore {
             // flag on rows the app does not own — verify the column actually
             // changed so the caller falls back to the platform request dialog
             // (createFavoriteRequest) instead of silently "succeeding".
-            updated && isFavourite(context, uri) == favourite
+            val ok = updated && isFavourite(context, uri) == favourite
+            if (ok) notifyFavouriteChanged(context, listOf(uri))
+            ok
         } catch (e: Exception) {
             false
         }
     }
 
     /**
-     * FALLBACK ONLY (Android 13+): builds the platform favourite request — one
-     * confirmation dialog for [imageUris]; on approval the media provider
-     * itself persists IS_FAVORITE, which works for rows this app does NOT own
-     * (e.g. photos taken by other apps). Used when the direct verified write
-     * ([setFavourite]) fails. Returns the platform PendingIntent so callers
-     * can build a launcher from it; null below Android 13 (the
-     * favourite-request DIALOG itself is API 33+, even though the IS_FAVORITE
-     * column exists from API 30) or on failure — callers then try the
-     * WRITE-ACCESS request ([createWriteAccessRequest]) or give up.
+     * Tells every MediaStore observer that a favourite flag changed. Galleries
+     * (HONOR/Huawei "My favourites", Samsung, Google Photos) cache the column
+     * after a media refresh, so an explicit notify on the row, the images
+     * collection and the media authority makes them re-read it instead of
+     * waiting for the next full scan.
+     */
+    fun notifyFavouriteChanged(context: Context, uris: List<String>) {
+        if (!supported) return
+        try {
+            uris.forEach { context.contentResolver.notifyChange(Uri.parse(it), null) }
+            context.contentResolver.notifyChange(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, null
+            )
+            context.contentResolver.notifyChange(
+                Uri.parse("content://${MediaStore.AUTHORITY}"), null
+            )
+        } catch (e: Exception) {
+        }
+    }
+
+    /**
+     * PRIMARY on Android 13+: builds the platform favourite request — one
+     * confirmation dialog for [imageUris]; the media provider itself persists
+     * IS_FAVORITE with system authority, and OEM galleries (HONOR/Huawei "My
+     * favourites", Samsung) pick that up, unlike a silent third-party write.
+     * Used for rows this app does NOT own as well. Returns the platform
+     * PendingIntent so callers can build a launcher from it; null below
+     * Android 13 (the favourite-request DIALOG itself is API 33+, even though
+     * the IS_FAVORITE column exists from API 30) or on failure — callers then
+     * use the direct write ([setFavourite]) or the WRITE-ACCESS request
+     * ([createWriteAccessRequest]).
      */
     fun setMediaFavoriteStatus(
         context: Context,

@@ -74,7 +74,10 @@ fun JustifiedGrid(
         modifier = modifier.background(Color.White),
         verticalArrangement = Arrangement.spacedBy(spacing)
     ) {
-        items(rows) { row ->
+        // Rows are keyed by their first image URI so the album can capture and
+        // restore the scroll position per row (indexes alone shift when
+        // sorting/grouping changes the list).
+        items(rows, key = { row -> row.first().uri }) { row ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
