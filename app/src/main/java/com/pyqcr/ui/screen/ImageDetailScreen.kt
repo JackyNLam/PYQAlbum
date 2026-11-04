@@ -735,7 +735,7 @@ fun ImageDetailScreen(
                                     if (pressedCount >= 2) {
                                         val zoomChange = event.calculateZoom()
                                         val panChange = event.calculatePan()
-                                        val newScale = (scale * zoomChange).coerceIn(1f, 12f)
+                                        val newScale = (scale * zoomChange).coerceIn(1f, 30f)
                                         scale = newScale
                                         offset = if (newScale > 1f)
                                             clampPanOffset(offset + panChange * newScale, newScale)
@@ -1387,6 +1387,8 @@ fun ImageDetailScreen(
                                 ?.sortedBy { it.name.lowercase() }
                                 ?: emptyList()
                         }
+                        var creatingFolder by remember { mutableStateOf(false) }
+                        var newFolderName by remember { mutableStateOf("") }
                         AlertDialog(
                             onDismissRequest = { showDestinationDialog = false },
                             title = { Text(if (isCopy) "Copy to..." else "Move to...") },
@@ -1399,6 +1401,57 @@ fun ImageDetailScreen(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Empty folders can be chosen too",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Spacer(Modifier.weight(1f))
+                                        TextButton(onClick = { creatingFolder = !creatingFolder }) {
+                                            Icon(
+                                                Icons.Default.CreateNewFolder,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(
+                                                "New folder",
+                                                style = MaterialTheme.typography.labelMedium
+                                            )
+                                        }
+                                    }
+                                    if (creatingFolder) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            OutlinedTextField(
+                                                value = newFolderName,
+                                                onValueChange = { newFolderName = it },
+                                                singleLine = true,
+                                                label = { Text("Folder name") },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                            TextButton(onClick = {
+                                                val name = newFolderName.trim()
+                                                    .replace("/", "_")
+                                                    .replace("\\", "_")
+                                                if (name.isNotEmpty()) {
+                                                    val dir = File(currentDir, name)
+                                                    if (dir.exists() || dir.mkdirs()) {
+                                                        folderBrowserDir = dir
+                                                        newFolderName = ""
+                                                        creatingFolder = false
+                                                    }
+                                                }
+                                            }) { Text("Create") }
+                                        }
+                                    }
                                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                                     LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
                                         if (!isRoot) {

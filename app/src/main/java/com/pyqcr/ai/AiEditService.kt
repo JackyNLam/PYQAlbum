@@ -22,6 +22,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import com.pyqcr.ui.util.MediaStoreUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -938,6 +939,10 @@ class AiEditService {
                     return null
                 }
 
+                // Ask the media scanner to index the new image so other apps
+                // (WeChat's chat picker, file browsers) can see it.
+                MediaStoreUtils.publishImage(context, uri)
+
                 uri.toString()
             } else {
                 @Suppress("DEPRECATION")
@@ -1054,6 +1059,7 @@ class AiEditService {
 
                 val updateValues = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
                 context.contentResolver.update(uri, updateValues, null, null)
+                MediaStoreUtils.publishImage(context, uri)
                 uri.toString()
             } else {
                 @Suppress("DEPRECATION")

@@ -53,6 +53,7 @@ fun JustifiedGrid(
     taggedUris: Set<String> = emptySet(),
     onImageClick: ((String) -> Unit)? = null,
     onLongPress: ((String) -> Unit)? = null,
+    swipeSelection: SwipeSelectionState? = null,
     modifier: Modifier = Modifier,
     state: LazyListState = rememberLazyListState()
 ) {
@@ -94,6 +95,8 @@ fun JustifiedGrid(
 
                     val itemWidthDp = (ratio / sumRatios) * availableWidth
 
+                    val cellSwipe = Modifier.swipeSelectCell(swipeSelection, image.uri)
+
                     val isSelected = image.uri in selectedImageUris
                     Box(
                         modifier = Modifier
@@ -106,6 +109,7 @@ fun JustifiedGrid(
                                     onLongClick = { onLongPress?.invoke(image.uri) }
                                 )
                             )
+                            .then(cellSwipe)
                     ) {
                         if (image.uri.contains("/video/")) {
                             // Videos preview a REAL frame now: the app

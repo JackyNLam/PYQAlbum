@@ -465,11 +465,33 @@ fun AiEditScreen(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
-                            Text(
-                                text = "${selectedSourceAreas.size} selected",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "${selectedSourceAreas.size} selected",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                if (selectedSourceAreas.isNotEmpty()) {
+                                    Spacer(Modifier.width(4.dp))
+                                    TextButton(
+                                        onClick = {
+                                            // Clear the source images only — the
+                                            // second/third reference images, prompt
+                                            // and API config stay untouched.
+                                            selectedSourceAreas = emptyMap()
+                                            AiEditSelectionStore.saveSourceUris(context, emptySet())
+                                            AiEditSelectionStore.saveSourceAreas(context, emptyMap())
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 6.dp)
+                                    ) {
+                                        Text(
+                                            "Clear",
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.labelMedium
+                                        )
+                                    }
+                                }
+                            }
                         }
 
                         Spacer(Modifier.height(8.dp))

@@ -21,6 +21,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -2608,6 +2609,12 @@ fun AlbumScreen(
                         ?: emptyList()
                 }
 
+                // Inline "new folder" creator — the chosen folder does not need
+                // to contain any images, so an empty (or brand-new) folder is a
+                // perfectly valid destination.
+                var creatingFolder by remember { mutableStateOf(false) }
+                var newFolderName by remember { mutableStateOf("") }
+
                 AlertDialog(
                     onDismissRequest = { showDestinationDialog = false },
                     title = { Text(if (isCopy) "Copy to..." else "Move to...") },
@@ -2621,6 +2628,54 @@ fun AlbumScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Empty folders can be chosen too",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.weight(1f))
+                                TextButton(onClick = { creatingFolder = !creatingFolder }) {
+                                    Icon(
+                                        Icons.Default.CreateNewFolder,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("New folder", style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
+                            if (creatingFolder) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedTextField(
+                                        value = newFolderName,
+                                        onValueChange = { newFolderName = it },
+                                        singleLine = true,
+                                        label = { Text("Folder name") },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    TextButton(onClick = {
+                                        val name = newFolderName.trim()
+                                            .replace("/", "_")
+                                            .replace("\\", "_")
+                                        if (name.isNotEmpty()) {
+                                            val dir = File(folderBrowserDir, name)
+                                            if (dir.exists() || dir.mkdirs()) {
+                                                folderBrowserDir = dir
+                                                newFolderName = ""
+                                                creatingFolder = false
+                                            }
+                                        }
+                                    }) { Text("Create") }
+                                }
+                            }
                             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
                             // Scrollable directory list
@@ -3346,7 +3401,31 @@ private fun ImageGridView(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // Swipe-across selection: in multi-select mode a drag over thumbnails
+    // selects every cell the finger crosses (add-only, taps still toggle).
+    val swipeSelection = rememberSwipeSelectionState()
+    val swipeSelect: ((String) -> Unit)? =
+        if (isMultiSelectMode && onMultiSelectImageToggle != null) {
+            { uri -> if (uri !in selectedImageUris) onMultiSelectImageToggle(uri) }
+        } else null
+    val swipeAutoScroll: (suspend (Float) -> Unit) = { delta ->
+        when (viewLayout) {
+            ViewLayout.GRID -> gridState.scrollBy(delta)
+            ViewLayout.WATERFALL -> waterfallState.scrollBy(delta)
+            ViewLayout.JUSTIFIED -> justifiedState.scrollBy(delta)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .swipeSelectContainer(
+                state = swipeSelection,
+                enabled = swipeSelect != null,
+                onSelect = { swipeSelect?.invoke(it) },
+                onAutoScroll = swipeAutoScroll
+            )
+    ) {
         when (viewLayout) {
             ViewLayout.GRID -> {
             if (groupByMode != GroupByMode.NONE && groups.isNotEmpty()) {
@@ -3379,7 +3458,8 @@ private fun ImageGridView(
                                 taggedUris = taggedUris,
                                 onImageClick = onImageClick,
                                 onLongPress = onLongPress,
-                                onMultiSelectImageToggle = onMultiSelectImageToggle
+                                onMultiSelectImageToggle = onMultiSelectImageToggle,
+                                swipeSelection = swipeSelection
                             )
                         }
                     }
@@ -3405,7 +3485,8 @@ private fun ImageGridView(
                             taggedUris = taggedUris,
                             onImageClick = onImageClick,
                             onLongPress = onLongPress,
-                            onMultiSelectImageToggle = onMultiSelectImageToggle
+                            onMultiSelectImageToggle = onMultiSelectImageToggle,
+                            swipeSelection = swipeSelection
                         )
                     }
                 }
@@ -3425,6 +3506,7 @@ private fun ImageGridView(
                 taggedUris = taggedUris,
                 onImageClick = gridClick,
                 onLongPress = onLongPress,
+                swipeSelection = swipeSelection,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -3441,6 +3523,7 @@ private fun ImageGridView(
                 taggedUris = taggedUris,
                 onImageClick = justifiedClick,
                 onLongPress = onLongPress,
+                swipeSelection = swipeSelection,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -3610,7 +3693,8 @@ private fun ImageGridCell(
     taggedUris: Set<String>,
     onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit,
-    onMultiSelectImageToggle: ((String) -> Unit)? = null
+    onMultiSelectImageToggle: ((String) -> Unit)? = null,
+    swipeSelection: SwipeSelectionState? = null
 ) {
     val isSelected = image.uri in selectedImageUris
     val cellModifier = if (isMultiSelectMode && onMultiSelectImageToggle != null) {
@@ -3628,8 +3712,9 @@ private fun ImageGridCell(
                 onLongClick = { onLongPress(image.uri) }
             )
     }
+    val registeredModifier = cellModifier.swipeSelectCell(swipeSelection, image.uri)
     Box(
-        modifier = cellModifier
+        modifier = registeredModifier
     ) {
         ImageThumbnail(
             imageUri = image.uri,
@@ -4284,6 +4369,8 @@ internal suspend fun resizeSingleImageToWidth(
                             ?: run { resized.recycle(); return@withContext false }
                         contentResolver.openOutputStream(newUri)?.use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
                             ?: run { resized.recycle(); contentResolver.delete(newUri, null, null); return@withContext false }
+                        // Index the new copy so other apps (WeChat picker) see it.
+                        com.pyqcr.ui.util.MediaStoreUtils.publishImage(context, newUri)
                     } else {
                         val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "PYQAlbum")
                         if (!dir.exists()) dir.mkdirs()
@@ -4489,7 +4576,7 @@ private fun RecycleBinViewer(
                                         if (pressedCount >= 2) {
                                             val zoomChange = event.calculateZoom()
                                             val panChange = event.calculatePan()
-                                            val newScale = (scale * zoomChange).coerceIn(1f, 5f)
+                                            val newScale = (scale * zoomChange).coerceIn(1f, 30f)
                                             scale = newScale
                                             offset = if (newScale > 1f)
                                                 clampBinViewerOffset(
@@ -4571,7 +4658,8 @@ private fun RecycleBinViewer(
                         SubcomposeAsyncImage(
                             model = ImageRequest.Builder(context)
                                 .data(item.uri)
-                                .size(1600)
+                                // Native resolution — the viewer zooms up to 30x.
+                                .size(coil3.size.Size.ORIGINAL)
                                 .crossfade(true)
                                 .build(),
                             contentDescription = item.displayName,

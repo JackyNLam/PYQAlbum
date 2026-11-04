@@ -80,6 +80,7 @@ import com.pyqcr.ui.component.QrCodeResultDialog
 import com.pyqcr.ui.component.QrScanResult
 import com.pyqcr.ui.component.VideoPlayer
 import com.pyqcr.ui.util.FileOperationHelper
+import com.pyqcr.ui.util.MediaStoreUtils
 import com.pyqcr.util.MotionPhotoExtractor
 import com.pyqcr.util.QrCodeReader
 import kotlinx.coroutines.Dispatchers
@@ -1135,7 +1136,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                                 val zoomChange = event.calculateZoom()
                                                 val panChange = event.calculatePan()
                                                 val newScale =
-                                                    (viewerScale * zoomChange).coerceIn(1f, 12f)
+                                                    (viewerScale * zoomChange).coerceIn(1f, 30f)
                                                 viewerScale = newScale
                                                 viewerOffset = if (newScale > 1f) {
                                                     clampViewerOffset(
@@ -2913,7 +2914,10 @@ object VaultStorage {
                     return null
                 }
             }
-            destUri
+            // Index the exported copy so other apps (WeChat's chat picker,
+            // file browsers) see it right away.
+            MediaStoreUtils.publishImage(context, destUri!!)
+            destUri!!
         } catch (e: Exception) {
             destUri?.let { uri ->
                 try { context.contentResolver.delete(uri, null, null) } catch (_: Exception) {}

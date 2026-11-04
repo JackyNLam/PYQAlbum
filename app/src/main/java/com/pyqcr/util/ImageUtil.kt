@@ -260,6 +260,8 @@ object ImageUtil {
                     context.contentResolver.delete(uri, null, null)
                     return null
                 }
+                // Publish to other apps (WeChat picker, file browsers) right away.
+                MediaStoreUtils.publishImage(context, uri)
                 uri.toString()
             } else {
                 val dir = File(

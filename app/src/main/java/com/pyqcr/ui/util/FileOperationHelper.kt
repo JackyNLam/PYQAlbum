@@ -520,6 +520,10 @@ object FileOperationHelper {
                     }
                 }
 
+                // Notify the media scanner so other apps (WeChat's chat picker,
+                // file browsers) can see the new image immediately.
+                destUri?.let { MediaStoreUtils.publishImage(context, it) }
+
                 // Read the published copy BACK before claiming success. A move
                 // deletes the original only after this returns true — virtualised
                 // providers (HONOR Parallel Space) have been observed to publish
@@ -1235,18 +1239,38 @@ object FileOperationHelper {
      * content URI as a string, or null when the save failed.
      */
     fun savePngScreenshot(context: Context, bitmap: android.graphics.Bitmap, baseName: String): String? {
+        val fileName = "${baseName}_${System.currentTimeMillis()}.png"
+        // Pre-Q: write into the public Pictures folder and scan it, otherwise
+        // the file never becomes a MediaStore row and other apps cannot see it.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return try {
+                @Suppress("DEPRECATION")
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "PYQAlbum/Screenshots"
+                )
+                if (!dir.exists()) dir.mkdirs()
+                val file = File(dir, fileName)
+                java.io.FileOutputStream(file).use {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                }
+                scanFile(context, file.absolutePath)
+                Uri.fromFile(file).toString()
+            } catch (e: Exception) {
+                Log.w(TAG, "savePngScreenshot (legacy) failed", e)
+                null
+            }
+        }
         var outUri: Uri? = null
         return try {
             val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, "${baseName}_${System.currentTimeMillis()}.png")
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(
-                        MediaStore.MediaColumns.RELATIVE_PATH,
-                        "${Environment.DIRECTORY_PICTURES}/PYQAlbum/Screenshots"
-                    )
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                }
+                put(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    "${Environment.DIRECTORY_PICTURES}/PYQAlbum/Screenshots"
+                )
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             outUri = context.contentResolver.insert(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
@@ -1263,16 +1287,7 @@ object FileOperationHelper {
                 return null
             }
             output.use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val publish = ContentValues().apply {
-                    put(MediaStore.MediaColumns.IS_PENDING, 0)
-                }
-                try {
-                    context.contentResolver.update(outUri, publish, null, null)
-                } catch (e: Exception) {
-                    Log.w(TAG, "savePngScreenshot: publish failed", e)
-                }
-            }
+            MediaStoreUtils.publishImage(context, outUri)
             outUri.toString()
         } catch (e: Exception) {
             Log.w(TAG, "savePngScreenshot failed", e)
@@ -1402,6 +1417,43 @@ internal object MediaStoreUtils {
             )
         } catch (e: Exception) {
             Log.w(FileOperationHelper.TAG, "scanFile failed", e)
+        }
+    }
+
+    /**
+     * Make a freshly inserted MediaStore image visible to OTHER apps (WeChat's
+     * chat picker, file browsers, third-party galleries…): defensively clear
+     * IS_PENDING, resolve the row's real path, and hand it to
+     * MediaScannerConnection. The MediaStore insert alone is enough on most
+     * devices, but several OEM providers keep the row unpublished until the
+     * scanner runs — the exact reason WeChat could not see app-saved images on
+     * some phones.
+     */
+    fun publishImage(context: Context, uri: Uri) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                }
+                context.contentResolver.update(uri, values, null, null)
+            }
+        } catch (e: Exception) {
+            Log.w(FileOperationHelper.TAG, "publishImage: IS_PENDING clear failed", e)
+        }
+        try {
+            @Suppress("DEPRECATION")
+            val path = context.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns.DATA),
+                null, null, null
+            )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            if (!path.isNullOrBlank()) scanFile(context, path)
+        } catch (e: Exception) {
+            Log.w(FileOperationHelper.TAG, "publishImage: path lookup failed", e)
+        }
+        try {
+            context.contentResolver.notifyChange(uri, null)
+        } catch (e: Exception) {
         }
     }
 

@@ -48,6 +48,7 @@ fun WaterfallGrid(
     taggedUris: Set<String> = emptySet(),
     onImageClick: ((String) -> Unit)? = null,
     onLongPress: ((String) -> Unit)? = null,
+    swipeSelection: SwipeSelectionState? = null,
     modifier: Modifier = Modifier,
     state: LazyStaggeredGridState = rememberLazyStaggeredGridState()
 ) {
@@ -61,6 +62,7 @@ fun WaterfallGrid(
     ) {
         items(images, key = { it.uri }) { image ->
             val isSelected = image.uri in selectedImageUris
+            val cellSwipe = Modifier.swipeSelectCell(swipeSelection, image.uri)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -69,6 +71,7 @@ fun WaterfallGrid(
                         onClick = { onImageClick?.invoke(image.uri) },
                         onLongClick = { onLongPress?.invoke(image.uri) }
                     )
+                    .then(cellSwipe)
             ) {
                 WaterfallTile(image = image)
 
