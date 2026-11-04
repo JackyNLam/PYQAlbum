@@ -71,6 +71,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import android.content.ContentValues
@@ -245,9 +248,6 @@ fun AlbumScreen(
     // for inaccessible locations.
     var showDestinationDialog by remember { mutableStateOf(false) }
     var destinationDialogOp by remember { mutableStateOf("copy") }
-    // Current directory for the in-app folder browser; reset to external storage
-    // root each time the destination dialog opens so the user starts from the top.
-    var folderBrowserDir by remember { mutableStateOf(android.os.Environment.getExternalStorageDirectory()) }
     // Offers "All files access" once (API 30+) — the file-manager-style permission
     // that lets copy/move write into ANY folder via direct paths.
     var showFullAccessDialog by remember { mutableStateOf(false) }
@@ -493,6 +493,25 @@ fun AlbumScreen(
         favouriteUris = withContext(Dispatchers.IO) {
             FavouriteStore.loadFavouriteUris(context)
         }
+    }
+
+    // Re-read the favourites whenever the app comes back to the foreground:
+    // flags set in the system gallery (e.g. HONOR's "My favourites") while the
+    // app was in the background must appear as hearts without a restart.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                scope.launch {
+                    val fresh = withContext(Dispatchers.IO) {
+                        FavouriteStore.loadFavouriteUris(context)
+                    }
+                    if (fresh != favouriteUris) favouriteUris = fresh
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // Success-message template for the system trash/delete dialog ("{n}" is the
@@ -1178,38 +1197,10 @@ fun AlbumScreen(
     val waterfallState = rememberLazyStaggeredGridState()
     val justifiedState = rememberLazyListState()
 
-    // Saved positions per view layout type
-    var savedGridIndex by rememberSaveable { mutableIntStateOf(-1) }
-    var savedGridOffset by rememberSaveable { mutableIntStateOf(0) }
-    var savedWaterfallIndex by rememberSaveable { mutableIntStateOf(-1) }
-    var savedWaterfallOffset by rememberSaveable { mutableIntStateOf(0) }
-    var savedJustifiedIndex by rememberSaveable { mutableIntStateOf(-1) }
-    var savedJustifiedOffset by rememberSaveable { mutableIntStateOf(0) }
-
-    // Restore saved scroll position when returning from detail view. The
-    // restore waits until the images are actually in the list: after the
-    // process was restarted (user switched apps and Android reclaimed the
-    // activity) the images arrive asynchronously, and scrolling to an index
-    // while the grid is still empty would silently clamp back to the top.
-    val gridRestoreReady = folderItems.isNotEmpty()
-    LaunchedEffect(savedGridIndex, gridRestoreReady) {
-        if (gridRestoreReady && savedGridIndex >= 0) {
-            gridState.scrollToItem(savedGridIndex, savedGridOffset)
-            savedGridIndex = -1
-        }
-    }
-    LaunchedEffect(savedWaterfallIndex, gridRestoreReady) {
-        if (gridRestoreReady && savedWaterfallIndex >= 0) {
-            waterfallState.scrollToItem(savedWaterfallIndex, savedWaterfallOffset)
-            savedWaterfallIndex = -1
-        }
-    }
-    LaunchedEffect(savedJustifiedIndex, gridRestoreReady) {
-        if (gridRestoreReady && savedJustifiedIndex >= 0) {
-            justifiedState.scrollToItem(savedJustifiedIndex, savedJustifiedOffset)
-            savedJustifiedIndex = -1
-        }
-    }
+    // Scroll position restore after viewing an image: the URI of the image that
+    // was at the top of the grid when it was opened. Stored as a URI (not an
+    // index) so sorting, grouping and late-arriving videos cannot shift it.
+    var savedAnchorUri by rememberSaveable { mutableStateOf<String?>(null) }
 
     // Long-press directly enters multi-select mode (no popup dialog)
 
@@ -1792,12 +1783,10 @@ fun AlbumScreen(
                         },
                         onCopyTo = {
                             destinationDialogOp = "copy"
-                            folderBrowserDir = android.os.Environment.getExternalStorageDirectory()
                             showDestinationDialog = true
                         },
                         onMoveTo = {
                             destinationDialogOp = "move"
-                            folderBrowserDir = android.os.Environment.getExternalStorageDirectory()
                             showDestinationDialog = true
                         },
                         onMoveToVault = {
@@ -2110,6 +2099,9 @@ fun AlbumScreen(
                                         gridState = gridState,
                                         waterfallState = waterfallState,
                                         justifiedState = justifiedState,
+                                        restoreAnchorUri = savedAnchorUri,
+                                        onRestoreConsumed = { savedAnchorUri = null },
+                                        onAnchorChanged = { savedAnchorUri = it },
                                         onImageClick = { uri, imageList ->
                                             if (isMultiSelectMode) {
                                                 selectedImageUris = if (uri in selectedImageUris)
@@ -2117,21 +2109,6 @@ fun AlbumScreen(
                                                 else
                                                     selectedImageUris + uri
                                             } else {
-                                                // Save scroll position per view layout type
-                                                when (selectedViewLayout) {
-                                                    ViewLayout.GRID -> {
-                                                        savedGridIndex = gridState.firstVisibleItemIndex
-                                                        savedGridOffset = gridState.firstVisibleItemScrollOffset
-                                                    }
-                                                    ViewLayout.WATERFALL -> {
-                                                        savedWaterfallIndex = waterfallState.firstVisibleItemIndex
-                                                        savedWaterfallOffset = waterfallState.firstVisibleItemScrollOffset
-                                                    }
-                                                    ViewLayout.JUSTIFIED -> {
-                                                        savedJustifiedIndex = justifiedState.firstVisibleItemIndex
-                                                        savedJustifiedOffset = justifiedState.firstVisibleItemScrollOffset
-                                                    }
-                                                }
                                                 // Viewer follows the grid's CURRENT display order
                                                 // (grouped views reorder items) — feature: swipe
                                                 // left/right walks the list as shown.
@@ -2593,184 +2570,43 @@ fun AlbumScreen(
 
             // --- Batch operation dialogs ---
 
-            // In-app folder browser for copy/move — browse all directories under
-            // external storage. Preset folders at the top for quick access; tap any
-            // directory to descend, use ".." to navigate up, or pick the current
-            // directory with "Select folder" (bottom-right). The compact "System"
-            // button (bottom-left) opens the SAF tree picker for locations not
-            // reachable via the File API.
+            // Copy/move destination picker — opens on the album folder view (the same
+            // folder cards as the Folder browse) and can switch to the file-system
+            // browser / SAF picker for locations outside the media folders.
             if (showDestinationDialog) {
-                val isCopy = destinationDialogOp == "copy"
-                val isRoot = folderBrowserDir == android.os.Environment.getExternalStorageDirectory()
-
-                val subDirs = remember(folderBrowserDir) {
-                    folderBrowserDir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }
-                        ?.sortedBy { it.name.lowercase() }
-                        ?: emptyList()
-                }
-
-                // Inline "new folder" creator — the chosen folder does not need
-                // to contain any images, so an empty (or brand-new) folder is a
-                // perfectly valid destination.
-                var creatingFolder by remember { mutableStateOf(false) }
-                var newFolderName by remember { mutableStateOf("") }
-
-                AlertDialog(
-                    onDismissRequest = { showDestinationDialog = false },
-                    title = { Text(if (isCopy) "Copy to..." else "Move to...") },
-                    text = {
-                        Column {
-                            // Current path breadcrumb
-                            Text(
-                                text = folderBrowserDir.absolutePath,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                // Opens on the album folder view (folder cards with counts);
+                // "All folders" switches to the file-system browser, "System"
+                // keeps the SAF tree picker for unreachable locations.
+                CopyMoveDestinationDialog(
+                    isCopy = destinationDialogOp == "copy",
+                    onDismiss = { showDestinationDialog = false },
+                    onPickFolder = { destDir ->
+                        showDestinationDialog = false
+                        // Non-standard folders (outside Download/Pictures/DCIM/Movies)
+                        // need "All files access" on Android 11+ to write via File I/O.
+                        // Without it, FileOutputStream throws EACCES — same as the SAF
+                        // picker flow, which also shows this dialog for non-standard folders.
+                        val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+                                !android.os.Environment.isExternalStorageManager() &&
+                                !FileOperationHelper.isStandardMediaCollection(destDir)
+                        if (needFullAccess) {
+                            pendingOperation = destinationDialogOp
+                            targetFolderForOperation = destDir
+                            selectedTreeUri = null
+                            showFullAccessDialog = true
+                        } else {
+                            launchCopyMove(
+                                destinationDialogOp,
+                                selectedImageUris.toList(),
+                                destDir,
+                                null
                             )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Empty folders can be chosen too",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(Modifier.weight(1f))
-                                TextButton(onClick = { creatingFolder = !creatingFolder }) {
-                                    Icon(
-                                        Icons.Default.CreateNewFolder,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("New folder", style = MaterialTheme.typography.labelMedium)
-                                }
-                            }
-                            if (creatingFolder) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    OutlinedTextField(
-                                        value = newFolderName,
-                                        onValueChange = { newFolderName = it },
-                                        singleLine = true,
-                                        label = { Text("Folder name") },
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    TextButton(onClick = {
-                                        val name = newFolderName.trim()
-                                            .replace("/", "_")
-                                            .replace("\\", "_")
-                                        if (name.isNotEmpty()) {
-                                            val dir = File(folderBrowserDir, name)
-                                            if (dir.exists() || dir.mkdirs()) {
-                                                folderBrowserDir = dir
-                                                newFolderName = ""
-                                                creatingFolder = false
-                                            }
-                                        }
-                                    }) { Text("Create") }
-                                }
-                            }
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-                            // Scrollable directory list
-                            LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
-                                // ".." parent navigation (hidden at external storage root)
-                                if (!isRoot) {
-                                    item {
-                                        TextButton(
-                                            onClick = { folderBrowserDir = folderBrowserDir.parentFile!! },
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Icon(
-                                                Icons.Default.ArrowUpward,
-                                                contentDescription = "Parent folder",
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                            Spacer(Modifier.width(8.dp))
-                                            Text("..", modifier = Modifier.fillMaxWidth())
-                                        }
-                                    }
-                                }
-
-                                items(subDirs.size) { i ->
-                                    val dir = subDirs[i]
-                                    TextButton(
-                                        onClick = { folderBrowserDir = dir },
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Folder,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(dir.name, modifier = Modifier.fillMaxWidth())
-                                    }
-                                }
-                            }
                         }
                     },
-                    confirmButton = {
-                        // Bottom row: compact "System" SAF-picker button at the far
-                        // left, then Cancel, then "Select folder" on the right.
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // SAF fallback for non-standard locations
-                            OutlinedButton(
-                                onClick = {
-                                    showDestinationDialog = false
-                                    pendingOperation = destinationDialogOp
-                                    folderPickerLauncher.launch(null)
-                                },
-                                modifier = Modifier.height(36.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.FolderOpen,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text("System", style = MaterialTheme.typography.labelMedium)
-                            }
-                            Spacer(Modifier.weight(1f))
-                            TextButton(onClick = { showDestinationDialog = false }) {
-                                Text("Cancel")
-                            }
-                            TextButton(onClick = {
-                                showDestinationDialog = false
-                                // Non-standard folders (outside Download/Pictures/DCIM/Movies)
-                                // need "All files access" on Android 11+ to write via File I/O.
-                                // Without it, FileOutputStream throws EACCES — same as the SAF
-                                // picker flow, which also shows this dialog for non-standard folders.
-                                val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
-                                        !android.os.Environment.isExternalStorageManager() &&
-                                        !FileOperationHelper.isStandardMediaCollection(folderBrowserDir)
-                                if (needFullAccess) {
-                                    pendingOperation = destinationDialogOp
-                                    targetFolderForOperation = folderBrowserDir
-                                    selectedTreeUri = null
-                                    showFullAccessDialog = true
-                                } else {
-                                    launchCopyMove(
-                                        destinationDialogOp,
-                                        selectedImageUris.toList(),
-                                        folderBrowserDir,
-                                        null
-                                    )
-                                }
-                            }) {
-                                Text("Select folder")
-                            }
-                        }
+                    onPickSystem = {
+                        showDestinationDialog = false
+                        pendingOperation = destinationDialogOp
+                        folderPickerLauncher.launch(null)
                     }
                 )
             }
@@ -3348,7 +3184,10 @@ private fun ImageGridView(
     onImageClick: (String, List<String>) -> Unit,
     onLongPress: (String) -> Unit,
     onMultiSelectImageToggle: ((String) -> Unit)? = null,
-    onGroupBarLongPress: (List<ImageItem>) -> Unit = {}
+    onGroupBarLongPress: (List<ImageItem>) -> Unit = {},
+    restoreAnchorUri: String? = null,
+    onRestoreConsumed: () -> Unit = {},
+    onAnchorChanged: (String) -> Unit = {}
 ) {
     val imageUris = remember(images) { images.map { it.uri } }
     // Group images by the requested criterion (date / rating / AI score)
@@ -3399,6 +3238,65 @@ private fun ImageGridView(
         } else {
             imageUris
         }
+    }
+
+    // Scroll restoration is ANCHOR-BASED (first visible image URI, not the
+    // numeric index): grouping inserts header rows and sorting/loading videos
+    // can shift every index, so a stored index would land somewhere else after
+    // returning from the viewer. The anchor URI is mapped back to the current
+    // lazy index at restore time.
+    val firstVisibleUri: () -> String? = {
+        when (viewLayout) {
+            ViewLayout.GRID ->
+                gridState.layoutInfo.visibleItemsInfo
+                    .firstOrNull { it.key is String }?.key as? String
+            ViewLayout.WATERFALL ->
+                waterfallState.layoutInfo.visibleItemsInfo
+                    .firstOrNull { it.key is String }?.key as? String
+            ViewLayout.JUSTIFIED ->
+                justifiedState.layoutInfo.visibleItemsInfo
+                    .firstOrNull { it.key is String }?.key as? String
+        }
+    }
+
+    // Remember the current top image whenever a photo is opened, so the return
+    // from the viewer can put that same image back on top.
+    val openImage: (String, List<String>) -> Unit = { uri, list ->
+        firstVisibleUri()?.let { onAnchorChanged(it) }
+        onImageClick(uri, list)
+    }
+
+    LaunchedEffect(restoreAnchorUri, images, viewLayout, groupByMode) {
+        val anchor = restoreAnchorUri ?: return@LaunchedEffect
+        if (images.isEmpty()) return@LaunchedEffect
+        val index = if (viewLayout == ViewLayout.GRID &&
+            groupByMode != GroupByMode.NONE && groups.isNotEmpty()
+        ) {
+            // Grouped grid: every group contributes one header item before its
+            // images, so walk the groups to find the anchor's lazy index.
+            var running = 0
+            var found = -1
+            for ((_, groupImages) in groups) {
+                running++ // header row
+                val i = groupImages.indexOfFirst { it.uri == anchor }
+                if (i >= 0) {
+                    found = running + i
+                    break
+                }
+                running += groupImages.size
+            }
+            found
+        } else {
+            images.indexOfFirst { it.uri == anchor }
+        }
+        if (index >= 0) {
+            when (viewLayout) {
+                ViewLayout.GRID -> gridState.scrollToItem(index, 0)
+                ViewLayout.WATERFALL -> waterfallState.scrollToItem(index, 0)
+                ViewLayout.JUSTIFIED -> justifiedState.scrollToItem(index, 0)
+            }
+        }
+        onRestoreConsumed()
     }
 
     // Swipe-across selection: in multi-select mode a drag over thumbnails
@@ -3457,7 +3355,7 @@ private fun ImageGridView(
                                 aiSelectedUris = aiSelectedUris,
                                 favouriteUris = favouriteUris,
                                 taggedUris = taggedUris,
-                                onImageClick = onImageClick,
+                                onImageClick = openImage,
                                 onLongPress = onLongPress,
                                 onMultiSelectImageToggle = onMultiSelectImageToggle,
                                 swipeSelection = swipeSelection
@@ -3483,8 +3381,9 @@ private fun ImageGridView(
                             isMultiSelectMode = isMultiSelectMode,
                             selectedImageUris = selectedImageUris,
                             aiSelectedUris = aiSelectedUris,
+                            favouriteUris = favouriteUris,
                             taggedUris = taggedUris,
-                            onImageClick = onImageClick,
+                            onImageClick = openImage,
                             onLongPress = onLongPress,
                             onMultiSelectImageToggle = onMultiSelectImageToggle,
                             swipeSelection = swipeSelection
@@ -3495,7 +3394,7 @@ private fun ImageGridView(
         }
 
         ViewLayout.WATERFALL -> {
-            val gridClick: (String) -> Unit = { uri -> onImageClick(uri, displayUris) }
+            val gridClick: (String) -> Unit = { uri -> openImage(uri, displayUris) }
             WaterfallGrid(
                 images = images,
                 columns = 3,
@@ -3513,7 +3412,7 @@ private fun ImageGridView(
         }
 
         ViewLayout.JUSTIFIED -> {
-            val justifiedClick: (String) -> Unit = { uri -> onImageClick(uri, displayUris) }
+            val justifiedClick: (String) -> Unit = { uri -> openImage(uri, displayUris) }
             JustifiedGrid(
                 images = images,
                 state = justifiedState,

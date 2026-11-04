@@ -54,6 +54,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -63,6 +66,7 @@ import com.pyqcr.data.db.ImageTagCrossRef
 import com.pyqcr.data.db.TagEntity
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.ui.component.CopyMoveDestinationDialog
 import com.pyqcr.ui.component.GifPlayer
 import com.pyqcr.ui.component.MotionPhotoPlayer
 import com.pyqcr.ui.component.RatingBar
@@ -234,6 +238,18 @@ fun ImageDetailScreen(
         mutableStateOf(AiEditSelectionStore.loadTargetUris(context).contains(imageUri))
     }
     var isFavourite by remember(imageUri) { mutableStateOf(FavouriteStore.isFavourite(context, imageUri)) }
+    // Keep the heart in sync with the flag when the app returns to the
+    // foreground (e.g. the image was favourited in the system gallery).
+    val lifeOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifeOwner, imageUri) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isFavourite = FavouriteStore.isFavourite(context, imageUri)
+            }
+        }
+        lifeOwner.lifecycle.addObserver(observer)
+        onDispose { lifeOwner.lifecycle.removeObserver(observer) }
+    }
     var showAiEditRoleDialog by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -426,7 +442,6 @@ fun ImageDetailScreen(
         }
     }
     var destinationDialogOp by remember { mutableStateOf("copy") }
-    var folderBrowserDir by remember { mutableStateOf<File?>(null) }
     var showDestinationDialog by remember { mutableStateOf(false) }
     var showFullAccessDialog by remember { mutableStateOf(false) }
     var targetFolderForOperation by remember { mutableStateOf<File?>(null) }
@@ -1005,12 +1020,10 @@ fun ImageDetailScreen(
                             }
                             DetailIconButton(Icons.Default.SaveAlt, "Copy") {
                                 destinationDialogOp = "copy"
-                                folderBrowserDir = Environment.getExternalStorageDirectory()
                                 showDestinationDialog = true
                             }
                             DetailIconButton(Icons.Default.Forward, "Move") {
                                 destinationDialogOp = "move"
-                                folderBrowserDir = Environment.getExternalStorageDirectory()
                                 showDestinationDialog = true
                             }
                             DetailIconButton(Icons.Default.Lock, "Vault") {
@@ -1379,156 +1392,26 @@ fun ImageDetailScreen(
                     }
 
                     if (showDestinationDialog) {
-                        val currentDir = folderBrowserDir ?: Environment.getExternalStorageDirectory()
-                        val isCopy = destinationDialogOp == "copy"
-                        val isRoot = currentDir == Environment.getExternalStorageDirectory()
-                        val subDirs = remember(currentDir) {
-                            currentDir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }
-                                ?.sortedBy { it.name.lowercase() }
-                                ?: emptyList()
-                        }
-                        var creatingFolder by remember { mutableStateOf(false) }
-                        var newFolderName by remember { mutableStateOf("") }
-                        AlertDialog(
-                            onDismissRequest = { showDestinationDialog = false },
-                            title = { Text(if (isCopy) "Copy to..." else "Move to...") },
-                            text = {
-                                Column {
-                                    Text(
-                                        text = currentDir.absolutePath,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = "Empty folders can be chosen too",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        Spacer(Modifier.weight(1f))
-                                        TextButton(onClick = { creatingFolder = !creatingFolder }) {
-                                            Icon(
-                                                Icons.Default.CreateNewFolder,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Spacer(Modifier.width(4.dp))
-                                            Text(
-                                                "New folder",
-                                                style = MaterialTheme.typography.labelMedium
-                                            )
-                                        }
-                                    }
-                                    if (creatingFolder) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            OutlinedTextField(
-                                                value = newFolderName,
-                                                onValueChange = { newFolderName = it },
-                                                singleLine = true,
-                                                label = { Text("Folder name") },
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            Spacer(Modifier.width(8.dp))
-                                            TextButton(onClick = {
-                                                val name = newFolderName.trim()
-                                                    .replace("/", "_")
-                                                    .replace("\\", "_")
-                                                if (name.isNotEmpty()) {
-                                                    val dir = File(currentDir, name)
-                                                    if (dir.exists() || dir.mkdirs()) {
-                                                        folderBrowserDir = dir
-                                                        newFolderName = ""
-                                                        creatingFolder = false
-                                                    }
-                                                }
-                                            }) { Text("Create") }
-                                        }
-                                    }
-                                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                                    LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
-                                        if (!isRoot) {
-                                            item {
-                                                TextButton(
-                                                    onClick = { folderBrowserDir = currentDir.parentFile },
-                                                    modifier = Modifier.fillMaxWidth()
-                                                ) {
-                                                    Icon(
-                                                        Icons.Default.ArrowUpward,
-                                                        contentDescription = "Parent folder",
-                                                        modifier = Modifier.size(18.dp)
-                                                    )
-                                                    Spacer(Modifier.width(8.dp))
-                                                    Text("..", modifier = Modifier.fillMaxWidth())
-                                                }
-                                            }
-                                        }
-                                        items(subDirs.size) { i ->
-                                            val dir = subDirs[i]
-                                            TextButton(
-                                                onClick = { folderBrowserDir = dir },
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Icon(
-                                                    Icons.Default.Folder,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                                Spacer(Modifier.width(8.dp))
-                                                Text(dir.name, modifier = Modifier.fillMaxWidth())
-                                            }
-                                        }
-                                    }
+                        // Same album folder view as the batch copy/move dialog.
+                        CopyMoveDestinationDialog(
+                            isCopy = destinationDialogOp == "copy",
+                            onDismiss = { showDestinationDialog = false },
+                            onPickFolder = { destDir ->
+                                showDestinationDialog = false
+                                val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+                                        !android.os.Environment.isExternalStorageManager() &&
+                                        !FileOperationHelper.isStandardMediaCollection(destDir)
+                                if (needFullAccess) {
+                                    targetFolderForOperation = destDir
+                                    selectedTreeUri = null
+                                    showFullAccessDialog = true
+                                } else {
+                                    launchCopyMove(destinationDialogOp, listOf(imageUri), destDir, null)
                                 }
                             },
-                            confirmButton = {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    OutlinedButton(
-                                        onClick = {
-                                            showDestinationDialog = false
-                                            folderPickerLauncher.launch(null)
-                                        },
-                                        modifier = Modifier.height(36.dp),
-                                        contentPadding = PaddingValues(horizontal = 10.dp)
-                                    ) {
-                                        Icon(
-                                            Icons.Default.FolderOpen,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("System", style = MaterialTheme.typography.labelMedium)
-                                    }
-                                    Spacer(Modifier.weight(1f))
-                                    TextButton(onClick = { showDestinationDialog = false }) {
-                                        Text("Cancel")
-                                    }
-                                    TextButton(onClick = {
-                                        showDestinationDialog = false
-                                        val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
-                                                !android.os.Environment.isExternalStorageManager() &&
-                                                !FileOperationHelper.isStandardMediaCollection(currentDir)
-                                        if (needFullAccess) {
-                                            targetFolderForOperation = currentDir
-                                            selectedTreeUri = null
-                                            showFullAccessDialog = true
-                                        } else {
-                                            launchCopyMove(destinationDialogOp, listOf(imageUri), currentDir, null)
-                                        }
-                                    }) {
-                                        Text("Select folder")
-                                    }
-                                }
+                            onPickSystem = {
+                                showDestinationDialog = false
+                                folderPickerLauncher.launch(null)
                             }
                         )
                     }
