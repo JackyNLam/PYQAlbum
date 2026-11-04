@@ -23,6 +23,7 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.unit.IntSize
+import kotlinx.coroutines.flow.collect
 
 /**
  * Drag-across-thumbnails selection for the photo grids.
@@ -145,6 +146,7 @@ fun Modifier.swipeSelectContainer(
             state.containerSize = it.size
         }
         .pointerInput(state) {
+            val touchSlop = viewConfiguration.touchSlop
             awaitEachGesture {
                 val down = awaitFirstDown(
                     requireUnconsumed = false,
@@ -166,7 +168,7 @@ fun Modifier.swipeSelectContainer(
                     if (!change.pressed) break
                     if (!selecting) {
                         if ((change.position - down.position).getDistance() >
-                            viewConfiguration.touchSlop
+                            touchSlop
                         ) {
                             selecting = true
                             state.dragging = true

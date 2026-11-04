@@ -1254,7 +1254,7 @@ object FileOperationHelper {
                 java.io.FileOutputStream(file).use {
                     bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
                 }
-                scanFile(context, file.absolutePath)
+                MediaStoreUtils.scanFile(context, file.absolutePath)
                 Uri.fromFile(file).toString()
             } catch (e: Exception) {
                 Log.w(TAG, "savePngScreenshot (legacy) failed", e)

@@ -3404,9 +3404,10 @@ private fun ImageGridView(
     // Swipe-across selection: in multi-select mode a drag over thumbnails
     // selects every cell the finger crosses (add-only, taps still toggle).
     val swipeSelection = rememberSwipeSelectionState()
+    val multiSelectToggle = onMultiSelectImageToggle
     val swipeSelect: ((String) -> Unit)? =
-        if (isMultiSelectMode && onMultiSelectImageToggle != null) {
-            { uri -> if (uri !in selectedImageUris) onMultiSelectImageToggle(uri) }
+        if (isMultiSelectMode && multiSelectToggle != null) {
+            { uri -> if (uri !in selectedImageUris) multiSelectToggle(uri) }
         } else null
     val swipeAutoScroll: (suspend (Float) -> Unit) = { delta ->
         when (viewLayout) {
@@ -4370,7 +4371,7 @@ internal suspend fun resizeSingleImageToWidth(
                         contentResolver.openOutputStream(newUri)?.use { resized.compress(Bitmap.CompressFormat.JPEG, 92, it) }
                             ?: run { resized.recycle(); contentResolver.delete(newUri, null, null); return@withContext false }
                         // Index the new copy so other apps (WeChat picker) see it.
-                        com.pyqcr.ui.util.MediaStoreUtils.publishImage(context, newUri)
+                        MediaStoreUtils.publishImage(context, newUri)
                     } else {
                         val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "PYQAlbum")
                         if (!dir.exists()) dir.mkdirs()
