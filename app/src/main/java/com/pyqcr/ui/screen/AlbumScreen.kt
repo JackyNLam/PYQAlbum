@@ -495,9 +495,11 @@ fun AlbumScreen(
         favouriteUris = withContext(Dispatchers.IO) {
             FavouriteStore.loadFavouriteUris(context)
         }
-        // Give favourites created before the physical album existed a real
-        // copy under Pictures/PYQAlbum/Favourites (idempotent).
+        // Give favourites created before the physical album existed a real copy
+        // under Pictures/PYQAlbum/Favourites, then drop duplicate/stale copies
+        // (both idempotent, so they are safe on every launch).
         withContext(Dispatchers.IO) {
+            FavouriteStore.pruneFavouriteAlbum(context)
             FavouriteStore.backfillFavouriteAlbum(context)
         }
     }

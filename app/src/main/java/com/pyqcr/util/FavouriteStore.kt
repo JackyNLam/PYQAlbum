@@ -164,10 +164,21 @@ object FavouriteStore {
         if (!supported) return emptySet()
         val result = mutableSetOf<String>()
         try {
+            // The physical Favourites album holds copies that are themselves
+            // IS_FAVORITE = 1; including them here would make the back-fill
+            // copy the copies (duplicates growing on every launch).
+            val selection =
+                "${MediaStore.MediaColumns.IS_FAVORITE} = 1" +
+                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        " AND ${MediaStore.MediaColumns.RELATIVE_PATH} NOT LIKE " +
+                            "'${Environment.DIRECTORY_PICTURES}/$FAVOURITE_ALBUM_DIR%'"
+                    } else {
+                        ""
+                    })
             context.contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 arrayOf(MediaStore.Images.Media._ID),
-                "${MediaStore.MediaColumns.IS_FAVORITE} = 1",
+                selection,
                 null, null
             )?.use { c ->
                 val idColumn = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
@@ -200,8 +211,8 @@ object FavouriteStore {
 
     /**
      * Mirrors the favourite state of [uris] into the physical Favourites
-     * album. Favourite = copy the image in (skipped when the copy is already
-     * there); un-favourite = delete the copy. Must run on an IO thread.
+     * album. Favourite = make sure exactly ONE copy exists; un-favourite =
+     * delete every copy of that image. Must run on an IO thread.
      * Returns the number of copies created/removed.
      */
     fun syncFavouriteAlbum(
@@ -213,15 +224,24 @@ object FavouriteStore {
         var changed = 0
         uris.forEach { uri ->
             try {
+                // A copy must never be used as a source — that is what created
+                // copies of copies (fav_<id> of a fav_<id> file).
+                if (isInsideFavouriteAlbum(context, uri)) return@forEach
                 val copyName = favouriteCopyName(context, uri) ?: return@forEach
                 if (favourite) {
-                    if (findFavouriteCopyUri(context, copyName) == null &&
-                        insertFavouriteCopy(context, uri, copyName)
-                    ) {
-                        changed++
+                    val existing = findFavouriteCopyUris(context, copyName)
+                    if (existing.isEmpty()) {
+                        if (insertFavouriteCopy(context, uri, copyName)) changed++
+                    } else if (existing.size > 1) {
+                        // Duplicates from earlier versions: keep the first.
+                        existing.drop(1).forEach { extra ->
+                            if (deleteRow(context, extra)) changed++
+                        }
                     }
-                } else if (deleteFavouriteCopy(context, copyName)) {
-                    changed++
+                } else {
+                    findFavouriteCopyUris(context, copyName).forEach { copy ->
+                        if (deleteRow(context, copy)) changed++
+                    }
                 }
             } catch (e: Exception) {
                 // One bad row must not abort the rest of the batch.
@@ -237,6 +257,96 @@ object FavouriteStore {
      */
     fun backfillFavouriteAlbum(context: Context): Int =
         syncFavouriteAlbum(context, loadFavouriteUris(context).toList(), true)
+
+    /**
+     * One-time (idempotent) cleanup of the physical album: removes duplicate
+     * copies of the same image, copies whose source image is no longer a
+     * favourite, copies of copies (created by the early back-fill bug) and
+     * copies whose source row is gone. Run on an IO thread.
+     */
+    fun pruneFavouriteAlbum(context: Context): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
+        val rows = mutableListOf<Pair<Long, String>>()
+        try {
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Images.Media._ID, MediaStore.MediaColumns.DISPLAY_NAME),
+                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
+                arrayOf("%$FAVOURITE_ALBUM_DIR%/%"),
+                null
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val name = c.getString(1) ?: continue
+                    rows += c.getLong(0) to name
+                }
+            }
+        } catch (e: Exception) {
+            return 0
+        }
+
+        var removed = 0
+        val keptNames = mutableSetOf<String>()
+        rows.forEach { (copyId, name) ->
+            // Only files this feature created are considered (fav_<rowId>.<ext>);
+            // anything else the user put in the folder is left alone.
+            val sourceId = name.removePrefix("fav_")
+                .substringBefore('.')
+                .toLongOrNull()
+            if (!name.startsWith("fav_") || sourceId == null) return@forEach
+            val copyUri = ContentUris.withAppendedId(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, copyId
+            )
+            val nameSeen = !keptNames.add(name)
+            val sourceStillFavourite = !nameSeen && isMirroredSource(context, sourceId)
+            if (!sourceStillFavourite) {
+                if (deleteRow(context, copyUri)) removed++
+            }
+        }
+        return removed
+    }
+
+    /** True when [sourceId] is a live, still-favourite image outside the album. */
+    private fun isMirroredSource(context: Context, sourceId: Long): Boolean {
+        val sourceUri = ContentUris.withAppendedId(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, sourceId
+        )
+        return try {
+            context.contentResolver.query(
+                sourceUri,
+                arrayOf(
+                    MediaStore.MediaColumns.IS_FAVORITE,
+                    MediaStore.MediaColumns.RELATIVE_PATH
+                ),
+                null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val favourite = c.getInt(0) == 1
+                    val path = c.getString(1).orEmpty()
+                    favourite && !path.contains(FAVOURITE_ALBUM_DIR)
+                } else {
+                    false
+                }
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** Whether [uri] is a file inside this app's physical Favourites album. */
+    private fun isInsideFavouriteAlbum(context: Context, uri: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        return try {
+            context.contentResolver.query(
+                Uri.parse(uri),
+                arrayOf(MediaStore.MediaColumns.RELATIVE_PATH),
+                null, null, null
+            )?.use { c ->
+                c.moveToFirst() && c.getString(0)?.contains(FAVOURITE_ALBUM_DIR) == true
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
 
     /** Stable, collision-free name for the album copy of [sourceUri]. */
     private fun favouriteCopyName(context: Context, sourceUri: String): String? {
@@ -275,26 +385,39 @@ object FavouriteStore {
     private fun favouriteCopySelection(): String =
         "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
 
-    private fun findFavouriteCopyUri(context: Context, copyName: String): Uri? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
-        return try {
+    /**
+     * Every MediaStore row for the copy of [copyName] — normally one, but
+     * older builds could leave duplicates behind, and the un-favourite path
+     * must remove them all.
+     */
+    private fun findFavouriteCopyUris(context: Context, copyName: String): List<Uri> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptyList()
+        val found = mutableListOf<Uri>()
+        try {
             context.contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 arrayOf(MediaStore.Images.Media._ID),
-                "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
-                arrayOf(copyName),
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
+                    "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
+                arrayOf(copyName, "%$FAVOURITE_ALBUM_DIR/%"),
                 null
             )?.use { c ->
-                if (c.moveToFirst()) {
-                    ContentUris.withAppendedId(
+                while (c.moveToNext()) {
+                    found += ContentUris.withAppendedId(
                         MediaStore.Images.Media.EXTERNAL_CONTENT_URI, c.getLong(0)
                     )
-                } else {
-                    null
                 }
             }
         } catch (e: Exception) {
-            null
+        }
+        return found
+    }
+
+    private fun deleteRow(context: Context, uri: Uri): Boolean {
+        return try {
+            context.contentResolver.delete(uri, null, null) > 0
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -359,15 +482,6 @@ object FavouriteStore {
         } catch (e: Exception) {
         }
         return true
-    }
-
-    private fun deleteFavouriteCopy(context: Context, copyName: String): Boolean {
-        val copyUri = findFavouriteCopyUri(context, copyName) ?: return false
-        return try {
-            context.contentResolver.delete(copyUri, null, null) > 0
-        } catch (e: Exception) {
-            false
-        }
     }
 
     /** Favourite copies currently present in the physical album. */
