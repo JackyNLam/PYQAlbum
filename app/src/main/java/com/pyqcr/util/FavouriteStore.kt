@@ -7,7 +7,10 @@ import android.content.Context
 import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
+import com.pyqcr.ui.util.MediaStoreUtils
+import java.io.File
 
 /**
  * Platform "favourite" flag for gallery images, backed by the MediaStore
@@ -180,5 +183,209 @@ object FavouriteStore {
         } catch (e: Exception) {
         }
         return result
+    }
+
+    // ---------- Physical "Favourites" album (WeChat compatibility) ----------
+
+    /**
+     * WeChat's photo picker does NOT read MediaStore flags: it lists image
+     * FILES grouped by bucket, so `IS_FAVORITE = 1` alone can never make a
+     * photo appear in a WeChat "Favourites" album (browsers and galleries that
+     * honour the column do see it). To make the same set visible everywhere,
+     * every favourited image is also published as a real file under
+     * `Pictures/PYQAlbum/Favourites/` (MediaStore insert + IS_PENDING clear +
+     * MEDIA_SCANNER + notifyChange), and removed again when un-favourited.
+     */
+    private const val FAVOURITE_ALBUM_DIR = "PYQAlbum/Favourites"
+
+    /**
+     * Mirrors the favourite state of [uris] into the physical Favourites
+     * album. Favourite = copy the image in (skipped when the copy is already
+     * there); un-favourite = delete the copy. Must run on an IO thread.
+     * Returns the number of copies created/removed.
+     */
+    fun syncFavouriteAlbum(
+        context: Context,
+        uris: List<String>,
+        favourite: Boolean
+    ): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
+        var changed = 0
+        uris.forEach { uri ->
+            try {
+                val copyName = favouriteCopyName(context, uri) ?: return@forEach
+                if (favourite) {
+                    if (findFavouriteCopyUri(context, copyName) == null &&
+                        insertFavouriteCopy(context, uri, copyName)
+                    ) {
+                        changed++
+                    }
+                } else if (deleteFavouriteCopy(context, copyName)) {
+                    changed++
+                }
+            } catch (e: Exception) {
+                // One bad row must not abort the rest of the batch.
+            }
+        }
+        return changed
+    }
+
+    /**
+     * Copies every image already flagged favourite (including flags set in the
+     * system gallery before this feature existed) into the physical album.
+     * Idempotent — existing copies are skipped. Run on an IO thread.
+     */
+    fun backfillFavouriteAlbum(context: Context): Int =
+        syncFavouriteAlbum(context, loadFavouriteUris(context).toList(), true)
+
+    /** Stable, collision-free name for the album copy of [sourceUri]. */
+    private fun favouriteCopyName(context: Context, sourceUri: String): String? {
+        val resolver = context.contentResolver
+        var displayName: String? = null
+        var mime: String? = null
+        try {
+            resolver.query(
+                Uri.parse(sourceUri),
+                arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.MIME_TYPE),
+                null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    displayName = c.getString(0)
+                    mime = c.getString(1)
+                }
+            }
+        } catch (e: Exception) {
+        }
+        if (displayName.isNullOrBlank()) displayName = "image.jpg"
+        val dot = displayName!!.lastIndexOf('.')
+        val ext = when {
+            dot > 0 -> displayName!!.substring(dot)
+            mime == "image/png" -> ".png"
+            mime == "image/webp" -> ".webp"
+            mime == "image/heic" || mime == "image/heif" -> ".heic"
+            mime == "image/gif" -> ".gif"
+            else -> ".jpg"
+        }
+        // MediaStore row id makes the name unique and lets an un-favourite
+        // find the copy again even after an app restart (no prefs needed).
+        val id = Uri.parse(sourceUri).lastPathSegment ?: return null
+        return "fav_$id$ext"
+    }
+
+    private fun favouriteCopySelection(): String =
+        "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+
+    private fun findFavouriteCopyUri(context: Context, copyName: String): Uri? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        return try {
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Images.Media._ID),
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                arrayOf(copyName),
+                null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    ContentUris.withAppendedId(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI, c.getLong(0)
+                    )
+                } else {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun insertFavouriteCopy(
+        context: Context,
+        sourceUri: String,
+        copyName: String
+    ): Boolean {
+        val resolver = context.contentResolver
+        val mime = try {
+            resolver.query(
+                Uri.parse(sourceUri),
+                arrayOf(MediaStore.MediaColumns.MIME_TYPE), null, null, null
+            )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        } catch (e: Exception) {
+            null
+        } ?: "image/jpeg"
+
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, copyName)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(
+                MediaStore.MediaColumns.RELATIVE_PATH,
+                "${Environment.DIRECTORY_PICTURES}/$FAVOURITE_ALBUM_DIR"
+            )
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+            put(MediaStore.MediaColumns.IS_FAVORITE, 1)
+        }
+        val dest = try {
+            resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        } catch (e: Exception) {
+            null
+        } ?: return false
+
+        val copied = try {
+            resolver.openInputStream(Uri.parse(sourceUri))?.use { input ->
+                resolver.openOutputStream(dest)?.use { output ->
+                    input.copyTo(output)
+                    true
+                }
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+        if (!copied) {
+            try {
+                resolver.delete(dest, null, null)
+            } catch (e: Exception) {
+            }
+            return false
+        }
+        // Clear IS_PENDING, hand the real path to MediaScannerConnection and
+        // notify — the steps that make third-party pickers (WeChat) see it.
+        MediaStoreUtils.publishImage(context, dest)
+        // A stale .nomedia in the folder would hide the whole album.
+        try {
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                FAVOURITE_ALBUM_DIR
+            )
+            File(dir, ".nomedia").takeIf { it.exists() }?.delete()
+        } catch (e: Exception) {
+        }
+        return true
+    }
+
+    private fun deleteFavouriteCopy(context: Context, copyName: String): Boolean {
+        val copyUri = findFavouriteCopyUri(context, copyName) ?: return false
+        return try {
+            context.contentResolver.delete(copyUri, null, null) > 0
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** Favourite copies currently present in the physical album. */
+    fun loadFavouriteAlbumNames(context: Context): Set<String> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptySet()
+        val names = mutableSetOf<String>()
+        try {
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+                favouriteCopySelection(),
+                arrayOf("%$FAVOURITE_ALBUM_DIR%"),
+                null
+            )?.use { c ->
+                while (c.moveToNext()) c.getString(0)?.let { names += it }
+            }
+        } catch (e: Exception) {
+        }
+        return names
     }
 }

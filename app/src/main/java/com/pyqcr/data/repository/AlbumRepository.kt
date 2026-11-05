@@ -6,6 +6,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
 import com.pyqcr.data.db.AppDatabase
 import com.pyqcr.data.db.FolderInfo
@@ -478,10 +479,25 @@ class AlbumRepository(
     private fun loadImagesFromMediaStore(selection: String?): List<ImageEntity> {
         val uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val cursor = context.contentResolver.query(
-            uri, imageProjection, selection, null,
+            uri, imageProjection, librarySelection(selection), null,
             "${MediaStore.Images.Media.DATE_ADDED} DESC"
         )
         return readImageEntities(cursor, uri)
+    }
+
+    /**
+     * Adds the "hide the Favourites mirror" clause to a library selection.
+     *
+     * Every favourited image is also published as a real file under
+     * `Pictures/PYQAlbum/Favourites/` so file-based pickers (WeChat) can list
+     * it. Those copies must not show up as a second, duplicate entry in this
+     * app's own grids, folder cards or favourite list.
+     */
+    private fun librarySelection(base: String?): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return base
+        val hide = "${MediaStore.MediaColumns.RELATIVE_PATH} NOT LIKE " +
+            "'${Environment.DIRECTORY_PICTURES}/PYQAlbum/Favourites%'"
+        return if (base.isNullOrBlank()) hide else "$base AND $hide"
     }
 
     private fun readImageEntities(

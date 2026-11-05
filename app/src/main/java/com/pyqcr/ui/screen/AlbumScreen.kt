@@ -495,6 +495,11 @@ fun AlbumScreen(
         favouriteUris = withContext(Dispatchers.IO) {
             FavouriteStore.loadFavouriteUris(context)
         }
+        // Give favourites created before the physical album existed a real
+        // copy under Pictures/PYQAlbum/Favourites (idempotent).
+        withContext(Dispatchers.IO) {
+            FavouriteStore.backfillFavouriteAlbum(context)
+        }
     }
 
     // Re-read the favourites whenever the app comes back to the foreground:
@@ -575,6 +580,8 @@ fun AlbumScreen(
                         pending.forEach {
                             if (FavouriteStore.setFavourite(context, it, target)) ok++
                         }
+                        // Mirror into the physical album so WeChat can see it.
+                        FavouriteStore.syncFavouriteAlbum(context, pending, target)
                     }
                     favouriteUris = withContext(Dispatchers.IO) {
                         FavouriteStore.loadFavouriteUris(context)
@@ -599,8 +606,15 @@ fun AlbumScreen(
                 val pending = pendingFavouriteUris
                 val target = pendingFavouriteTarget
                 FavouriteStore.notifyFavouriteChanged(context, pending)
-                val applied = withContext(Dispatchers.IO) {
-                    pending.count { FavouriteStore.isFavourite(context, it) == target }
+                val appliedUris = withContext(Dispatchers.IO) {
+                    pending.filter { FavouriteStore.isFavourite(context, it) == target }
+                }
+                val applied = appliedUris.size
+                // The rows the system actually flagged also get a real file in
+                // Pictures/PYQAlbum/Favourites so WeChat's file-based picker
+                // can see the same set.
+                withContext(Dispatchers.IO) {
+                    FavouriteStore.syncFavouriteAlbum(context, appliedUris, target)
                 }
                 if (result.resultCode == android.app.Activity.RESULT_OK) {
                     if (pending.isEmpty() || applied == pending.size) {
@@ -1914,6 +1928,16 @@ fun AlbumScreen(
                                                 }
                                                 favouriteUris = withContext(Dispatchers.IO) {
                                                     FavouriteStore.loadFavouriteUris(context)
+                                                }
+                                                // Mirror the rows that were
+                                                // actually written into the
+                                                // physical Favourites album.
+                                                withContext(Dispatchers.IO) {
+                                                    FavouriteStore.syncFavouriteAlbum(
+                                                        context,
+                                                        changeUris.filterNot { it in failed },
+                                                        changeTarget
+                                                    )
                                                 }
                                                 if (failed.isEmpty()) {
                                                     snackbarHostState.showSnackbar(

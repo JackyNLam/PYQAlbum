@@ -279,6 +279,13 @@ fun ImageDetailScreen(
                         FavouriteStore.isFavourite(context, imageUri)
                     }
                     FavouriteStore.notifyFavouriteChanged(context, listOf(imageUri))
+                    if (isFavourite == pendingFavouriteValue) {
+                        withContext(Dispatchers.IO) {
+                            FavouriteStore.syncFavouriteAlbum(
+                                context, listOf(imageUri), pendingFavouriteValue
+                            )
+                        }
+                    }
                     snackbarHostState.showSnackbar(
                         if (ok) {
                             if (pendingFavouriteValue) "Marked as favourite" else "Removed from favourites"
@@ -297,6 +304,15 @@ fun ImageDetailScreen(
                 }
                 // Make the new flag visible to OEM galleries immediately.
                 FavouriteStore.notifyFavouriteChanged(context, listOf(imageUri))
+                if (isFavourite == pendingFavouriteValue) {
+                    // Publish/remove the real copy in Pictures/PYQAlbum/
+                    // Favourites — WeChat's picker only lists image files.
+                    withContext(Dispatchers.IO) {
+                        FavouriteStore.syncFavouriteAlbum(
+                            context, listOf(imageUri), pendingFavouriteValue
+                        )
+                    }
+                }
                 if (result.resultCode == android.app.Activity.RESULT_OK) {
                     if (isFavourite == pendingFavouriteValue) {
                         snackbarHostState.showSnackbar(
@@ -352,6 +368,11 @@ fun ImageDetailScreen(
                     }
                     if (ok) {
                         isFavourite = newValue
+                        withContext(Dispatchers.IO) {
+                            FavouriteStore.syncFavouriteAlbum(
+                                context, listOf(imageUri), newValue
+                            )
+                        }
                         snackbarHostState.showSnackbar(
                             if (newValue) "Marked as favourite" else "Removed from favourites"
                         )
