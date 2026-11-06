@@ -250,9 +250,6 @@ fun AlbumScreen(
     // for inaccessible locations.
     var showDestinationDialog by remember { mutableStateOf(false) }
     var destinationDialogOp by remember { mutableStateOf("copy") }
-    // Offers "All files access" once (API 30+) — the file-manager-style permission
-    // that lets copy/move write into ANY folder via direct paths.
-    var showFullAccessDialog by remember { mutableStateOf(false) }
 
     // Move: stores (snackbar message, source URIs to delete, old→new URI map for
     // re-pointing tag cross-refs) while waiting for the system delete-request
@@ -310,22 +307,35 @@ fun AlbumScreen(
     ) { result ->
         val pending = pendingMoveResult ?: return@rememberLauncherForActivityResult
         pendingMoveResult = null
-        val message = pending.first
-        val uris = pending.second
-        val remap = pending.third
-        val finalMessage = if (result.resultCode == android.app.Activity.RESULT_OK) {
-            // Tags follow the moved files — re-point their cross-refs to the new
-            // URIs BEFORE the old rows (and their cross-refs) are removed.
-            remapMovedTags(remap)
-            viewModel.deleteImages(uris)
-            message.replace("Copied", "Moved")
-        } else {
-            "$message — originals kept"
+        scope.launch {
+            val message = pending.first
+            val uris = pending.second
+            val remap = pending.third
+            // Re-check the destinations immediately before removing the originals:
+            // a copy that has vanished since the batch finished must not cost the
+            // user the source. Anything unverifiable stays where it is.
+            val confirmed = withContext(Dispatchers.IO) {
+                uris.filter { src ->
+                    val dest = remap[src]
+                    dest != null && FileOperationHelper.isVerifiedDestination(context, dest)
+                }
+            }
+            val skipped = uris.size - confirmed.size
+            val finalMessage = if (result.resultCode == android.app.Activity.RESULT_OK) {
+                // Tags follow the moved files — re-point their cross-refs to the new
+                // URIs BEFORE the old rows (and their cross-refs) are removed.
+                remapMovedTags(remap.filterKeys { it in confirmed })
+                if (confirmed.isNotEmpty()) viewModel.deleteImages(confirmed)
+                val base = message.replace("Copied", "Moved")
+                if (skipped > 0) "$base — $skipped original(s) kept (destination missing)" else base
+            } else {
+                "$message — originals kept"
+            }
+            snackbarHostState.showSnackbar(finalMessage)
+            isMultiSelectMode = false
+            selectedImageUris = emptySet()
+            viewModel.refreshImages()
         }
-        scope.launch { snackbarHostState.showSnackbar(finalMessage) }
-        isMultiSelectMode = false
-        selectedImageUris = emptySet()
-        viewModel.refreshImages()
     }
 
     /** Launch a copy or move operation on selected URIs. */
@@ -351,7 +361,30 @@ fun AlbumScreen(
                             if (!r.success) failures += r.error ?: "Unknown error"
                         }
                     }
-                    val successCount = results.count { it.second.success }
+                    // Quick check before anything is deleted: a result only counts
+                    // as a success when the destination can actually be read back.
+                    // If it cannot, the original is kept — the app must never say
+                    // "moved" for a file that is not really there.
+                    val destinationOk = withContext(Dispatchers.IO) {
+                        results.associate { (src, r) ->
+                            src to (r.success && r.destination != null &&
+                                FileOperationHelper.isVerifiedDestination(context, r.destination))
+                        }
+                    }
+                    var successCount = 0
+                    val remap = mutableMapOf<String, String>()
+                    val sourcesToDelete = mutableListOf<String>()
+                    for ((src, r) in results) {
+                        if (!r.success) continue
+                        val dest = r.destination
+                        if (destinationOk[src] != true || dest == null) {
+                            failures += "Destination could not be read back — original kept"
+                            continue
+                        }
+                        successCount++
+                        if (dest != src) remap[src] = dest
+                        if (r.sourceNeedsDeletion) sourcesToDelete += src
+                    }
                     val folderLabel = destinationFolderLabel(destDir, treeUri)
                     var keepOriginalsNote = ""
 
@@ -361,19 +394,8 @@ fun AlbumScreen(
                     // deleted, so a destination that later misbehaves (restricted/virtualised
                     // storage) never costs the user their data.
                     if (operation == "move") {
-                        val sourcesToDelete = results
-                            .filter { it.second.success && it.second.sourceNeedsDeletion }
-                            .map { it.first }
-
-                        // Old→new URI map for every successfully moved file, so tag
-                        // cross-refs can follow the file to its new location.
-                        val remap = results.mapNotNull { (src, r) ->
-                            if (r.success && r.destination != null && r.destination != src) {
-                                src to r.destination
-                            } else null
-                        }.toMap()
-                        // Files moved without needing deletion (true renames) can be
-                        // re-pointed right away; the rest wait for the delete dialog.
+                        // Files moved in place (same MediaStore row) keep their URI,
+                        // so their tags need no remap; the rest follow the copy.
                         val deferredRemap = remap.filterKeys { it in sourcesToDelete }
                         remapMovedTags(remap - deferredRemap.keys)
 
@@ -389,7 +411,7 @@ fun AlbumScreen(
                                             append("\n${failures.size} failed — ${failures.first()}")
                                         }
                                     }
-                                    pendingMoveResult = Triple(baseMsg, sourcesToDelete, deferredRemap)
+                                    pendingMoveResult = Triple(baseMsg, sourcesToDelete.toList(), deferredRemap)
                                     moveDeleteLauncher.launch(IntentSenderRequest.Builder(request).build())
                                     return@launch
                                 }
@@ -447,45 +469,14 @@ fun AlbumScreen(
             targetFolderForOperation = resolveTreeUriToPath(treeUri)
             val op = pendingOperation
             if (op != null) {
-                // Standard media collections (Download, Pictures, DCIM, Movies) use
-                // MediaStore insert with RELATIVE_PATH — zero permission needed, so
-                // skip the All-files-access dialog entirely for those folders.
-                val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
-                        !android.os.Environment.isExternalStorageManager() &&
-                        !FileOperationHelper.isStandardMediaCollection(targetFolderForOperation) &&
-                        !FileOperationHelper.isStandardMediaCollectionFromTreeUri(selectedTreeUri)
-                if (needFullAccess) {
-                    // Keep pendingOperation so the copy/move resumes after the
-                    // user decides in the dialog — either from the Settings page
-                    // (permission granted → direct-path write, works everywhere)
-                    // or via "Later" → SAF as before.
-                    showFullAccessDialog = true
-                } else {
-                    pendingOperation = null
-                    launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation, selectedTreeUri)
-                }
+                // Copy/move straight away. MediaStore RELATIVE_PATH covers every
+                // media folder (and in-place moves need no dialog), file I/O
+                // covers the rest when All files access is already granted, and
+                // SAF is the last resort — the user is never asked to grant
+                // anything again just to repeat an operation.
+                pendingOperation = null
+                launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation, selectedTreeUri)
             }
-        }
-    }
-
-    // Opens the "All files access" settings page; on return the pending copy/move
-    // runs automatically (with the permission it uses direct paths like a file
-    // manager; without it, it falls back to SAF).
-    val fullAccessLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) {
-        pendingOperation?.let { op ->
-            pendingOperation = null
-            launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation, selectedTreeUri)
-        }
-    }
-
-    /** Runs the pending copy/move now — used when the user declines All files access. */
-    val continueCopyMoveWithoutFullAccess: () -> Unit = {
-        showFullAccessDialog = false
-        pendingOperation?.let { op ->
-            pendingOperation = null
-            launchCopyMove(op, selectedImageUris.toList(), targetFolderForOperation, selectedTreeUri)
         }
     }
 
@@ -2614,71 +2605,17 @@ fun AlbumScreen(
                     onDismiss = { showDestinationDialog = false },
                     onPickFolder = { destDir ->
                         showDestinationDialog = false
-                        // Non-standard folders (outside Download/Pictures/DCIM/Movies)
-                        // need "All files access" on Android 11+ to write via File I/O.
-                        // Without it, FileOutputStream throws EACCES — same as the SAF
-                        // picker flow, which also shows this dialog for non-standard folders.
-                        val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
-                                !android.os.Environment.isExternalStorageManager() &&
-                                !FileOperationHelper.isStandardMediaCollection(destDir)
-                        if (needFullAccess) {
-                            pendingOperation = destinationDialogOp
-                            targetFolderForOperation = destDir
-                            selectedTreeUri = null
-                            showFullAccessDialog = true
-                        } else {
-                            launchCopyMove(
-                                destinationDialogOp,
-                                selectedImageUris.toList(),
-                                destDir,
-                                null
-                            )
-                        }
+                        launchCopyMove(
+                            destinationDialogOp,
+                            selectedImageUris.toList(),
+                            destDir,
+                            null
+                        )
                     },
                     onPickSystem = {
                         showDestinationDialog = false
                         pendingOperation = destinationDialogOp
                         folderPickerLauncher.launch(null)
-                    }
-                )
-            }
-
-            // All files access offer (API 30+) — shown after picking a copy/move
-            // destination when the app still lacks the file-manager-style permission.
-            // With it, copies/moves write via direct paths into ANY folder; without
-            // it the app keeps using the SAF per-folder grant.
-            if (showFullAccessDialog) {
-                AlertDialog(
-                    onDismissRequest = { continueCopyMoveWithoutFullAccess() },
-                    title = { Text("Copy/Move to any folder?") },
-                    text = {
-                        Text(
-                            "The chosen folder sits outside Android's media folders, which " +
-                            "normal apps cannot write to directly. Granting \"All files access\" " +
-                            "(the same permission your file manager has) lets the app copy/move " +
-                            "into ANY folder on this phone, exactly like a file manager.\n\n" +
-                            "Android will open a settings screen — enable the switch there, then " +
-                            "the copy/move starts automatically."
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            showFullAccessDialog = false
-                            try {
-                                fullAccessLauncher.launch(
-                                    Intent(
-                                        android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                        Uri.parse("package:${context.packageName}")
-                                    )
-                                )
-                            } catch (e: Exception) {
-                                // No such settings screen on this device — just proceed
-                                continueCopyMoveWithoutFullAccess()
-                            }
-                        }) { Text("Grant access") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { continueCopyMoveWithoutFullAccess() }) { Text("Later") }
                     }
                 )
             }

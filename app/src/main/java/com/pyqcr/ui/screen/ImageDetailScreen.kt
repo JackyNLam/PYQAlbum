@@ -465,7 +465,6 @@ fun ImageDetailScreen(
     }
     var destinationDialogOp by remember { mutableStateOf("copy") }
     var showDestinationDialog by remember { mutableStateOf(false) }
-    var showFullAccessDialog by remember { mutableStateOf(false) }
     var targetFolderForOperation by remember { mutableStateOf<File?>(null) }
     var selectedTreeUri by remember { mutableStateOf<Uri?>(null) }
 
@@ -548,12 +547,33 @@ fun ImageDetailScreen(
                     FileOperationHelper.batchCopyViaFiles(context, uris, destDir, treeUri)
                 }
             }
-            val ok = results.count { it.second.success }
-            val failed = results.size - ok
-            val needTrash = results.filter { it.second.sourceNeedsDeletion }.map { it.first }
+            // Only a destination that can be read back counts as a success and
+            // may lose its original. This is the quick per-file check before a
+            // move removes anything.
+            val verifiedResults = withContext(Dispatchers.IO) {
+                results.map { (src, result) ->
+                    val dest = result.destination
+                    Triple(src, result, dest != null && result.success &&
+                        FileOperationHelper.isVerifiedDestination(context, dest))
+                }
+            }
+            var ok = 0
+            var failed = 0
+            val needTrash = mutableListOf<String>()
+            val verified = mutableListOf<Pair<String, String>>()
+            for ((src, result, destOk) in verifiedResults) {
+                val dest = result.destination
+                if (!result.success || dest == null || !destOk) {
+                    failed++
+                    continue
+                }
+                ok++
+                if (dest != src) verified += src to dest
+                if (result.sourceNeedsDeletion) needTrash += src
+            }
             snackbarHostState.showSnackbar(
                 if (op == "move") {
-                    if (failed == 0) "Moved $ok image(s)" else "Moved $ok, $failed failed"
+                    if (failed == 0) "Moved $ok image(s)" else "Moved $ok, $failed failed — originals kept"
                 } else {
                     if (failed == 0) "Copied $ok image(s)" else "Copied $ok, $failed failed"
                 }
@@ -562,14 +582,12 @@ fun ImageDetailScreen(
                 // Re-point the tag cross-refs at the new MediaStore URIs (tags
                 // are keyed by URI — a move must remap them).
                 withContext(Dispatchers.IO) {
-                    for ((sourceUri, result) in results) {
-                        if (result.success) {
-                            val newUri = FileOperationHelper.resolveNewImageUri(
-                                context, result.destination ?: "", treeUri
-                            )
-                            if (newUri != null && newUri != sourceUri) {
-                                tagDao.moveImageCrossRef(sourceUri, newUri)
-                            }
+                    for ((sourceUri, destination) in verified) {
+                        val newUri = FileOperationHelper.resolveNewImageUri(
+                            context, destination, treeUri
+                        )
+                        if (newUri != null && newUri != sourceUri) {
+                            tagDao.moveImageCrossRef(sourceUri, newUri)
                         }
                     }
                 }
@@ -589,12 +607,7 @@ fun ImageDetailScreen(
         }
     }
 
-    /** Proceed with the pending copy/move after the All-files-access flow. */
-    val continueCopyMove: () -> Unit = {
-        showFullAccessDialog = false
-        launchCopyMove(destinationDialogOp, listOf(imageUri), targetFolderForOperation, selectedTreeUri)
-    }
-
+    /** Proceed with the pending copy/move after the picker returns. */
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -604,12 +617,6 @@ fun ImageDetailScreen(
             targetFolderForOperation = destDir
             launchCopyMove(destinationDialogOp, listOf(imageUri), destDir, uri)
         }
-    }
-
-    val fullAccessLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) {
-        continueCopyMove()
     }
 
     /**
@@ -1420,54 +1427,11 @@ fun ImageDetailScreen(
                             onDismiss = { showDestinationDialog = false },
                             onPickFolder = { destDir ->
                                 showDestinationDialog = false
-                                val needFullAccess = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
-                                        !android.os.Environment.isExternalStorageManager() &&
-                                        !FileOperationHelper.isStandardMediaCollection(destDir)
-                                if (needFullAccess) {
-                                    targetFolderForOperation = destDir
-                                    selectedTreeUri = null
-                                    showFullAccessDialog = true
-                                } else {
-                                    launchCopyMove(destinationDialogOp, listOf(imageUri), destDir, null)
-                                }
+                                launchCopyMove(destinationDialogOp, listOf(imageUri), destDir, null)
                             },
                             onPickSystem = {
                                 showDestinationDialog = false
                                 folderPickerLauncher.launch(null)
-                            }
-                        )
-                    }
-
-                    if (showFullAccessDialog) {
-                        AlertDialog(
-                            onDismissRequest = { continueCopyMove() },
-                            title = { Text("Copy/Move to any folder?") },
-                            text = {
-                                Text(
-                                    "The chosen folder sits outside Android's media folders, which " +
-                                        "normal apps cannot write to directly. Granting \"All files access\" " +
-                                        "lets the app copy/move into ANY folder on this phone.\n\n" +
-                                        "Android will open a settings screen — enable the switch there, " +
-                                        "then the copy/move starts automatically."
-                                )
-                            },
-                            confirmButton = {
-                                TextButton(onClick = {
-                                    showFullAccessDialog = false
-                                    try {
-                                        fullAccessLauncher.launch(
-                                            Intent(
-                                                android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                                Uri.parse("package:${context.packageName}")
-                                            )
-                                        )
-                                    } catch (e: Exception) {
-                                        continueCopyMove()
-                                    }
-                                }) { Text("Grant access") }
-                            },
-                            dismissButton = {
-                                TextButton(onClick = { continueCopyMove() }) { Text("Later") }
                             }
                         )
                     }

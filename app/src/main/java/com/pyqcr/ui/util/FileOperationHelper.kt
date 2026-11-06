@@ -19,17 +19,19 @@ import java.io.FileOutputStream
 /**
  * Helper for batch copy/move operations on image files.
  *
- * Uses up to two strategies for the destination folder:
- *   1. When the picked folder resolves to a real file path on internal storage
- *      ("primary:" tree URIs), use File I/O directly — the fast path, and it
- *      enables a true same-volume move via [File.renameTo].
- *   2. Otherwise (SD card, USB, cloud providers, or Android 11+ scoped-storage
- *      blocked paths) fall back to the SAF DocumentsContract API using the
- *      granted tree URI, which can write to any folder the user can pick.
+ * A move tries, in order:
+ *   1. A true MediaStore move (update `RELATIVE_PATH`) for indexed media rows —
+ *      the provider moves the file and keeps the row, so nothing is deleted.
+ *   2. MediaStore insert into any media folder (zero-permission for the four
+ *      standard collections), then direct file I/O (All files access), then
+ *      SAF for anything the File API cannot reach.
+ *
+ * A destination is always read back before the source is handed to the
+ * recycle bin; there is no permanent-delete path in a move.
  *
  * Every file failure is reported as a [FileOpResult] with a human-readable
  * reason so the caller can tell the user WHY a file failed (permission denied,
- * read-only, source delete failed…) instead of a bare count.
+ * read-only, destination unreadable…) instead of a bare count.
  */
 object FileOperationHelper {
 
@@ -131,31 +133,53 @@ object FileOperationHelper {
     // ---------- MediaStore RELATIVE_PATH (zero-permission standard collections) ----------
 
     /**
-     * Check if [destDir] is under a standard MediaStore collection (Download,
-     * Pictures, DCIM, Movies). If so, return the `RELATIVE_PATH` value that
-     * MediaStore expects (e.g. `"Download/BabyName/"`). Returns null for
-     * non-standard folders (arbitrary directories like Manga/Baby/BabyName).
+     * Map a real destination directory on primary storage to the `RELATIVE_PATH`
+     * value MediaStore expects (e.g. `"Download/BabyName/"`). Returns null when
+     * the directory is not on primary external storage (or on API < 29).
      *
-     * Only available on API 29+ — `RELATIVE_PATH` was introduced in Q.
+     * Every folder is mapped, not just Download/Pictures/DCIM/Movies: the
+     * provider may still accept the write for other media folders, and trying
+     * is what gives copy/move access to all of them. When it refuses, the
+     * caller falls back to file I/O (All files access) and then SAF.
      */
     fun resolveMediaStorePath(destDir: File?): String? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         if (destDir == null) return null
         val extDir = Environment.getExternalStorageDirectory().absolutePath
-        val absPath = destDir.absolutePath
-        if (!absPath.startsWith(extDir)) return null
+        // Canonical paths so "/sdcard/..." and "/storage/emulated/0/..." resolve
+        // the same way instead of silently falling through to the slow path.
+        val absPath = try {
+            destDir.canonicalPath
+        } catch (e: Exception) {
+            destDir.absolutePath
+        }.trimEnd(File.separatorChar)
+        val root = try {
+            File(extDir).canonicalPath
+        } catch (e: Exception) {
+            extDir
+        }.trimEnd(File.separatorChar)
+        if (absPath == root || !absPath.startsWith("$root${File.separator}")) return null
         // rel = "Download/BabyName" or "Manga/Baby/BabyName"
-        val rel = absPath.removePrefix(extDir).removePrefix(File.separator)
+        val rel = absPath.removePrefix(root).removePrefix(File.separator)
         if (rel.isBlank()) return null
-        val topLevel = rel.substringBefore(File.separator).lowercase()
-        val collectionRoot = when (topLevel) {
+        val parts = rel.split(File.separatorChar).filter { it.isNotBlank() }
+        if (parts.isEmpty()) return null
+        // Normalise the top-level collection name (providers are not consistent
+        // about case). ANY media folder is passed through — MediaStore accepts
+        // RELATIVE_PATH writes inside the standard collections and rejects the
+        // rest, in which case the caller falls back to file I/O / SAF. Trying
+        // is what lets copy/move reach every folder, not just four roots.
+        val canonicalTop = when (parts.first().lowercase()) {
             "download" -> "Download"
             "pictures" -> "Pictures"
             "dcim" -> "DCIM"
             "movies" -> "Movies"
-            else -> return null  // Non-standard folder — use SAF or file path
+            "music" -> "Music"
+            "documents" -> "Documents"
+            else -> parts.first()
         }
-        return if (rel.equals(collectionRoot, ignoreCase = true)) "$collectionRoot/" else "$rel/"
+        val rest = parts.drop(1)
+        return if (rest.isEmpty()) "$canonicalTop/" else "$canonicalTop/${rest.joinToString("/")}/"
     }
 
     /** True if [destDir] is under a standard MediaStore collection (zero-permission write on API 29+). */
@@ -176,17 +200,21 @@ object FileOperationHelper {
         return try {
             val docId = DocumentsContract.getTreeDocumentId(treeUri)
             if (!docId.startsWith("primary:")) return null
-            val relativePath = docId.removePrefix("primary:")
+            val relativePath = docId.removePrefix("primary:").trim('/')
             if (relativePath.isBlank()) return null
-            val topLevel = relativePath.substringBefore('/').lowercase()
-            val collectionRoot = when (topLevel) {
+            val parts = relativePath.split('/').filter { it.isNotBlank() }
+            if (parts.isEmpty()) return null
+            val canonicalTop = when (parts.first().lowercase()) {
                 "download" -> "Download"
                 "pictures" -> "Pictures"
                 "dcim" -> "DCIM"
                 "movies" -> "Movies"
-                else -> return null
+                "music" -> "Music"
+                "documents" -> "Documents"
+                else -> parts.first()
             }
-            if (relativePath.equals(collectionRoot, ignoreCase = true)) "$collectionRoot/" else "$relativePath/"
+            val rest = parts.drop(1)
+            if (rest.isEmpty()) "$canonicalTop/" else "$canonicalTop/${rest.joinToString("/")}/"
         } catch (e: Exception) {
             null
         }
@@ -205,6 +233,12 @@ object FileOperationHelper {
      * then File I/O (legacy/All-files-access), then SAF (any pickable folder).
      */
     suspend fun copyImage(context: Context, sourceUri: String, destDir: File?, treeUri: Uri?): FileOpResult {
+        // Never touch a source we cannot actually read: reporting a copy (and,
+        // for a move, deleting the original) after an unreadable source would
+        // be exactly the "the app deleted my photo" data-loss case.
+        if (!isSourceReadable(context, sourceUri)) {
+            return FileOpResult(false, null, "Cannot read the source image — nothing was changed")
+        }
         // Strategy 1: MediaStore RELATIVE_PATH (zero-permission for standard collections).
         // Try destDir first, then tree URI — covers SAF sidebar picks where destDir is null.
         val relPath = resolveMediaStorePath(destDir) ?: resolveMediaStorePathFromTreeUri(treeUri)
@@ -234,8 +268,23 @@ object FileOperationHelper {
      * so the caller can show the system delete-request dialog.
      */
     suspend fun moveImage(context: Context, sourceUri: String, destDir: File?, treeUri: Uri?): FileOpResult {
-        // Strategy 1: MediaStore RELATIVE_PATH (zero-permission for standard collections)
+        if (!isSourceReadable(context, sourceUri)) {
+            return FileOpResult(false, null, "Cannot read the source image — nothing was changed")
+        }
         val relPath = resolveMediaStorePath(destDir) ?: resolveMediaStorePathFromTreeUri(treeUri)
+
+        // Strategy 0: TRUE MediaStore move — update the row's RELATIVE_PATH.
+        // MediaProvider moves the physical file and keeps the same row (same
+        // content URI), so there is no copy to lose and no source to delete:
+        // the operation either moves the file or reports failure. This is the
+        // silent, prompt-free path for media folders the app may write.
+        if (relPath != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val moved = moveWithinMediaStore(context, sourceUri, relPath)
+            if (moved.success) return moved
+            Log.w(TAG, "In-place MediaStore move failed for $sourceUri (${moved.error}) — trying copy")
+        }
+
+        // Strategy 1: MediaStore copy (zero-permission for media collections)
         if (relPath != null) {
             val copy = copyViaMediaStore(context, sourceUri, relPath)
             if (copy.success) {
@@ -330,7 +379,12 @@ object FileOperationHelper {
         }
     }
 
-    /** Move a file via real paths — a true move via [File.renameTo] when possible, else copy+delete. */
+    /**
+     * Move a file via real paths — always a verified copy whose source deletion
+     * is deferred to the caller (recycle bin). There is deliberately no
+     * renameTo path: it was the only irreversible branch, and a phantom rename
+     * on virtualised storage plus the row delete lost user photos.
+     */
     private suspend fun moveViaFilePath(
         context: Context,
         sourceUri: String,
@@ -346,42 +400,23 @@ object FileOperationHelper {
                 )
             }
             val destFile = resolveConflict(File(destDir, fileName))
-            val sourceExpectedSize = sizeOf(context, contentUri)
-
-            // Strategy 1: true file move via renameTo (same volume) — same inode, modified date intact
-            val realPath = resolveFilePath(context, sourceUri)
-            if (realPath != null) {
-                val sourceFile = File(realPath)
-                val sourceLength = sourceFile.length()
-                if (sourceFile.exists() && sourceFile.renameTo(destFile)) {
-                    // Virtualised filesystems (HONOR Parallel Space) can ACK a
-                    // rename yet leave nothing real at the target. Never drop the
-                    // stale row unless the bytes actually landed — otherwise the
-                    // file is un-indexed AND un-moved: data loss with no undo.
-                    // Also require the exact byte count: a partial file at the
-                    // destination is not a moved photo.
-                    val destLength = if (destFile.exists()) destFile.length() else -1L
-                    val expected = if (sourceLength > 0L) sourceLength
-                                   else sourceExpectedSize ?: -1L
-                    if (destLength <= 0L || (expected > 0L && destLength != expected)) {
-                        val restored = destFile.exists() && destFile.renameTo(sourceFile)
-                        Log.w(TAG, "renameTo left no usable file at ${destFile.absolutePath} " +
-                            "($destLength B, expected $expected B, restored=$restored) — move aborted")
-                        return@withContext FileOpResult(
-                            false, null,
-                            "The destination rejected the move (restricted storage) — original kept"
-                        )
-                    }
-                    MediaStoreUtils.scanFile(context, destFile.absolutePath)
-                    // Remove the stale MediaStore row for the old location
-                    deleteSourceEntry(context, contentUri)
-                    return@withContext FileOpResult(true, destFile.absolutePath, null)
-                }
+            val sourcePath = resolveFilePath(context, sourceUri)
+            if (sourcePath != null &&
+                try { File(sourcePath).canonicalPath == destFile.canonicalPath } catch (e: Exception) { false }
+            ) {
+                return@withContext FileOpResult(
+                    false, null,
+                    "Source and destination are the same file — nothing was changed"
+                )
             }
 
-            // Strategy 2: copy fallback (cross-volume or content-only URI).
-            // Source deletion is deferred to the caller, which shows the system
-            // delete-request dialog on API 30+ or deletes directly on older APIs.
+            // Always COPY + verify here, then let the caller send the original
+            // to the recycle bin. A raw File.renameTo followed by a MediaStore
+            // row delete was the one irreversible move path: virtualised
+            // filesystems (HONOR Parallel Space) can acknowledge a rename that
+            // leaves nothing usable behind, and the row delete then erases the
+            // only reference — real data loss. The deferred-trash path keeps
+            // the original recoverable until the copy is proven readable.
             val copy = copyViaFilePath(context, sourceUri, destDir, preserveLastModified = true)
             if (!copy.success) return@withContext copy
             FileOpResult(success = true, destination = copy.destination, error = null, sourceNeedsDeletion = true)
@@ -458,12 +493,11 @@ object FileOperationHelper {
                 val mime = mimeTypeFor(fileName)
                 val expectedSize = sizeOf(context, contentUri)
 
-                // Always insert into MediaStore.Images regardless of RELATIVE_PATH.
-                // MediaStore.Downloads does NOT reliably support IS_PENDING across
-                // all devices, so files inserted there may stay invisible even after
-                // the IS_PENDING clear. MediaStore.Images has full IS_PENDING support
-                // and RELATIVE_PATH controls the physical directory (e.g. "Download/").
-                val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                // Pick the collection that matches the file's media type: a
+                // video inserted into the Images collection is rejected (or
+                // stored as a broken row) on many providers. RELATIVE_PATH
+                // controls the physical directory either way.
+                val collection = collectionForFileName(fileName)
 
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
@@ -610,8 +644,23 @@ object FileOperationHelper {
         "webp" -> "image/webp"
         "heic", "heif" -> "image/heic"
         "bmp" -> "image/bmp"
+        "mp4", "m4v" -> "video/mp4"
+        "mov" -> "video/quicktime"
+        "mkv" -> "video/x-matroska"
+        "webm" -> "video/webm"
+        "3gp" -> "video/3gpp"
+        "avi" -> "video/x-msvideo"
         else -> "image/jpeg"
     }
+
+    private fun isVideoFileName(fileName: String): Boolean =
+        fileName.substringAfterLast('.', "").lowercase() in
+            setOf("mp4", "m4v", "mov", "mkv", "webm", "3gp", "avi")
+
+    /** MediaStore collection matching the file's type (images vs videos). */
+    private fun collectionForFileName(fileName: String): Uri =
+        if (isVideoFileName(fileName)) MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
 
     // ---------- Destination verification (move must never eat the source) ----------
 
@@ -715,13 +764,151 @@ object FileOperationHelper {
         }
     }
 
-    /** Remove the stale MediaStore row for a source URI after a true file move. */
-    private fun deleteSourceEntry(context: Context, contentUri: Uri) {
-        try {
-            context.contentResolver.delete(contentUri, null, null)
+    /** Read (RELATIVE_PATH, SIZE) of a MediaStore row; null when it is gone. */
+    private fun mediaLocation(context: Context, uri: Uri): Pair<String?, Long?>? {
+        return try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.SIZE),
+                null, null, null
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return null
+                val relIdx = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                val rel = if (relIdx >= 0 && !cursor.isNull(relIdx)) cursor.getString(relIdx) else null
+                val size = if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) cursor.getLong(sizeIdx) else null
+                rel to size
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "deleteSourceEntry failed for $contentUri: ${e.message}")
+            Log.w(TAG, "mediaLocation failed for $uri: ${e.message}")
+            null
         }
+    }
+
+    /**
+     * Move a MediaStore row (and its physical file) by updating `RELATIVE_PATH`.
+     *
+     * This is the safest possible move: the provider moves the bytes and keeps
+     * the SAME row, so the content URI — and every tag / rating / favourite
+     * keyed by it — stays valid, and there is no copy that could be lost or
+     * source that could be deleted. The move is verified by reading the row's
+     * new folder + size and opening the file before reporting success; on a
+     * failed verification the row is put back where it was.
+     *
+     * Fails (so the caller falls back to copy) when the row is not indexed,
+     * already lives in the destination, or the provider refuses the update
+     * (foreign row without write access, non-media folder, SD card).
+     */
+    private suspend fun moveWithinMediaStore(
+        context: Context,
+        sourceUri: String,
+        relativePath: String
+    ): FileOpResult = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return@withContext FileOpResult(false, null, "In-place move needs Android 10+")
+        }
+        val uri = try {
+            Uri.parse(sourceUri)
+        } catch (e: Exception) {
+            return@withContext FileOpResult(false, null, "Invalid source URI")
+        }
+        val before = mediaLocation(context, uri)
+            ?: return@withContext FileOpResult(false, null, "The source is not indexed by MediaStore")
+        val expectedSize = before.second
+        val originalPath = before.first
+        if (originalPath != null && originalPath.equals(relativePath, ignoreCase = true)) {
+            // Already there — a no-op, but a successful one.
+            return@withContext FileOpResult(true, sourceUri, null)
+        }
+
+        val updated = try {
+            context.contentResolver.update(
+                uri,
+                ContentValues().apply {
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                },
+                null, null
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "RELATIVE_PATH update rejected for $sourceUri -> $relativePath: ${e.message}")
+            0
+        }
+        if (updated <= 0) {
+            return@withContext FileOpResult(
+                false, null,
+                "The device did not allow moving this file in place"
+            )
+        }
+
+        val after = mediaLocation(context, uri)
+        val landed = after != null &&
+            after.first != null && after.first.equals(relativePath, ignoreCase = true) &&
+            (expectedSize == null || expectedSize <= 0L || (after.second ?: -1L) == expectedSize) &&
+            isReadableCopy(context, uri, expectedSize)
+        if (!landed) {
+            // Put the row back so a half-applied move cannot leave the photo
+            // unreachable at neither the old nor the new path.
+            if (originalPath != null) {
+                try {
+                    context.contentResolver.update(
+                        uri,
+                        ContentValues().apply {
+                            put(MediaStore.MediaColumns.RELATIVE_PATH, originalPath)
+                        },
+                        null, null
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not restore $sourceUri to $originalPath: ${e.message}")
+                }
+            }
+            return@withContext FileOpResult(
+                false, null,
+                "The destination did not accept the move — original kept"
+            )
+        }
+
+        MediaStoreUtils.publishImage(context, uri)
+        FileOpResult(true, uri.toString(), null)
+    }
+
+    /**
+     * True when the source can actually be opened for reading. Every copy/move
+     * checks this first, so an unreadable/vanished source is reported instead
+     * of producing an empty destination and deleting the original.
+     */
+    fun isSourceReadable(context: Context, uriStr: String): Boolean {
+        return try {
+            val fd = context.contentResolver.openFileDescriptor(Uri.parse(uriStr), "r")
+            fd?.use { it.statSize != 0L } ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Quick pre-delete check for a move destination: a content URI must be
+     * openable and non-empty, a real path must exist with bytes. Callers run
+     * this immediately before sending the original to the recycle bin, so a
+     * destination that disappeared (or was never real) keeps the original.
+     */
+    fun isVerifiedDestination(context: Context, destination: String): Boolean {
+        if (destination.isBlank()) return false
+        if (destination.startsWith("content://")) {
+            return try {
+                val uri = Uri.parse(destination)
+                val fd = context.contentResolver.openFileDescriptor(uri, "r") ?: return false
+                fd.use {
+                    it.statSize > 0L || (sizeOf(context, uri) ?: 0L) > 0L
+                }
+            } catch (e: Exception) {
+                false
+            }
+        }
+        if (destination.startsWith("/")) {
+            val file = File(destination)
+            return file.exists() && file.length() > 0L
+        }
+        return false
     }
 
     // Source deletion after move is handled by the caller: the caller collects
