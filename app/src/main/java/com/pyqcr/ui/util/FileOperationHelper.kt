@@ -439,11 +439,19 @@ object FileOperationHelper {
                 }
 
                 val availableName = findAvailableSafName(context, treeUri, fileName)
+                val folderName = try {
+                    DocumentsContract.getTreeDocumentId(treeUri)
+                        .substringAfterLast(':')
+                        .substringAfterLast('/')
+                        .ifBlank { "this folder" }
+                } catch (e: Exception) {
+                    "this folder"
+                }
                 val docUri = createSafDocument(context, treeUri, mimeTypeFor(fileName), availableName)
                     ?: return@withContext FileOpResult(
                         false, null,
-                        "Cannot create files in the chosen folder (read-only or blocked by the ROM) — " +
-                        "granting All files access from the copy/move prompt enables any folder"
+                        "Cannot create files in \"$folderName\" — the system file provider " +
+                        "refused the write (ROM / Parallel Space restriction). Nothing was moved"
                     )
 
                 val input = context.contentResolver.openInputStream(contentUri)
@@ -584,19 +592,38 @@ object FileOperationHelper {
 
     /** Create a new document inside the tree, returning its content uri. */
     private fun createSafDocument(context: Context, treeUri: Uri, mimeType: String, displayName: String): Uri? {
-        return try {
-            val created = DocumentsContract.createDocument(context.contentResolver, treeUri, mimeType, displayName)
-            if (created != null) return created
-            // Some providers misbehave when handed a pure tree URI — retry using
-            // the tree-root document URI, the classic form.
-            val rootDoc = DocumentsContract.buildDocumentUriUsingTree(
+        // Providers are inconsistent about what they accept. Some only work with
+        // the tree-root *document* URI, some only with the tree URI itself, and a
+        // few reject a typed MIME (creating nothing for "image/jpeg") while
+        // accepting octet-stream. Inside a clone space (HONOR Parallel Space) the
+        // first combination often fails even though a later one succeeds, so try
+        // every combination before declaring the folder unwritable.
+        val treeDoc = try {
+            DocumentsContract.buildDocumentUriUsingTree(
                 treeUri, DocumentsContract.getTreeDocumentId(treeUri)
             )
-            DocumentsContract.createDocument(context.contentResolver, rootDoc, mimeType, displayName)
         } catch (e: Exception) {
-            Log.w(TAG, "createDocument failed for $displayName", e)
             null
         }
+        val targets = listOfNotNull(treeUri, treeDoc)
+        val mimes = if (mimeType == "application/octet-stream") {
+            listOf(mimeType)
+        } else {
+            listOf(mimeType, "application/octet-stream")
+        }
+        for (target in targets) {
+            for (mime in mimes) {
+                try {
+                    val created = DocumentsContract.createDocument(
+                        context.contentResolver, target, mime, displayName
+                    )
+                    if (created != null) return created
+                } catch (e: Exception) {
+                    Log.w(TAG, "createDocument failed ($mime) for $displayName", e)
+                }
+            }
+        }
+        return null
     }
 
     /** Find a display name that does not collide with existing children of the tree. */

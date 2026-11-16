@@ -69,12 +69,16 @@ import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.ui.component.CopyMoveDestinationDialog
 import com.pyqcr.ui.component.GifPlayer
 import com.pyqcr.ui.component.MotionPhotoPlayer
+import com.pyqcr.ui.component.QrCodeEmptyDialog
+import com.pyqcr.ui.component.QrCodeResultDialog
+import com.pyqcr.ui.component.QrScanResult
 import com.pyqcr.ui.component.RatingBar
 import com.pyqcr.ui.component.TagChip
 import com.pyqcr.ui.component.VideoPlayer
 import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.MotionPhotoExtractor
+import com.pyqcr.util.QrCodeReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -141,7 +145,29 @@ fun ImageDetailScreen(
     var showDetailPanel by rememberSaveable { mutableStateOf(false) } // Swipe-up action bar
     var showInfoDialog by remember { mutableStateOf(false) }  // Details (metadata/rating)
     var showTagsDialog by remember { mutableStateOf(false) }  // Tags editor
+    // QR reading lives here (the single-image swipe-up bar) rather than in the
+    // batch menu — the photo on screen is the only one that matters.
+    var qrScanning by remember(imageUri) { mutableStateOf(false) }
+    var qrResults by remember(imageUri) { mutableStateOf<List<QrScanResult>?>(null) }
+    var qrEmpty by remember(imageUri) { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
+
+    fun scanQr() {
+        if (qrScanning) return
+        coroutineScope.launch {
+            qrScanning = true
+            val text = withContext(Dispatchers.IO) { QrCodeReader.decode(context, imageUri) }
+            qrScanning = false
+            if (text == null) {
+                qrEmpty = true
+            } else {
+                val label = imageItem?.displayName
+                    ?: runCatching { FileOperationHelper.getFileName(context, imageUri) }
+                        .getOrDefault("Image")
+                qrResults = listOf(QrScanResult(label, text))
+            }
+        }
+    }
 
     // Used to detect gesture directions with thresholds
     val swipeThreshold = with(LocalDensity.current) { 60.dp.toPx() }
@@ -1047,6 +1073,15 @@ fun ImageDetailScreen(
                             DetailIconButton(Icons.Default.DriveFileRenameOutline, "Rename") {
                                 openRenameDialog()
                             }
+                            // Read a QR code straight from the photo on screen
+                            // (moved here from the folder/vault batch menus).
+                            if (!isVideo) {
+                                DetailIconButton(
+                                    Icons.Default.QrCodeScanner,
+                                    if (qrScanning) "Reading…" else "Read QR",
+                                    active = qrScanning
+                                ) { scanQr() }
+                            }
                             DetailIconButton(Icons.Default.SaveAlt, "Copy") {
                                 destinationDialogOp = "copy"
                                 showDestinationDialog = true
@@ -1088,6 +1123,14 @@ fun ImageDetailScreen(
                         }
                     }
                 }
+            }
+
+            // QR payload — text with Copy buttons (empty dialog when no code was found).
+            qrResults?.let { results ->
+                QrCodeResultDialog(results = results, onDismiss = { qrResults = null })
+            }
+            if (qrEmpty) {
+                QrCodeEmptyDialog(onDismiss = { qrEmpty = false })
             }
 
             // Info dialog — metadata, path, rating and AI score (everything the

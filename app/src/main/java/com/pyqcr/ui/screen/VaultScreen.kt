@@ -40,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
@@ -53,9 +54,11 @@ import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.*
@@ -287,29 +290,6 @@ fun VaultScreen(onBack: () -> Unit) {
             qrScanning = false
             if (found.isEmpty()) qrEmpty = true else qrResults = found
         }
-    }
-
-    /** Decode QR codes from the current vault multi-selection (plaintext entries only). */
-    fun scanSelectedQr() {
-        val selected = entries.filter { it.id in vaultSelection && !it.isVideo }
-        if (selected.isEmpty()) return
-        val readable = selected.filter { !it.encrypted }
-        if (readable.isEmpty()) {
-            Toast.makeText(
-                context,
-                "Encrypted files must be decrypted before their QR code can be read",
-                Toast.LENGTH_SHORT
-            ).show()
-            return
-        }
-        if (readable.size < selected.size) {
-            Toast.makeText(
-                context,
-                "${selected.size - readable.size} encrypted file(s) skipped",
-                Toast.LENGTH_SHORT
-            ).show()
-        }
-        scanQrSources(readable.map { it.displayName to VaultStorage.entryFile(context, it).absolutePath })
     }
 
     LaunchedEffect(Unit) {
@@ -847,6 +827,7 @@ fun VaultScreen(onBack: () -> Unit) {
                                     previewPath = if (entry.encrypted) null
                                     else VaultStorage.entryFile(context, entry).absolutePath,
                                     selected = vaultMultiSelect && isSelected,
+                                    multiSelect = vaultMultiSelect,
                                     onTap = {
                                         if (vaultMultiSelect) {
                                             vaultSelection = if (isSelected)
@@ -870,17 +851,20 @@ fun VaultScreen(onBack: () -> Unit) {
                         if (vaultMultiSelect) {
                             VaultBatchBar(
                                 selectedCount = vaultSelection.size,
+                                allSelected = folderEntries.isNotEmpty() &&
+                                    vaultSelection.containsAll(folderEntries.map { it.id }),
                                 onCancel = {
                                     vaultMultiSelect = false
                                     vaultSelection = emptySet()
                                 },
                                 onSelectAll = {
-                                    vaultSelection = folderEntries.map { it.id }.toSet()
+                                    val all = folderEntries.map { it.id }.toSet()
+                                    vaultSelection = if (all.isNotEmpty() && vaultSelection.containsAll(all))
+                                        emptySet() else all
                                 },
                                 onEncrypt = { runVaultBatch(VaultAction.ENCRYPT) },
                                 onDecrypt = { runVaultBatch(VaultAction.DECRYPT) },
                                 onMoveOut = { runVaultBatch(VaultAction.MOVE_OUT) },
-                                onReadQr = { scanSelectedQr() },
                                 onDelete = { runVaultBatchDelete() }
                             )
                         }
@@ -2114,6 +2098,7 @@ private fun VaultCell(
     entry: VaultEntry,
     previewPath: String?,
     selected: Boolean = false,
+    multiSelect: Boolean = false,
     onTap: () -> Unit,
     onLongClick: () -> Unit = {}
 ) {
@@ -2161,24 +2146,39 @@ private fun VaultCell(
                 )
             }
         }
-        // Selection overlay when batch-selecting
+        // Selection overlay when batch-selecting — same look as the folder
+        // view: dimmed cell, filled circle with a white tick in the top-right
+        // corner, empty circle for the not-yet-selected neighbours.
         if (selected) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0x4000E676))
+                    .background(Color(0x80000000))
             )
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .border(3.dp, Color(0xFF00E676)),
-                contentAlignment = Alignment.Center
+                    .align(Alignment.TopEnd)
+                    .background(MaterialTheme.colorScheme.primary, shape = CircleShape)
+                    .padding(4.dp)
             ) {
                 Icon(
                     Icons.Default.Check,
                     contentDescription = "Selected",
                     tint = Color.White,
-                    modifier = Modifier.size(24.dp)
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        } else if (multiSelect) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+            ) {
+                Icon(
+                    Icons.Default.RadioButtonUnchecked,
+                    contentDescription = "Not selected",
+                    tint = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.size(20.dp)
                 )
             }
         }
@@ -2290,12 +2290,12 @@ private fun FolderCell(
 @Composable
 private fun VaultBatchBar(
     selectedCount: Int,
+    allSelected: Boolean,
     onCancel: () -> Unit,
     onSelectAll: () -> Unit,
     onEncrypt: () -> Unit,
     onDecrypt: () -> Unit,
     onMoveOut: () -> Unit,
-    onReadQr: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -2313,30 +2313,12 @@ private fun VaultBatchBar(
                 .height(44.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Small action button — left side
-            IconButton(
-                onClick = onCancel,
-                modifier = Modifier.size(34.dp)
-            ) {
-                Icon(
-                    Icons.Default.Close,
-                    contentDescription = "Cancel",
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-            Text(
-                text = "$selectedCount selected",
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 4.dp)
-            )
-            TextButton(onClick = onSelectAll) {
-                Text("Select all")
-            }
-            // Actions menu
+            // Actions menu — left side (same one-row layout as the album bar)
             Box {
-                IconButton(onClick = { showMenu = true }) {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(34.dp)
+                ) {
                     Icon(
                         Icons.Default.MoreVert,
                         contentDescription = "Actions",
@@ -2347,6 +2329,18 @@ private fun VaultBatchBar(
                     expanded = showMenu,
                     onDismissRequest = { showMenu = false }
                 ) {
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onSelectAll() },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.SelectAll,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        text = { Text(if (allSelected) "Deselect All" else "Select All") }
+                    )
+                    HorizontalDivider()
                     DropdownMenuItem(
                         onClick = { showMenu = false; onEncrypt() },
                         leadingIcon = {
@@ -2362,7 +2356,7 @@ private fun VaultBatchBar(
                         onClick = { showMenu = false; onDecrypt() },
                         leadingIcon = {
                             Icon(
-                                Icons.Default.Lock,
+                                Icons.Default.LockOpen,
                                 contentDescription = null,
                                 modifier = Modifier.size(18.dp)
                             )
@@ -2380,17 +2374,6 @@ private fun VaultBatchBar(
                         },
                         text = { Text("Move out") }
                     )
-                    DropdownMenuItem(
-                        onClick = { showMenu = false; onReadQr() },
-                        leadingIcon = {
-                            Icon(
-                                Icons.Default.QrCodeScanner,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        },
-                        text = { Text("Read QR code") }
-                    )
                     HorizontalDivider()
                     DropdownMenuItem(
                         onClick = { showMenu = false; onDelete() },
@@ -2405,6 +2388,21 @@ private fun VaultBatchBar(
                         text = { Text("Delete", color = MaterialTheme.colorScheme.error) }
                     )
                 }
+            }
+
+            // Selected count — centered
+            Text(
+                text = "$selectedCount selected",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .weight(1f)
+                    .wrapContentWidth(Alignment.CenterHorizontally)
+            )
+
+            // Cancel — right side
+            TextButton(onClick = onCancel, modifier = Modifier.height(34.dp)) {
+                Text("Cancel")
             }
         }
     }

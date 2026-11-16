@@ -104,7 +104,6 @@ import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.ImageEditSelectionStore
 import com.pyqcr.util.ImageUtil
 import com.pyqcr.util.PermissionHelper
-import com.pyqcr.util.QrCodeReader
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -274,30 +273,6 @@ fun AlbumScreen(
     // system picker, whose SAF grant covers the write.
     var retryCopyMove by remember { mutableStateOf<Pair<String, File>?>(null) }
     var retryTreeUri by remember { mutableStateOf<Uri?>(null) }
-
-    // QR code reading (folder view): decode the selected images off the main
-    // thread, then show the payload with Copy buttons.
-    var qrScanning by remember { mutableStateOf(false) }
-    var qrResults by remember { mutableStateOf<List<QrScanResult>?>(null) }
-    var qrEmpty by remember { mutableStateOf(false) }
-
-    fun scanQrCodes(uris: List<String>) {
-        if (uris.isEmpty() || qrScanning) return
-        scope.launch {
-            qrScanning = true
-            val found = withContext(Dispatchers.IO) {
-                uris.mapNotNull { uri ->
-                    val text = QrCodeReader.decode(context, uri) ?: return@mapNotNull null
-                    val label = runCatching {
-                        FileOperationHelper.getFileName(context, uri)
-                    }.getOrDefault("Image")
-                    QrScanResult(label, text)
-                }
-            }
-            qrScanning = false
-            if (found.isEmpty()) qrEmpty = true else qrResults = found
-        }
-    }
 
     /** Re-point tag cross-refs to the new URI of each image that was just moved. */
     fun remapMovedTags(oldToNew: Map<String, String>) {
@@ -1986,9 +1961,6 @@ fun AlbumScreen(
                             selectedImageUris = emptySet()
                             onNavigateToImageEdit()
                         },
-                        onReadQr = {
-                            scanQrCodes(selectedImageUris.toList())
-                        },
                         onFavourite = {
                             scope.launch {
                                 if (!FavouriteStore.supported) {
@@ -2907,16 +2879,6 @@ fun AlbumScreen(
                     }
                 )
             }
-            // QR code result (folder view) — payload text with Copy buttons
-            qrResults?.let { results ->
-                QrCodeResultDialog(
-                    results = results,
-                    onDismiss = { qrResults = null }
-                )
-            }
-            if (qrEmpty) {
-                QrCodeEmptyDialog(onDismiss = { qrEmpty = false })
-            }
             // Rename-file dialog (batch ⋮ menu, single selection)
             if (showRenameDialog) {
                 AlertDialog(
@@ -3084,7 +3046,6 @@ private fun BatchMultiSelectBar(
     onRename: () -> Unit,
     onAiEdit: () -> Unit,
     onEditImages: () -> Unit,
-    onReadQr: () -> Unit,
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit,
     onMoveToVault: () -> Unit,
@@ -3178,11 +3139,6 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onEditImages() },
                         text = { Text("Edit images") },
                         leadingIcon = { Icon(Icons.Default.Brush, contentDescription = null, modifier = Modifier.size(18.dp)) }
-                    )
-                    DropdownMenuItem(
-                        onClick = { showMenu = false; onReadQr() },
-                        text = { Text("Read QR code") },
-                        leadingIcon = { Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     HorizontalDivider()
                     DropdownMenuItem(
