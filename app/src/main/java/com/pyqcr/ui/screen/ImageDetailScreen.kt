@@ -79,6 +79,7 @@ import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.MotionPhotoExtractor
 import com.pyqcr.util.QrCodeReader
+import com.pyqcr.util.SafGrantStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -565,12 +566,15 @@ fun ImageDetailScreen(
      * via the recycle-bin path.
      */
     val launchCopyMove: (String, List<String>, File?, Uri?) -> Unit = { op, uris, destDir, treeUri ->
+        // Reuse a grant the user already gave for this folder tree so a repeat
+        // copy/move writes silently instead of asking again.
+        val safTree = treeUri ?: destDir?.let { SafGrantStore.findGrant(context, it) }
         coroutineScope.launch {
             val results = withContext(Dispatchers.IO) {
                 if (op == "move") {
-                    FileOperationHelper.batchMoveViaFiles(context, uris, destDir, treeUri)
+                    FileOperationHelper.batchMoveViaFiles(context, uris, destDir, safTree)
                 } else {
-                    FileOperationHelper.batchCopyViaFiles(context, uris, destDir, treeUri)
+                    FileOperationHelper.batchCopyViaFiles(context, uris, destDir, safTree)
                 }
             }
             // Only a destination that can be read back counts as a success and
@@ -610,12 +614,29 @@ fun ImageDetailScreen(
                 withContext(Dispatchers.IO) {
                     for ((sourceUri, destination) in verified) {
                         val newUri = FileOperationHelper.resolveNewImageUri(
-                            context, destination, treeUri
+                            context, destination, safTree
                         )
                         if (newUri != null && newUri != sourceUri) {
                             tagDao.moveImageCrossRef(sourceUri, newUri)
                         }
                     }
+                }
+                // Rows this app created can go without the trash confirmation
+                // (the destination was read back above); anything else still
+                // takes the recoverable recycle-bin path.
+                if (needTrash.isNotEmpty()) {
+                    val owned = withContext(Dispatchers.IO) {
+                        FileOperationHelper.deleteMediaOwned(
+                            context,
+                            needTrash.filter { src ->
+                                val dest = verified.firstOrNull { it.first == src }?.second
+                                dest != null &&
+                                    FileOperationHelper.isVerifiedDestination(context, dest) &&
+                                    FileOperationHelper.ownsMediaRow(context, src)
+                            }
+                        )
+                    }
+                    needTrash.removeAll(owned)
                 }
                 if (needTrash.isNotEmpty()) {
                     trashUris(needTrash, "Moved image(s)", "Moved image(s)", false)

@@ -104,6 +104,7 @@ import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.ImageEditSelectionStore
 import com.pyqcr.util.ImageUtil
 import com.pyqcr.util.PermissionHelper
+import com.pyqcr.util.SafGrantStore
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -332,7 +333,11 @@ fun AlbumScreen(
 
     /** Launch a copy or move operation on selected URIs. */
     val launchCopyMove: (String, List<String>, File?, Uri?) -> Unit = { operation, uris, destDir, treeUri ->
-        if (destDir == null && treeUri == null) {
+        // Reuse a grant the user already gave for this tree (one prompt per
+        // top-level folder, not per destination). This makes the SAF write
+        // silent on every later copy/move into the same folder tree.
+        val safTree = treeUri ?: destDir?.let { SafGrantStore.findGrant(context, it) }
+        if (destDir == null && safTree == null) {
             copyMoveMessage = "Destination folder not available"
             scope.launch { snackbarHostState.showSnackbar(copyMoveMessage) }
         } else {
@@ -342,13 +347,13 @@ fun AlbumScreen(
                     val failures = mutableListOf<String>()
                     val results = if (operation == "copy") {
                         com.pyqcr.ui.util.FileOperationHelper.batchCopyViaFiles(
-                            context, uris, destDir, treeUri
+                            context, uris, destDir, safTree
                         ) { _, r ->
                             if (!r.success) failures += r.error ?: "Unknown error"
                         }
                     } else {
                         com.pyqcr.ui.util.FileOperationHelper.batchMoveViaFiles(
-                            context, uris, destDir, treeUri
+                            context, uris, destDir, safTree
                         ) { _, r ->
                             if (!r.success) failures += r.error ?: "Unknown error"
                         }
@@ -380,12 +385,16 @@ fun AlbumScreen(
                     // Nothing landed and no SAF grant was available: the folder
                     // refused a direct write (ordinary folders inside HONOR
                     // Parallel Space do this even with All files access, because
-                    // the grant belongs to the main profile). Ask the system for
-                    // write access to that same folder and retry with the grant.
+                    // the grant belongs to the main profile). Ask ONCE for this
+                    // folder tree, remember the grant and retry with it — every
+                    // later copy into the same tree runs silently.
                     // Unreadable sources are not a write problem — retrying them
                     // would only show the picker for nothing.
                     val writeBlocked = failures.isNotEmpty() &&
                         failures.none { it.startsWith("Cannot read the source") }
+                    // Gate on the explicitly picked tree, not on the remembered
+                    // grant: a stale grant that no longer works must still fall
+                    // through to a fresh prompt instead of failing silently.
                     if (successCount == 0 && treeUri == null && destDir != null && writeBlocked) {
                         retryCopyMove = operation to destDir
                         return@launch
@@ -393,16 +402,36 @@ fun AlbumScreen(
                     val folderLabel = destinationFolderLabel(destDir, treeUri)
                     var keepOriginalsNote = ""
 
-                    // Move: collect sources copied via SAF/MediaStore that need system-delete
-                    // confirmation. On API 30+ one createTrashRequest dialog covers them all —
-                    // the originals land in the recoverable recycle bin, NOT permanently
-                    // deleted, so a destination that later misbehaves (restricted/virtualised
-                    // storage) never costs the user their data.
+                    // Move: sources copied via SAF/MediaStore need their original removed.
+                    //
+                    // Rows this app created are deleted directly — the copy was
+                    // just read back, and MediaStore lets an app remove its own
+                    // rows with no dialog, so the trash confirmation is skipped
+                    // for them.
+                    //
+                    // Foreign rows still go through one createTrashRequest dialog
+                    // on API 30+ and land in the recoverable recycle bin — never a
+                    // silent permanent delete.
                     if (operation == "move") {
-                        // Files moved in place (same MediaStore row) keep their URI,
-                        // so their tags need no remap; the rest follow the copy.
                         val deferredRemap = remap.filterKeys { it in sourcesToDelete }
                         remapMovedTags(remap - deferredRemap.keys)
+
+                        if (sourcesToDelete.isNotEmpty()) {
+                            val ownedCandidates = withContext(Dispatchers.IO) {
+                                sourcesToDelete.filter { src ->
+                                    val dest = remap[src]
+                                    dest != null &&
+                                        FileOperationHelper.isVerifiedDestination(context, dest) &&
+                                        FileOperationHelper.ownsMediaRow(context, src)
+                                }
+                            }
+                            val owned = FileOperationHelper.deleteMediaOwned(context, ownedCandidates)
+                            if (owned.isNotEmpty()) {
+                                remapMovedTags(deferredRemap.filterKeys { it in owned })
+                                sourcesToDelete.removeAll(owned)
+                                viewModel.deleteImages(owned)
+                            }
+                        }
 
                         if (sourcesToDelete.isNotEmpty()) {
                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -416,7 +445,11 @@ fun AlbumScreen(
                                             append("\n${failures.size} failed — ${failures.first()}")
                                         }
                                     }
-                                    pendingMoveResult = Triple(baseMsg, sourcesToDelete.toList(), deferredRemap)
+                                    pendingMoveResult = Triple(
+                                        baseMsg,
+                                        sourcesToDelete.toList(),
+                                        deferredRemap.filterKeys { it in sourcesToDelete }
+                                    )
                                     moveDeleteLauncher.launch(IntentSenderRequest.Builder(request).build())
                                     return@launch
                                 }
@@ -427,7 +460,7 @@ fun AlbumScreen(
                             // copies are in the destination, so leaving the
                             // originals in place is a safe "move = copy" and
                             // the user stays in control of the deletion.
-                            remapMovedTags(deferredRemap)
+                            remapMovedTags(deferredRemap.filterKeys { it in sourcesToDelete })
                             keepOriginalsNote = " — originals kept (recycle bin unavailable)"
                         }
                     }
@@ -521,9 +554,12 @@ fun AlbumScreen(
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                 )
+                // Open on the TOP-LEVEL folder (e.g. "pixiv") rather than the
+                // exact destination: confirming it once grants the whole tree,
+                // so no subfolder below it ever asks again.
                 putExtra(
                     android.provider.DocumentsContract.EXTRA_INITIAL_URI,
-                    initialTreeUriFor(request.second)
+                    SafGrantStore.topLevelDocumentUri(request.second)
                 )
             }
             retryTreeLauncher.launch(intent)
@@ -4060,40 +4096,6 @@ internal fun resolveTreeUriToPath(treeUri: Uri): File? {
     } catch (e: Exception) {
         null
     }
-}
-
-/**
- * DocumentsProvider URI for [dir], used as EXTRA_INITIAL_URI so the system
- * picker opens on the folder whose write was refused instead of the root.
- */
-private fun initialTreeUriFor(dir: File): Uri {
-    val path = try { dir.canonicalPath } catch (e: Exception) { dir.absolutePath }
-    val root = try {
-        android.os.Environment.getExternalStorageDirectory().canonicalPath
-    } catch (e: Exception) {
-        android.os.Environment.getExternalStorageDirectory().absolutePath
-    }
-    val docId = when {
-        path == root -> "primary:"
-        path.startsWith("$root${File.separator}") ->
-            "primary:" + path.removePrefix("$root${File.separator}")
-        path.startsWith("/storage/") -> {
-            val after = path.removePrefix("/storage/")
-            val volume = after.substringBefore(File.separatorChar)
-            val rest = after.substringAfter(File.separatorChar, "")
-            when {
-                // /storage/emulated/<user>/<rest> — the provider is per-user.
-                volume == "emulated" ->
-                    "primary:" + rest.substringAfter(File.separatorChar, "")
-                volume.isNotBlank() -> "$volume:$rest"
-                else -> "primary:"
-            }
-        }
-        else -> "primary:"
-    }
-    return android.provider.DocumentsContract.buildDocumentUri(
-        "com.android.externalstorage.documents", docId
-    )
 }
 
 /** Human-readable name of the copy/move destination for the result snackbar. */

@@ -255,7 +255,7 @@ object FileOperationHelper {
         }
         // Strategy 3: SAF fallback (any pickable folder)
         if (treeUri != null) {
-            return copyViaSaf(context, sourceUri, treeUri)
+            return copyViaSaf(context, sourceUri, treeUri, destDir)
         }
         return FileOpResult(false, null, "No writable destination folder")
     }
@@ -300,7 +300,7 @@ object FileOperationHelper {
         }
         // Strategy 3: SAF copy — source deletion deferred to caller (system delete-request dialog)
         if (treeUri != null) {
-            val copy = copyViaSaf(context, sourceUri, treeUri)
+            val copy = copyViaSaf(context, sourceUri, treeUri, destDir)
             if (!copy.success) return copy
             return FileOpResult(true, copy.destination, null, sourceNeedsDeletion = true)
         }
@@ -429,7 +429,12 @@ object FileOperationHelper {
     // ---------- Copy via SAF (works for any pickable folder) ----------
 
     /** Copy a file through the retained SAF tree URI — works on SD/USB/cloud and scoped-storage blocked paths. */
-    private suspend fun copyViaSaf(context: Context, sourceUri: String, treeUri: Uri): FileOpResult =
+    private suspend fun copyViaSaf(
+        context: Context,
+        sourceUri: String,
+        treeUri: Uri,
+        destDir: File? = null
+    ): FileOpResult =
         withContext(Dispatchers.IO) {
             try {
                 val contentUri = Uri.parse(sourceUri)
@@ -438,16 +443,23 @@ object FileOperationHelper {
                     return@withContext FileOpResult(false, null, "Missing file name for $sourceUri")
                 }
 
-                val availableName = findAvailableSafName(context, treeUri, fileName)
-                val folderName = try {
-                    DocumentsContract.getTreeDocumentId(treeUri)
-                        .substringAfterLast(':')
-                        .substringAfterLast('/')
-                        .ifBlank { "this folder" }
-                } catch (e: Exception) {
-                    "this folder"
+                // The grant may cover a whole tree (one prompt per top-level
+                // folder), so walk down to the actual destination folder instead
+                // of always writing into the tree root.
+                val dirDocId = resolveSafDirDocumentId(context, treeUri, destDir)
+                if (dirDocId.isBlank()) {
+                    return@withContext FileOpResult(
+                        false, null, "The granted folder could not be opened — nothing was moved"
+                    )
                 }
-                val docUri = createSafDocument(context, treeUri, mimeTypeFor(fileName), availableName)
+                val dirDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, dirDocId)
+                val availableName = findAvailableSafName(context, treeUri, dirDocId, fileName)
+                val folderName = dirDocId.substringAfterLast(':')
+                    .substringAfterLast('/')
+                    .ifBlank { "this folder" }
+                val docUri = createSafDocument(
+                    context, treeUri, dirDocUri, mimeTypeFor(fileName), availableName
+                )
                     ?: return@withContext FileOpResult(
                         false, null,
                         "Cannot create files in \"$folderName\" — the system file provider " +
@@ -590,14 +602,20 @@ object FileOperationHelper {
             }
         }
 
-    /** Create a new document inside the tree, returning its content uri. */
-    private fun createSafDocument(context: Context, treeUri: Uri, mimeType: String, displayName: String): Uri? {
+    /** Create a new document inside [dirDocUri], returning its content uri. */
+    private fun createSafDocument(
+        context: Context,
+        treeUri: Uri,
+        dirDocUri: Uri,
+        mimeType: String,
+        displayName: String
+    ): Uri? {
         // Providers are inconsistent about what they accept. Some only work with
-        // the tree-root *document* URI, some only with the tree URI itself, and a
-        // few reject a typed MIME (creating nothing for "image/jpeg") while
-        // accepting octet-stream. Inside a clone space (HONOR Parallel Space) the
-        // first combination often fails even though a later one succeeds, so try
-        // every combination before declaring the folder unwritable.
+        // a document URI, some only with the tree URI itself, and a few reject a
+        // typed MIME (creating nothing for "image/jpeg") while accepting
+        // octet-stream. Inside a clone space (HONOR Parallel Space) the first
+        // combination often fails even though a later one succeeds, so try every
+        // combination before declaring the folder unwritable.
         val treeDoc = try {
             DocumentsContract.buildDocumentUriUsingTree(
                 treeUri, DocumentsContract.getTreeDocumentId(treeUri)
@@ -605,7 +623,7 @@ object FileOperationHelper {
         } catch (e: Exception) {
             null
         }
-        val targets = listOfNotNull(treeUri, treeDoc)
+        val targets = listOfNotNull(dirDocUri, treeUri, treeDoc).distinct()
         val mimes = if (mimeType == "application/octet-stream") {
             listOf(mimeType)
         } else {
@@ -626,9 +644,100 @@ object FileOperationHelper {
         return null
     }
 
-    /** Find a display name that does not collide with existing children of the tree. */
-    private fun findAvailableSafName(context: Context, treeUri: Uri, fileName: String): String {
-        val existing = querySafChildNames(context, treeUri)
+    /**
+     * Document id of [destDir] inside [treeUri], creating missing intermediate
+     * folders. Falls back to the tree root when the directory is not under the
+     * tree (or cannot be created), which keeps a direct folder pick working.
+     */
+    private fun resolveSafDirDocumentId(context: Context, treeUri: Uri, destDir: File?): String {
+        val treeDocId = try {
+            DocumentsContract.getTreeDocumentId(treeUri)
+        } catch (e: Exception) {
+            return ""
+        }
+        if (destDir == null) return treeDocId
+        val treeDir = com.pyqcr.util.SafGrantStore.pathForTreeUri(treeUri) ?: return treeDocId
+        val base = canonicalPath(treeDir)
+        val target = canonicalPath(destDir)
+        val baseWithSep = base.trimEnd(File.separatorChar).toString() + File.separator
+        if (!target.startsWith(baseWithSep)) return treeDocId
+        var docId = treeDocId
+        for (segment in target.removePrefix(baseWithSep).split(File.separatorChar)) {
+            if (segment.isBlank()) continue
+            docId = findSafChildDocumentId(context, treeUri, docId, segment)
+                ?: createSafChildDir(context, treeUri, docId, segment)
+                ?: return docId
+        }
+        return docId
+    }
+
+    private fun canonicalPath(file: File): String = try {
+        file.canonicalPath
+    } catch (e: Exception) {
+        file.absolutePath
+    }
+
+    /** Document id of the child of [parentDocId] named [name], or null. */
+    private fun findSafChildDocumentId(
+        context: Context,
+        treeUri: Uri,
+        parentDocId: String,
+        name: String
+    ): String? {
+        return try {
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME
+                ),
+                null, null, null
+            )?.use { cursor ->
+                val idIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                while (cursor.moveToNext()) {
+                    if (nameIdx >= 0 && idIdx >= 0 &&
+                        cursor.getString(nameIdx) == name
+                    ) {
+                        return cursor.getString(idIdx)
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "findSafChildDocumentId failed for $name", e)
+            null
+        }
+    }
+
+    /** Create sub-directory [name] under [parentDocId], returning its document id. */
+    private fun createSafChildDir(
+        context: Context,
+        treeUri: Uri,
+        parentDocId: String,
+        name: String
+    ): String? {
+        return try {
+            val parentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, parentDocId)
+            val created = DocumentsContract.createDocument(
+                context.contentResolver, parentUri, DocumentsContract.Document.MIME_TYPE_DIR, name
+            ) ?: return null
+            DocumentsContract.getDocumentId(created)
+        } catch (e: Exception) {
+            Log.w(TAG, "createSafChildDir failed for $name", e)
+            null
+        }
+    }
+
+    /** Find a display name that does not collide with existing children of [dirDocId]. */
+    private fun findAvailableSafName(
+        context: Context,
+        treeUri: Uri,
+        dirDocId: String,
+        fileName: String
+    ): String {
+        val existing = querySafChildNames(context, treeUri, dirDocId)
         var candidate = fileName
         var counter = 1
         while (candidate in existing) {
@@ -641,11 +750,10 @@ object FileOperationHelper {
         return candidate
     }
 
-    /** List display names of the tree's immediate children. */
-    private fun querySafChildNames(context: Context, treeUri: Uri): Set<String> {
+    /** List display names of [dirDocId]'s immediate children. */
+    private fun querySafChildNames(context: Context, treeUri: Uri, dirDocId: String): Set<String> {
         return try {
-            val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
-            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeDocId)
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, dirDocId)
             val names = mutableSetOf<String>()
             context.contentResolver.query(
                 childrenUri,
@@ -1370,15 +1478,50 @@ object FileOperationHelper {
      * Returns the number successfully deleted.
      */
     suspend fun deleteMediaDirect(context: Context, uris: List<String>): Int = withContext(Dispatchers.IO) {
-        var deleted = 0
-        for (u in uris) {
-            try {
-                if (context.contentResolver.delete(Uri.parse(u), null, null) > 0) deleted++
-            } catch (e: Exception) {
-                Log.w(TAG, "deleteMediaDirect failed for $u", e)
+        deleteMediaOwned(context, uris).size
+    }
+
+    /**
+     * Delete rows this app owns, without the system trash dialog. Returns the
+     * URIs that are really gone; anything the provider refuses stays in the
+     * list's complement so the caller can fall back to the recycle bin.
+     */
+    suspend fun deleteMediaOwned(context: Context, uris: List<String>): List<String> =
+        withContext(Dispatchers.IO) {
+            val deleted = mutableListOf<String>()
+            for (u in uris) {
+                try {
+                    if (context.contentResolver.delete(Uri.parse(u), null, null) > 0) {
+                        deleted += u
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "deleteMediaOwned failed for $u", e)
+                }
             }
+            deleted
         }
-        deleted
+
+    /**
+     * True when this app created the MediaStore row. Such a row can be deleted
+     * directly (no system confirmation), which is what lets a move skip the
+     * trash dialog for the app's own files.
+     */
+    fun ownsMediaRow(context: Context, uriStr: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        return try {
+            context.contentResolver.query(
+                Uri.parse(uriStr),
+                arrayOf(MediaStore.MediaColumns.OWNER_PACKAGE_NAME),
+                null, null, null
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return false
+                val idx = cursor.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
+                idx >= 0 && cursor.getString(idx) == context.packageName
+            } ?: false
+        } catch (e: Exception) {
+            Log.w(TAG, "ownsMediaRow failed for $uriStr", e)
+            false
+        }
     }
 
     /**
