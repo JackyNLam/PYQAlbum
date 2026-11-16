@@ -517,74 +517,166 @@ fun ImageDetailScreen(
         pendingDeleteUris = null
     }
 
+    // A delete no silent route could finish: ask ONCE for the image's folder
+    // (the SAF grant is remembered, so the retry and every later delete there
+    // run silently); declining falls back to the platform consent dialog.
+    // Mirrors the album batch delete.
+    var retryDeleteUris by remember { mutableStateOf<List<String>?>(null) }
+    var retryDeleteTree by remember { mutableStateOf<Uri?>(null) }
+    var retryDeleteFolder by remember { mutableStateOf<File?>(null) }
+    var declinedDeleteFolder by remember { mutableStateOf<String?>(null) }
+
+    /** Ask the platform for consent to trash [pending] (API 30+). */
+    fun launchTrashConsent(pending: List<String>, message: String) {
+        val sender = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            FileOperationHelper.createTrashRequest(context, pending)
+        } else {
+            null
+        }
+        if (sender == null) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("Could not delete the image")
+                withContext(Dispatchers.IO) {
+                    repository.refreshImagesFromMediaStore()
+                }
+            }
+            return
+        }
+        pendingDeleteUris = pending
+        pendingDeleteMessage = message
+        deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+    }
+
+    val deleteTreeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val tree = result.data?.data
+        val pending = retryDeleteUris
+        if (result.resultCode == android.app.Activity.RESULT_OK && tree != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    tree,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                android.util.Log.w("ImageDetail", "takePersistableUriPermission failed", e)
+            }
+            retryDeleteTree = tree
+        } else {
+            retryDeleteFolder?.let { declinedDeleteFolder = it.absolutePath }
+            retryDeleteFolder = null
+            retryDeleteUris = null
+            retryDeleteTree = null
+            if (!pending.isNullOrEmpty()) {
+                launchTrashConsent(pending, "Moved to the recycle bin")
+            }
+        }
+    }
+
+    LaunchedEffect(retryDeleteUris, retryDeleteTree) {
+        val pending = retryDeleteUris ?: return@LaunchedEffect
+        if (retryDeleteTree == null) return@LaunchedEffect
+        retryDeleteUris = null
+        retryDeleteTree = null
+        retryDeleteFolder = null
+        val removed = withContext(Dispatchers.IO) {
+            FileOperationHelper.deleteMoveSources(context, pending)
+        }
+        withContext(Dispatchers.IO) {
+            repository.refreshImagesFromMediaStore()
+        }
+        val leftovers = pending - removed.toSet()
+        if (leftovers.isEmpty()) {
+            snackbarHostState.showSnackbar("Deleted")
+            onBack()
+        } else {
+            launchTrashConsent(leftovers, "Moved to the recycle bin")
+        }
+    }
+
     /**
-     * Send [uris] to the recycle bin first (system trash request, API 30+),
-     * falling back to a permanent direct delete on older APIs only when
-     * [allowDirectDelete] is true (an explicit user Delete). Move sources pass
-     * false so an original is never permanently deleted without a trash bin.
+     * Remove [uris]: a silent provider trash first (recoverable recycle bin),
+     * then a silent permanent delete where the real file or a remembered SAF
+     * folder grant allows it, and only then the platform consent dialog for rows
+     * this app does not own. [allowDirectDelete] must be false for move sources so
+     * an original is never permanently deleted without a trash bin.
      * Mirrors the album batch menu's trashOrDelete.
      */
     val trashUris: (List<String>, String, String, Boolean) -> Unit = { uris, trashMsg, directMsg, allowDirectDelete ->
         if (uris.isNotEmpty()) {
             coroutineScope.launch {
-                // Trash through the provider write itself (IS_TRASHED = 1) —
-                // no system confirmation dialog. Same effect as confirming the
-                // dialog (recoverable recycle bin), and the only silent route
-                // inside HONOR Parallel Space where that dialog keeps popping
-                // up and its result can be dropped.
+                // (1) Silent trash: the provider write the "move to trash?"
+                // dialog performs on OK — item lands in the recyclable bin with
+                // no prompt.
                 val refused = withContext(Dispatchers.IO) {
                     FileOperationHelper.trashMediaSilently(context, uris)
                 }
-                val trashed = uris - refused.toSet()
-                if (refused.isEmpty()) {
-                    snackbarHostState.showSnackbar(trashMsg)
+                val gone = (uris - refused.toSet()).toMutableList()
+                // (2) Foreign rows (another app's media, no All-files access —
+                // the normal case inside HONOR Parallel Space) can still go
+                // silently when the file is writable or a SAF folder grant is
+                // remembered from an earlier copy/move.
+                var pending = refused
+                if (pending.isNotEmpty() && allowDirectDelete) {
+                    val removed = withContext(Dispatchers.IO) {
+                        FileOperationHelper.deleteMoveSources(context, pending)
+                    }
+                    gone += removed
+                    pending = pending - removed.toSet()
+                }
+                if (gone.isNotEmpty()) {
                     withContext(Dispatchers.IO) {
                         repository.refreshImagesFromMediaStore()
                     }
+                }
+                if (pending.isEmpty()) {
+                    snackbarHostState.showSnackbar(
+                        if (refused.isEmpty()) trashMsg else directMsg
+                    )
                     onBack()
                     return@launch
                 }
-                if (trashed.isNotEmpty()) {
-                    withContext(Dispatchers.IO) {
-                        repository.refreshImagesFromMediaStore()
-                    }
-                }
-                // Survivors need the platform consent route — unless this is a
-                // clone/Parallel Space profile, where that dialog is broken, so
-                // the user's "allow" is assumed and the delete is direct.
-                val trashRequest = if (!FileOperationHelper.isSecondaryProfile(context) &&
-                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
-                ) {
-                    FileOperationHelper.createTrashRequest(context, refused)
-                } else {
-                    null
-                }
-                if (trashRequest != null) {
-                    pendingDeleteUris = refused
-                    pendingDeleteMessage = trashMsg
-                    deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
-                } else if (allowDirectDelete) {
-                    val removed = withContext(Dispatchers.IO) {
-                        FileOperationHelper.deleteMoveSources(context, refused)
-                    }
-                    snackbarHostState.showSnackbar(
-                        if (removed.size == refused.size) directMsg
-                        else "${refused.size - removed.size} item(s) could not be deleted"
-                    )
-                    withContext(Dispatchers.IO) {
-                        repository.refreshImagesFromMediaStore()
-                    }
-                    onBack()
-                } else {
+                if (!allowDirectDelete) {
                     // A move/copy source must never be permanently deleted just
-                    // because no recycle bin is available — keep the original
+                    // because no silent route is available — keep the original
                     // and tell the user the operation was a copy.
                     snackbarHostState.showSnackbar(
-                        "Copied — original kept (recycle bin unavailable)"
+                        "Copied — original kept (no write access to delete it)"
                     )
                     withContext(Dispatchers.IO) {
                         repository.refreshImagesFromMediaStore()
                     }
+                    return@launch
+                }
+                // (3) Nothing silent worked. Ask ONCE for the folder's SAF write
+                // grant — remembered, so the retry and every later delete there
+                // are silent. Only when a grant already covers the folder (or
+                // the picker is declined) does the platform consent dialog run.
+                val folder = withContext(Dispatchers.IO) {
+                    FileOperationHelper.folderNeedingDeleteGrant(context, pending)
+                }
+                if (folder != null && folder.absolutePath != declinedDeleteFolder) {
+                    retryDeleteUris = pending
+                    retryDeleteFolder = folder
+                    snackbarHostState.showSnackbar(
+                        "Allow access to \"${folder.name}\" once — deletes there will then be silent"
+                    )
+                    deleteTreeLauncher.launch(
+                        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                            addFlags(
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                            )
+                            putExtra(
+                                "android.provider.extra.INITIAL_URI",
+                                com.pyqcr.util.SafGrantStore.topLevelDocumentUri(folder)
+                            )
+                        }
+                    )
+                } else {
+                    launchTrashConsent(pending, trashMsg)
                 }
             }
         }

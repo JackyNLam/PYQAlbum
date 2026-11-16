@@ -608,6 +608,90 @@ fun AlbumScreen(
         deleteSuccessMessage = "Deleted {n} image(s)"
     }
 
+    // A delete that no silent route could finish: ask ONCE for the file's
+    // top-level folder in the system picker. The SAF write grant is remembered
+    // (SafGrantStore), so the retry — and every later delete in that folder —
+    // runs silently. This is the only way to remove media this app does not own
+    // without the platform consent dialog popping up on every delete.
+    var retryDeleteUris by remember { mutableStateOf<List<String>?>(null) }
+    var retryDeleteTree by remember { mutableStateOf<Uri?>(null) }
+    var retryDeleteFolder by remember { mutableStateOf<File?>(null) }
+    // Folders whose grant the user already declined in this session — asking
+    // again on every delete would be nagging; those fall straight through to
+    // the platform consent dialog.
+    val declinedDeleteFolders = remember { mutableStateListOf<String>() }
+
+    /** Ask the platform for consent to trash [pending] (API 30+). */
+    fun launchTrashConsent(pending: List<String>, message: String = "Moved {n} image(s) to the recycle bin") {
+        val sender = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            FileOperationHelper.createTrashRequest(context, pending)
+        } else {
+            null
+        }
+        if (sender == null) {
+            scope.launch {
+                snackbarHostState.showSnackbar("Could not delete ${pending.size} image(s)")
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            }
+            return
+        }
+        pendingDeleteUris = pending
+        deleteSuccessMessage = message
+        deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+    }
+
+    // One-off folder grant for deletes: the picked tree is remembered, then the
+    // delete is retried through it (silent). Declining falls back to the
+    // platform consent dialog.
+    val deleteTreeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val tree = result.data?.data
+        val pending = retryDeleteUris
+        if (result.resultCode == android.app.Activity.RESULT_OK && tree != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    tree,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                Log.w("AlbumScreen", "takePersistableUriPermission failed", e)
+            }
+            retryDeleteTree = tree
+        } else {
+            retryDeleteFolder?.let { declinedDeleteFolders += it.absolutePath }
+            retryDeleteFolder = null
+            retryDeleteUris = null
+            retryDeleteTree = null
+            if (!pending.isNullOrEmpty()) launchTrashConsent(pending)
+        }
+    }
+
+    LaunchedEffect(retryDeleteUris, retryDeleteTree) {
+        val pending = retryDeleteUris ?: return@LaunchedEffect
+        if (retryDeleteTree == null) return@LaunchedEffect
+        retryDeleteUris = null
+        retryDeleteTree = null
+        retryDeleteFolder = null
+        val removed = withContext(Dispatchers.IO) {
+            FileOperationHelper.deleteMoveSources(context, pending)
+        }
+        if (removed.isNotEmpty()) {
+            viewModel.deleteImages(removed)
+            viewModel.refreshImages()
+        }
+        val leftovers = pending - removed.toSet()
+        if (leftovers.isEmpty()) {
+            snackbarHostState.showSnackbar("Deleted ${removed.size} image(s)")
+            isMultiSelectMode = false
+            selectedImageUris = emptySet()
+        } else {
+            launchTrashConsent(leftovers)
+        }
+    }
+
     // Favourite confirmation launcher (Android 13+) — marks items the app does
     // not own through the platform request dialog (the direct IS_FAVORITE write
     // is rejected for foreign rows).
@@ -879,74 +963,95 @@ fun AlbumScreen(
     }
 
     /**
-     * Remove [uris] from the gallery — RECYCLE BIN FIRST on API 30+ (the system
-     * trash request, recoverable), falling back to a permanent delete on older
-     * APIs or when the trash request cannot be built. [trashTemplate] / 
-     * [directTemplate] are the success messages ({n} = count).
-     * [allowDirectDelete] must be false for move sources: if no recycle bin is
-     * available the originals are KEPT instead of being permanently deleted.
+     * Remove [uris] from the gallery: a silent provider trash first (recoverable
+     * recycle bin, no dialog), then a silent permanent delete where a writable
+     * path or a remembered SAF folder grant allows it, and only then the
+     * platform's own consent dialog for rows this app does not own.
+     * [trashTemplate] / [directTemplate] are the success messages ({n} = count).
+     * [allowDirectDelete] must be false for move sources: if nothing can be
+     * removed silently the originals are KEPT instead of being deleted.
      */
     val trashOrDelete: (List<String>, String, String, Boolean) -> Unit = { uris, trashTemplate, directTemplate, allowDirectDelete ->
         if (uris.isNotEmpty()) {
             scope.launch {
-                // Trash FIRST through the provider write itself (IS_TRASHED = 1)
-                // — no system confirmation dialog. That is exactly what the
-                // dialog does on OK, so the items still land in the recoverable
-                // recycle bin. The dialog is unusable inside HONOR Parallel
-                // Space (it re-appears on every delete and its result can be
-                // lost), so this is the only silent route there.
+                // (1) Silent trash: set IS_TRASHED = 1 through the provider —
+                // the exact write the "move to trash?" dialog applies on OK. The
+                // items still land in the recoverable recycle bin, no prompt.
                 val refused = withContext(Dispatchers.IO) {
                     FileOperationHelper.trashMediaSilently(context, uris)
                 }
-                val trashed = uris - refused.toSet()
-                if (trashed.isNotEmpty()) {
-                    viewModel.deleteImages(trashed)
+                val gone = (uris - refused.toSet()).toMutableList()
+                // (2) Rows this app may not flag (another app's media and no
+                // All-files access — the normal case inside HONOR Parallel
+                // Space) are still removable silently when the real file is
+                // writable or a SAF folder grant is remembered from an earlier
+                // copy/move: that is what keeps deletes prompt-free there.
+                var pending = refused
+                if (pending.isNotEmpty() && allowDirectDelete) {
+                    val removed = withContext(Dispatchers.IO) {
+                        FileOperationHelper.deleteMoveSources(context, pending)
+                    }
+                    gone += removed
+                    pending = pending - removed.toSet()
                 }
-                if (refused.isEmpty()) {
-                    snackbarHostState.showSnackbar(trashTemplate.replace("{n}", "${trashed.size}"))
+                if (gone.isNotEmpty()) {
+                    viewModel.deleteImages(gone)
+                }
+                if (pending.isEmpty()) {
+                    snackbarHostState.showSnackbar(
+                        (if (refused.isEmpty()) trashTemplate else directTemplate)
+                            .replace("{n}", "${gone.size}")
+                    )
                     isMultiSelectMode = false
                     selectedImageUris = emptySet()
                     return@launch
                 }
-                // Rows the direct write could not touch (owned by another app,
-                // no All-files access) need the platform's consent route —
-                // except in a clone/Parallel Space profile, where that dialog
-                // is broken; there the delete is completed directly instead,
-                // i.e. the user's "allow" is assumed.
-                val trashRequest = if (!FileOperationHelper.isSecondaryProfile(context) &&
-                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
-                ) {
-                    FileOperationHelper.createTrashRequest(context, refused)
-                } else {
-                    null
-                }
-                if (trashRequest != null) {
-                    pendingDeleteUris = refused
-                    deleteSuccessMessage = trashTemplate
-                    deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
-                } else if (allowDirectDelete) {
-                    val removed = withContext(Dispatchers.IO) {
-                        FileOperationHelper.deleteMoveSources(context, refused)
-                    }
-                    viewModel.deleteImages(removed)
-                    snackbarHostState.showSnackbar(directTemplate.replace("{n}", "${removed.size}"))
-                    if (removed.size < refused.size) {
-                        snackbarHostState.showSnackbar(
-                            "${refused.size - removed.size} item(s) could not be deleted"
-                        )
-                    }
-                    isMultiSelectMode = false
-                    selectedImageUris = emptySet()
-                } else {
-                    // Move source with no recycle bin available: keep the
+                if (!allowDirectDelete) {
+                    // Move source with no silent route available: keep the
                     // original (the verified copy is already at the destination)
                     // instead of an irreversible permanent delete.
                     snackbarHostState.showSnackbar(
-                        "Copied to the destination — originals kept (recycle bin unavailable)"
+                        if (gone.isEmpty()) {
+                            "Copied to the destination — originals kept (no write access to delete them)"
+                        } else {
+                            "Copied ${gone.size}; ${pending.size} original(s) kept (no write access to delete them)"
+                        }
                     )
                     isMultiSelectMode = false
                     selectedImageUris = emptySet()
+                    return@launch
                 }
+                // (3) Nothing silent worked. Ask ONCE for the folder's SAF write
+                // grant: that grant is remembered, so the retry and every later
+                // delete there are silent. Only when a grant already covers the
+                // folder (or the picker is declined) does the platform consent
+                // dialog come in — Android offers no other way to remove media
+                // this app does not own.
+                val folder = withContext(Dispatchers.IO) {
+                    FileOperationHelper.folderNeedingDeleteGrant(context, pending)
+                }
+                if (folder != null && folder.absolutePath !in declinedDeleteFolders) {
+                    retryDeleteUris = pending
+                    retryDeleteFolder = folder
+                    snackbarHostState.showSnackbar(
+                        "Allow access to \"${folder.name}\" once — deletes there will then be silent"
+                    )
+                    deleteTreeLauncher.launch(
+                        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                            addFlags(
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                            )
+                            putExtra(
+                                "android.provider.extra.INITIAL_URI",
+                                SafGrantStore.topLevelDocumentUri(folder)
+                            )
+                        }
+                    )
+                    return@launch
+                }
+                launchTrashConsent(pending, trashTemplate)
             }
         }
     }

@@ -1142,32 +1142,58 @@ object FileOperationHelper {
     }
 
     /**
-     * True when the app runs inside a SECONDARY Android user — HONOR/Huawei
-     * Parallel Space (平行空间), 分身 / dual-app clones, work profiles. Their
-     * ActivityManager cannot reliably resolve the MediaProvider consent
-     * Activity: the "move to trash?" prompt re-appears on every delete and the
-     * launched IntentSender's result can be dropped, so the delete looks like it
-     * keeps asking for permission forever. Delete paths therefore skip the
-     * request dialog there and perform the provider write directly (assuming
-     * the user would confirm) — see [trashMediaSilently].
+     * Delete the file behind [path] with NO dialog, through a persisted SAF
+     * folder grant the user already approved (see
+     * [com.pyqcr.util.SafGrantStore]).
      *
-     * The check reads the profile id straight out of the app's own paths:
-     * the primary profile is always `/data/user/0/...` and
-     * `/storage/emulated/0/...`, while a clone/profile gets
-     * `/data/user/<id>/...` with `<id> != 0`.
+     * This is the one route that can remove media *silently* inside an app
+     * clone / HONOR Parallel Space. There the clone owns neither the MediaStore
+     * row (it was contributed by the main-space app) nor All files access, so
+     * both the direct `IS_TRASHED` write and `ContentResolver.delete` are
+     * refused — Android then only offers its consent dialog. A SAF write grant
+     * on the *folder*, however, lets [DocumentsContract.deleteDocument] remove
+     * the real file without any permission prompt, exactly like the SAF copy
+     * and move paths already do.
+     *
+     * Returns true when the provider reported the document as deleted.
      */
-    fun isSecondaryProfile(context: Context): Boolean {
-        val paths = listOfNotNull(
-            runCatching { context.filesDir?.absolutePath }.getOrNull(),
-            runCatching { context.getExternalFilesDir(null)?.absolutePath }.getOrNull(),
-            runCatching { Environment.getExternalStorageDirectory()?.absolutePath }.getOrNull()
-        )
-        return paths.any { path ->
-            val userId = Regex("/(?:user|emulated)/(\\d+)")
-                .find(path)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            userId != null && userId != 0
+    fun deleteFileViaSaf(context: Context, path: String): Boolean {
+        val file = try {
+            File(path)
+        } catch (e: Exception) {
+            return false
+        }
+        val dir = file.parentFile ?: return false
+        val treeUri = com.pyqcr.util.SafGrantStore.findGrant(context, dir) ?: return false
+        return try {
+            val dirDocId = resolveSafDirDocumentId(context, treeUri, dir)
+            if (dirDocId.isBlank()) return false
+            val fileDocId = findSafChildDocumentId(context, treeUri, dirDocId, file.name)
+                ?: return false
+            val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, fileDocId)
+            DocumentsContract.deleteDocument(context.contentResolver, docUri)
+        } catch (e: Exception) {
+            Log.w(TAG, "SAF delete failed for $path", e)
+            false
         }
     }
+
+    /**
+     * Folder to ask a one-off SAF write grant for, so [uris] can be deleted
+     * silently through [deleteFileViaSaf], or null when every row already sits
+     * under a remembered grant (a missing grant is then not the blocker).
+     */
+    suspend fun folderNeedingDeleteGrant(context: Context, uris: List<String>): File? =
+        withContext(Dispatchers.IO) {
+            for (u in uris) {
+                val path = resolveMediaPath(context, u) ?: continue
+                val dir = File(path).parentFile ?: continue
+                if (com.pyqcr.util.SafGrantStore.findGrant(context, dir) == null) {
+                    return@withContext dir
+                }
+            }
+            null
+        }
 
     /**
      * Move [uris] into the recoverable system recycle bin WITHOUT showing the
@@ -1178,10 +1204,10 @@ object FileOperationHelper {
      * All-files access; rows owned by another app raise
      * `RecoverableSecurityException`, and those URIs are returned untouched.
      *
-     * Used by the Delete action so no "move to trash?" prompt is raised (the
-     * dialog is unreliable inside HONOR Parallel Space). Callers fall back to
-     * the system request — or, in a secondary profile, to a direct delete —
-     * only for the URIs returned here.
+     * Used by the Delete action so no "move to trash?" prompt is raised. Callers
+     * hand the URIs returned here to [deleteMoveSources] (row / real file /
+     * SAF folder grant) and only then to the platform consent request — the
+     * provider refuses a direct flag write for media another app contributed.
      *
      * Returns the URIs that could NOT be trashed.
      */
@@ -1569,12 +1595,15 @@ object FileOperationHelper {
      * Delete move sources directly, with NO system confirmation dialog.
      *
      * A move must leave the file only in the destination, so the caller runs
-     * this after the copy was read back and verified. Two routes, both silent:
+     * this after the copy was read back and verified. Three routes, all silent:
      * the MediaStore row (allowed for rows this app owns and whenever All files
-     * access is granted) and, when the provider refuses, deleting the real file
-     * behind it. The now-stale MediaStore row is cleaned by re-scanning the
-     * deleted path. Returns the URIs that are really gone; anything left stays
-     * in the gallery and is reported, never silently lost.
+     * access is granted), then deleting the real file behind it, then a
+     * [deleteFileViaSaf] delete through a remembered folder grant (the only
+     * route that works inside an app clone / Parallel Space, where the app owns
+     * neither the row nor All files access). The now-stale MediaStore row is
+     * cleaned by re-scanning the deleted path. Returns the URIs that are really
+     * gone; anything left stays in the gallery and is reported, never silently
+     * lost.
      */
     suspend fun deleteMoveSources(context: Context, uris: List<String>): List<String> =
         withContext(Dispatchers.IO) {
@@ -1595,12 +1624,16 @@ object FileOperationHelper {
                 }
                 val path = resolveMediaPath(context, u)
                 if (path != null) {
-                    val removed = try {
+                    val removedByFile = try {
                         File(path).let { it.exists() && it.delete() }
                     } catch (e: Exception) {
                         false
                     }
-                    if (removed) {
+                    // Inside an app clone / Parallel Space neither the row nor
+                    // the raw path is writable, but a remembered SAF grant on
+                    // the folder is — that grant is what makes this silent.
+                    val removedBySaf = !removedByFile && deleteFileViaSaf(context, path)
+                    if (removedByFile || removedBySaf) {
                         try {
                             context.contentResolver.delete(uri, null, null)
                         } catch (_: Exception) {
