@@ -1142,6 +1142,90 @@ object FileOperationHelper {
     }
 
     /**
+     * True when the app runs inside a SECONDARY Android user — HONOR/Huawei
+     * Parallel Space (平行空间), 分身 / dual-app clones, work profiles. Their
+     * ActivityManager cannot reliably resolve the MediaProvider consent
+     * Activity: the "move to trash?" prompt re-appears on every delete and the
+     * launched IntentSender's result can be dropped, so the delete looks like it
+     * keeps asking for permission forever. Delete paths therefore skip the
+     * request dialog there and perform the provider write directly (assuming
+     * the user would confirm) — see [trashMediaSilently].
+     *
+     * The check reads the profile id straight out of the app's own paths:
+     * the primary profile is always `/data/user/0/...` and
+     * `/storage/emulated/0/...`, while a clone/profile gets
+     * `/data/user/<id>/...` with `<id> != 0`.
+     */
+    fun isSecondaryProfile(context: Context): Boolean {
+        val paths = listOfNotNull(
+            runCatching { context.filesDir?.absolutePath }.getOrNull(),
+            runCatching { context.getExternalFilesDir(null)?.absolutePath }.getOrNull(),
+            runCatching { Environment.getExternalStorageDirectory()?.absolutePath }.getOrNull()
+        )
+        return paths.any { path ->
+            val userId = Regex("/(?:user|emulated)/(\\d+)")
+                .find(path)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            userId != null && userId != 0
+        }
+    }
+
+    /**
+     * Move [uris] into the recoverable system recycle bin WITHOUT showing the
+     * platform confirmation dialog: set `IS_TRASHED = 1` directly, which is the
+     * exact write MediaProvider performs when the user confirms a
+     * `createTrashRequest` (it renames the file to `.trashed-<time>-<name>` and
+     * flags the row). This needs the row to be one this app created or
+     * All-files access; rows owned by another app raise
+     * `RecoverableSecurityException`, and those URIs are returned untouched.
+     *
+     * Used by the Delete action so no "move to trash?" prompt is raised (the
+     * dialog is unreliable inside HONOR Parallel Space). Callers fall back to
+     * the system request — or, in a secondary profile, to a direct delete —
+     * only for the URIs returned here.
+     *
+     * Returns the URIs that could NOT be trashed.
+     */
+    suspend fun trashMediaSilently(context: Context, uris: List<String>): List<String> =
+        withContext(Dispatchers.IO) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext uris
+            val failed = mutableListOf<String>()
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_TRASHED, 1)
+            }
+            for (raw in uris) {
+                var trashed = false
+                try {
+                    val parsed = Uri.parse(raw)
+                    val candidates = mutableListOf(parsed)
+                    try {
+                        val volumeUri = MediaStore.getMediaUri(context, parsed)
+                        if (volumeUri != null && volumeUri != parsed) candidates.add(volumeUri)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "could not resolve the volume URI of $parsed", e)
+                    }
+                    for (candidate in candidates) {
+                        val n = try {
+                            context.contentResolver.update(candidate, values, null, null)
+                        } catch (e: Exception) {
+                            // RecoverableSecurityException for a foreign row —
+                            // the caller's fallback covers it.
+                            Log.w(TAG, "silent trash of $candidate refused", e)
+                            -1
+                        }
+                        if (n > 0) {
+                            trashed = true
+                            break
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "trashMediaSilently failed for $raw", e)
+                }
+                if (!trashed) failed += raw
+            }
+            failed
+        }
+
+    /**
      * Restore trashed media by clearing their MediaStore IS_TRASHED flag. Tries
      * the row's own URI first (the bin supplies volume-qualified URIs for
      * secondary-volume rows), then the trash-volume address. This direct write

@@ -887,38 +887,66 @@ fun AlbumScreen(
      * available the originals are KEPT instead of being permanently deleted.
      */
     val trashOrDelete: (List<String>, String, String, Boolean) -> Unit = { uris, trashTemplate, directTemplate, allowDirectDelete ->
-        val deleteDirectly: () -> Unit = {
-            scope.launch {
-                val n = FileOperationHelper.deleteMediaDirect(context, uris)
-                viewModel.deleteImages(uris)
-                snackbarHostState.showSnackbar(directTemplate.replace("{n}", "$n"))
-                isMultiSelectMode = false
-                selectedImageUris = emptySet()
-            }
-        }
         if (uris.isNotEmpty()) {
-            val trashRequest = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                FileOperationHelper.createTrashRequest(context, uris)
-            } else {
-                null
-            }
-            if (trashRequest != null) {
-                pendingDeleteUris = uris
-                deleteSuccessMessage = trashTemplate
-                deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
-            } else if (allowDirectDelete) {
-                deleteDirectly()
-            } else {
-                // Move source with no recycle bin available: keep the
-                // original (the verified copy is already at the destination)
-                // instead of an irreversible permanent delete.
-                scope.launch {
+            scope.launch {
+                // Trash FIRST through the provider write itself (IS_TRASHED = 1)
+                // — no system confirmation dialog. That is exactly what the
+                // dialog does on OK, so the items still land in the recoverable
+                // recycle bin. The dialog is unusable inside HONOR Parallel
+                // Space (it re-appears on every delete and its result can be
+                // lost), so this is the only silent route there.
+                val refused = withContext(Dispatchers.IO) {
+                    FileOperationHelper.trashMediaSilently(context, uris)
+                }
+                val trashed = uris - refused.toSet()
+                if (trashed.isNotEmpty()) {
+                    viewModel.deleteImages(trashed)
+                }
+                if (refused.isEmpty()) {
+                    snackbarHostState.showSnackbar(trashTemplate.replace("{n}", "${trashed.size}"))
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                    return@launch
+                }
+                // Rows the direct write could not touch (owned by another app,
+                // no All-files access) need the platform's consent route —
+                // except in a clone/Parallel Space profile, where that dialog
+                // is broken; there the delete is completed directly instead,
+                // i.e. the user's "allow" is assumed.
+                val trashRequest = if (!FileOperationHelper.isSecondaryProfile(context) &&
+                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
+                ) {
+                    FileOperationHelper.createTrashRequest(context, refused)
+                } else {
+                    null
+                }
+                if (trashRequest != null) {
+                    pendingDeleteUris = refused
+                    deleteSuccessMessage = trashTemplate
+                    deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
+                } else if (allowDirectDelete) {
+                    val removed = withContext(Dispatchers.IO) {
+                        FileOperationHelper.deleteMoveSources(context, refused)
+                    }
+                    viewModel.deleteImages(removed)
+                    snackbarHostState.showSnackbar(directTemplate.replace("{n}", "${removed.size}"))
+                    if (removed.size < refused.size) {
+                        snackbarHostState.showSnackbar(
+                            "${refused.size - removed.size} item(s) could not be deleted"
+                        )
+                    }
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                } else {
+                    // Move source with no recycle bin available: keep the
+                    // original (the verified copy is already at the destination)
+                    // instead of an irreversible permanent delete.
                     snackbarHostState.showSnackbar(
                         "Copied to the destination — originals kept (recycle bin unavailable)"
                     )
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
                 }
-                isMultiSelectMode = false
-                selectedImageUris = emptySet()
             }
         }
     }

@@ -525,33 +525,60 @@ fun ImageDetailScreen(
      * Mirrors the album batch menu's trashOrDelete.
      */
     val trashUris: (List<String>, String, String, Boolean) -> Unit = { uris, trashMsg, directMsg, allowDirectDelete ->
-        val deleteDirectly: () -> Unit = {
-            coroutineScope.launch {
-                FileOperationHelper.deleteMediaDirect(context, uris)
-                snackbarHostState.showSnackbar(directMsg)
-                withContext(Dispatchers.IO) {
-                    repository.refreshImagesFromMediaStore()
-                }
-                onBack()
-            }
-        }
         if (uris.isNotEmpty()) {
-            val trashRequest = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                FileOperationHelper.createTrashRequest(context, uris)
-            } else {
-                null
-            }
-            if (trashRequest != null) {
-                pendingDeleteUris = uris
-                pendingDeleteMessage = trashMsg
-                deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
-            } else if (allowDirectDelete) {
-                deleteDirectly()
-            } else {
-                // A move/copy source must never be permanently deleted just
-                // because no recycle bin is available — keep the original and
-                // tell the user the operation was a copy.
-                coroutineScope.launch {
+            coroutineScope.launch {
+                // Trash through the provider write itself (IS_TRASHED = 1) —
+                // no system confirmation dialog. Same effect as confirming the
+                // dialog (recoverable recycle bin), and the only silent route
+                // inside HONOR Parallel Space where that dialog keeps popping
+                // up and its result can be dropped.
+                val refused = withContext(Dispatchers.IO) {
+                    FileOperationHelper.trashMediaSilently(context, uris)
+                }
+                val trashed = uris - refused.toSet()
+                if (refused.isEmpty()) {
+                    snackbarHostState.showSnackbar(trashMsg)
+                    withContext(Dispatchers.IO) {
+                        repository.refreshImagesFromMediaStore()
+                    }
+                    onBack()
+                    return@launch
+                }
+                if (trashed.isNotEmpty()) {
+                    withContext(Dispatchers.IO) {
+                        repository.refreshImagesFromMediaStore()
+                    }
+                }
+                // Survivors need the platform consent route — unless this is a
+                // clone/Parallel Space profile, where that dialog is broken, so
+                // the user's "allow" is assumed and the delete is direct.
+                val trashRequest = if (!FileOperationHelper.isSecondaryProfile(context) &&
+                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
+                ) {
+                    FileOperationHelper.createTrashRequest(context, refused)
+                } else {
+                    null
+                }
+                if (trashRequest != null) {
+                    pendingDeleteUris = refused
+                    pendingDeleteMessage = trashMsg
+                    deleteLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
+                } else if (allowDirectDelete) {
+                    val removed = withContext(Dispatchers.IO) {
+                        FileOperationHelper.deleteMoveSources(context, refused)
+                    }
+                    snackbarHostState.showSnackbar(
+                        if (removed.size == refused.size) directMsg
+                        else "${refused.size - removed.size} item(s) could not be deleted"
+                    )
+                    withContext(Dispatchers.IO) {
+                        repository.refreshImagesFromMediaStore()
+                    }
+                    onBack()
+                } else {
+                    // A move/copy source must never be permanently deleted just
+                    // because no recycle bin is available — keep the original
+                    // and tell the user the operation was a copy.
                     snackbarHostState.showSnackbar(
                         "Copied — original kept (recycle bin unavailable)"
                     )
