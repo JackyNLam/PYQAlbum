@@ -2,10 +2,6 @@ package com.pyqcr.util
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
-import android.media.ExifInterface
-import android.net.Uri
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
@@ -29,75 +25,12 @@ object QrCodeReader {
 
     /** Decode the first QR code in [source] (content:// URI or absolute file path). */
     suspend fun decode(context: Context, source: String): String? = withContext(Dispatchers.IO) {
-        val bitmap = loadBitmap(context, source) ?: return@withContext null
+        val bitmap = ImageSourceBitmap.load(context, source, MAX_DECODE_DIM)
+            ?: return@withContext null
         try {
             decodeBitmap(bitmap)
         } finally {
             bitmap.recycle()
-        }
-    }
-
-    private fun loadBitmap(context: Context, source: String): Bitmap? {
-        val raw = try {
-            if (source.startsWith("content://")) {
-                context.contentResolver.openInputStream(Uri.parse(source))?.use {
-                    BitmapFactory.decodeStream(it)
-                }
-            } else {
-                BitmapFactory.decodeFile(source)
-            }
-        } catch (e: Exception) {
-            null
-        } ?: return null
-
-        var bitmap = downscale(raw)
-        val rotation = exifRotation(context, source)
-        if (rotation != 0f) {
-            val matrix = Matrix().apply { postRotate(rotation) }
-            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-            if (rotated !== bitmap) bitmap.recycle()
-            bitmap = rotated
-        }
-        return bitmap
-    }
-
-    private fun downscale(src: Bitmap): Bitmap {
-        val longest = maxOf(src.width, src.height)
-        if (longest <= MAX_DECODE_DIM) return src
-        val factor = MAX_DECODE_DIM.toFloat() / longest
-        val scaled = Bitmap.createScaledBitmap(
-            src,
-            (src.width * factor).toInt().coerceAtLeast(1),
-            (src.height * factor).toInt().coerceAtLeast(1),
-            true
-        )
-        if (scaled !== src) src.recycle()
-        return scaled
-    }
-
-    private fun exifRotation(context: Context, source: String): Float {
-        val orientation = try {
-            if (source.startsWith("content://")) {
-                context.contentResolver.openInputStream(Uri.parse(source))?.use {
-                    ExifInterface(it).getAttributeInt(
-                        ExifInterface.TAG_ORIENTATION,
-                        ExifInterface.ORIENTATION_NORMAL
-                    )
-                }
-            } else {
-                ExifInterface(source).getAttributeInt(
-                    ExifInterface.TAG_ORIENTATION,
-                    ExifInterface.ORIENTATION_NORMAL
-                )
-            }
-        } catch (e: Exception) {
-            null
-        }
-        return when (orientation) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-            ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-            ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-            else -> 0f
         }
     }
 

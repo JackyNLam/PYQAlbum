@@ -124,6 +124,11 @@ dependencies {
     // QR code decoding (pure Java — no Play Services / network needed)
     implementation("com.google.zxing:core:3.5.3")
 
+    // On-device text recognition (OCR). Bundled Chinese model (also reads
+    // Latin) so it works with no Play Services download and no network —
+    // ~4 MB per architecture.
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

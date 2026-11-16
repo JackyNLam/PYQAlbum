@@ -74,9 +74,12 @@ import com.pyqcr.ui.component.QrCodeResultDialog
 import com.pyqcr.ui.component.QrScanResult
 import com.pyqcr.ui.component.RatingBar
 import com.pyqcr.ui.component.TagChip
+import com.pyqcr.ui.component.TextExtractDialog
+import com.pyqcr.ui.component.TextExtractEmptyDialog
 import com.pyqcr.ui.component.VideoPlayer
 import com.pyqcr.ui.util.FileOperationHelper
 import com.pyqcr.util.FavouriteStore
+import com.pyqcr.util.ImageTextReader
 import com.pyqcr.util.MotionPhotoExtractor
 import com.pyqcr.util.QrCodeReader
 import com.pyqcr.util.SafGrantStore
@@ -151,6 +154,10 @@ fun ImageDetailScreen(
     var qrScanning by remember(imageUri) { mutableStateOf(false) }
     var qrResults by remember(imageUri) { mutableStateOf<List<QrScanResult>?>(null) }
     var qrEmpty by remember(imageUri) { mutableStateOf(false) }
+    // On-device OCR from the swipe-up bar (offline ML Kit, no API key).
+    var textExtracting by remember(imageUri) { mutableStateOf(false) }
+    var extractedText by remember(imageUri) { mutableStateOf<String?>(null) }
+    var textEmpty by remember(imageUri) { mutableStateOf(false) }
     // Set when a move destination failed the write probe — the picker below
     // opens so the write can succeed through a granted tree instead.
     var retryFolderPick by remember(imageUri) { mutableStateOf<File?>(null) }
@@ -169,6 +176,20 @@ fun ImageDetailScreen(
                     ?: runCatching { FileOperationHelper.getFileName(context, imageUri) }
                         .getOrDefault("Image")
                 qrResults = listOf(QrScanResult(label, text))
+            }
+        }
+    }
+
+    fun extractText() {
+        if (textExtracting) return
+        coroutineScope.launch {
+            textExtracting = true
+            val text = withContext(Dispatchers.IO) { ImageTextReader.extract(context, imageUri) }
+            textExtracting = false
+            if (text == null) {
+                textEmpty = true
+            } else {
+                extractedText = text
             }
         }
     }
@@ -1230,6 +1251,14 @@ fun ImageDetailScreen(
                             DetailIconButton(Icons.Default.DriveFileRenameOutline, "Rename") {
                                 openRenameDialog()
                             }
+                            // On-device OCR (offline ML Kit) — one photo at a time.
+                            if (!isVideo) {
+                                DetailIconButton(
+                                    Icons.Default.TextFields,
+                                    if (textExtracting) "Reading…" else "Text",
+                                    active = textExtracting
+                                ) { extractText() }
+                            }
                             // Read a QR code straight from the photo on screen
                             // (moved here from the folder/vault batch menus).
                             if (!isVideo) {
@@ -1292,6 +1321,18 @@ fun ImageDetailScreen(
             }
             if (qrEmpty) {
                 QrCodeEmptyDialog(onDismiss = { qrEmpty = false })
+            }
+            extractedText?.let { text ->
+                TextExtractDialog(
+                    label = imageItem?.displayName
+                        ?: runCatching { FileOperationHelper.getFileName(context, imageUri) }
+                            .getOrDefault("Image"),
+                    text = text,
+                    onDismiss = { extractedText = null }
+                )
+            }
+            if (textEmpty) {
+                TextExtractEmptyDialog(onDismiss = { textEmpty = false })
             }
 
             // Info dialog — metadata, path, rating and AI score (everything the
