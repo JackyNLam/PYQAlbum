@@ -1171,7 +1171,9 @@ fun VaultScreen(onBack: () -> Unit) {
                                         if (verticalAccum < -80f) {
                                             showVaultActions = true
                                         } else if (verticalAccum > 80f) {
-                                            showVaultActions = false
+                                            // Swipe down closes the viewer and
+                                            // returns to the folder thumbnails.
+                                            closeViewer()
                                         } else if (horizontalAccum < -80f) {
                                             navigateViewer(1)
                                         } else if (horizontalAccum > 80f) {
@@ -1241,7 +1243,7 @@ fun VaultScreen(onBack: () -> Unit) {
                             }
                             if (!showVaultActions) {
                                 Text(
-                                    text = "Swipe: up actions · left/right browse",
+                                    text = "Swipe: up actions · down close · left/right browse",
                                     color = Color.White.copy(alpha = 0.75f),
                                     style = MaterialTheme.typography.labelMedium,
                                     modifier = Modifier

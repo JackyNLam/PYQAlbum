@@ -3,12 +3,15 @@ package com.pyqcr
 import android.Manifest
 import android.app.Activity
 import android.content.ClipData
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,8 +31,16 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Label
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -48,29 +59,49 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material3.Icon
-import androidx.activity.compose.rememberLauncherForActivityResult
 import coil3.compose.AsyncImage
+import com.pyqcr.data.db.AppDatabase
 import com.pyqcr.ui.theme.PyqCrTheme
 import com.pyqcr.util.PermissionHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** One image offered by the picker (content URI + display name). */
-private data class PickItem(val uri: String, val name: String)
+/** One image offered by the picker. */
+private data class PickPhoto(val uri: String, val name: String, val folder: String)
+
+/** A device folder (MediaStore bucket) with its images, newest first. */
+private data class PickFolder(val name: String, val photos: List<PickPhoto>) {
+    val cover: PickPhoto? get() = photos.firstOrNull()
+}
+
+/** A user tag with the images it is attached to. */
+private data class PickTag(val id: Long, val name: String, val photos: List<PickPhoto>) {
+    val cover: PickPhoto? get() = photos.firstOrNull()
+}
+
+/** Everything the picker can browse: all photos, folders and tags. */
+private data class PickerData(
+    val photos: List<PickPhoto>,
+    val folders: List<PickFolder>,
+    val tags: List<PickTag>
+)
+
+private enum class PickTab(val label: String) {
+    FOLDERS("Folders"),
+    TAGS("Tags"),
+    ALL("All photos")
+}
 
 /**
  * Exported image picker.
  *
- * Before this existed PYQAlbum only registered MAIN/LAUNCHER, so when a browser
- * (or any other app) asked for a photo via ACTION_GET_CONTENT / ACTION_PICK the
- * app never appeared in the chooser. This activity answers those requests with
- * a small grid of the device's images and returns the chosen content URI(s)
- * with a read grant — the contract every picker client expects.
+ * PYQAlbum registers exported ACTION_GET_CONTENT / ACTION_PICK filters in the
+ * manifest, so browsers and other apps can offer it as a photo source. This
+ * activity answers those requests with a browsable view of the library — by
+ * folder, by tag or all photos — and returns the chosen content URI(s) with a
+ * read grant, the contract every picker client expects.
  */
 class PickImageActivity : ComponentActivity() {
 
@@ -152,12 +183,32 @@ private fun PickImageScreen(
         if (!granted) permissionLauncher.launch(permission)
     }
 
-    var allImages by remember { mutableStateOf<List<PickItem>?>(null) }
+    var data by remember { mutableStateOf<PickerData?>(null) }
     var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var tab by remember { mutableStateOf(PickTab.FOLDERS) }
+    var openFolder by remember { mutableStateOf<String?>(null) }
+    var openTagId by remember { mutableStateOf<Long?>(null) }
 
     LaunchedEffect(granted) {
         if (!granted) return@LaunchedEffect
-        allImages = withContext(Dispatchers.IO) { loadImages(context) }
+        data = withContext(Dispatchers.IO) { loadPickerData(context) }
+    }
+
+    val openFolderEntry = data?.folders?.firstOrNull { it.name == openFolder }
+    val openTagEntry = data?.tags?.firstOrNull { it.id == openTagId }
+    val openCollectionName = openFolderEntry?.name ?: openTagEntry?.name
+    val collectionPhotos = openFolderEntry?.photos ?: openTagEntry?.photos
+
+    BackHandler(enabled = openCollectionName != null) {
+        openFolder = null
+        openTagId = null
+    }
+
+    val toggle: (PickPhoto) -> Unit = { photo ->
+        selected = if (photo.uri in selected) selected - photo.uri else selected + photo.uri
+    }
+    val tap: (PickPhoto) -> Unit = { photo ->
+        if (allowMultiple) toggle(photo) else onPick(listOf(Uri.parse(photo.uri)))
     }
 
     Column(
@@ -171,92 +222,349 @@ private fun PickImageScreen(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (openCollectionName != null) {
+                IconButton(onClick = {
+                    openFolder = null
+                    openTagId = null
+                }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+            }
             Text(
-                text = "Choose from PYQAlbum",
+                text = openCollectionName ?: "Choose from PYQAlbum",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
             TextButton(onClick = onCancel) { Text("Cancel") }
         }
 
+        val current = data
         when {
             !granted -> PermissionBody(askAgain) { permissionLauncher.launch(permission) }
-            allImages == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            current == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
-            allImages!!.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    "No photos found on this device",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            collectionPhotos != null -> {
+                if (collectionPhotos.isEmpty()) {
+                    EmptyBody("No photos in this ${if (openTagEntry != null) "tag" else "folder"}")
+                } else {
+                    PhotoGrid(
+                        photos = collectionPhotos,
+                        allowMultiple = allowMultiple,
+                        selected = selected,
+                        onTap = tap,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
             else -> {
-                val list = allImages!!
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(104.dp),
-                    contentPadding = PaddingValues(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                    verticalArrangement = Arrangement.spacedBy(3.dp),
-                    modifier = Modifier.weight(1f)
+                BrowseTabs(tab) { tab = it }
+                when (tab) {
+                    PickTab.FOLDERS -> {
+                        if (current.folders.isEmpty()) {
+                            EmptyBody("No photo folders found")
+                        } else {
+                            FolderGrid(
+                                folders = current.folders,
+                                allowMultiple = allowMultiple,
+                                selected = selected,
+                                onOpen = { openFolder = it.name },
+                                onTapPhoto = tap,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                    PickTab.TAGS -> {
+                        if (current.tags.isEmpty()) {
+                            EmptyBody("No tags yet — add tags in PYQAlbum first")
+                        } else {
+                            TagGrid(current.tags, Modifier.weight(1f)) { openTagId = it.id }
+                        }
+                    }
+                    PickTab.ALL -> {
+                        if (current.photos.isEmpty()) {
+                            EmptyBody("No photos found on this device")
+                        } else {
+                            PhotoGrid(
+                                photos = current.photos,
+                                allowMultiple = allowMultiple,
+                                selected = selected,
+                                onTap = tap,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (allowMultiple && data != null) {
+            Button(
+                onClick = { onPick(selected.map { Uri.parse(it) }) },
+                enabled = selected.isNotEmpty(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp)
+            ) {
+                Text(
+                    if (selected.isEmpty()) "Select photos"
+                    else "Add ${selected.size} photo(s)"
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BrowseTabs(current: PickTab, onSelect: (PickTab) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        PickTab.entries.forEach { entry ->
+            val active = entry == current
+            TextButton(
+                onClick = { onSelect(entry) },
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        if (active) MaterialTheme.colorScheme.secondaryContainer
+                        else Color.Transparent
+                    )
+            ) {
+                Text(
+                    entry.label,
+                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderGrid(
+    folders: List<PickFolder>,
+    allowMultiple: Boolean,
+    selected: Set<String>,
+    onOpen: (PickFolder) -> Unit,
+    onTapPhoto: (PickPhoto) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(150.dp),
+        contentPadding = PaddingValues(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = modifier
+    ) {
+        items(folders, key = { it.name }) { folder ->
+            Column(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { onOpen(folder) }
+                    .padding(2.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
                 ) {
-                    items(list, key = { it.uri }) { item ->
-                        val uri = Uri.parse(item.uri)
-                        val isSelected = item.uri in selected
+                    val cover = folder.cover
+                    if (cover != null) {
+                        AsyncImage(
+                            model = Uri.parse(cover.uri),
+                            contentDescription = folder.name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(
+                            Icons.Filled.Folder,
+                            contentDescription = null,
+                            modifier = Modifier.align(Alignment.Center)
+                        )
+                    }
+                    // A folder is a container, not a photo: tapping it opens the
+                    // folder. The overlay chip jumps straight to its first photo.
+                    if (!allowMultiple && folder.photos.isNotEmpty()) {
                         Box(
                             modifier = Modifier
-                                .aspectRatio(1f)
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable {
-                                    if (allowMultiple) {
-                                        selected = if (isSelected) selected - item.uri
-                                        else selected + item.uri
-                                    } else {
-                                        onPick(listOf(uri))
-                                    }
-                                }
+                                .align(Alignment.BottomEnd)
+                                .padding(6.dp)
+                                .background(Color(0x99000000), RoundedCornerShape(6.dp))
+                                .clickable { onTapPhoto(folder.photos.first()) }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
                         ) {
-                            AsyncImage(
-                                model = uri,
-                                contentDescription = item.name,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
+                            Text(
+                                "Pick first",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelSmall
                             )
-                            if (allowMultiple && isSelected) {
-                                Box(
-                                    Modifier
-                                        .fillMaxSize()
-                                        .background(Color.Black.copy(alpha = 0.35f))
-                                )
-                                Icon(
-                                    imageVector = Icons.Filled.CheckCircle,
-                                    contentDescription = "Selected",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(6.dp)
+                        }
+                    }
+                    if (allowMultiple) {
+                        val count = folder.photos.count { it.uri in selected }
+                        if (count > 0) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(6.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.primary,
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    "$count",
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    style = MaterialTheme.typography.labelSmall
                                 )
                             }
                         }
                     }
                 }
+                Text(
+                    text = folder.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp, start = 2.dp)
+                )
+                Text(
+                    text = "${folder.photos.size} photo(s)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 2.dp, bottom = 2.dp)
+                )
+            }
+        }
+    }
+}
 
-                if (allowMultiple) {
-                    Button(
-                        onClick = { onPick(selected.map { Uri.parse(it) }) },
-                        enabled = selected.isNotEmpty(),
+@Composable
+private fun TagGrid(
+    tags: List<PickTag>,
+    modifier: Modifier = Modifier,
+    onOpen: (PickTag) -> Unit
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(150.dp),
+        contentPadding = PaddingValues(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = modifier
+    ) {
+        items(tags, key = { it.id }) { tag ->
+            Column(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .clickable { onOpen(tag) }
+                    .padding(10.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Label,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    Spacer(Modifier.padding(4.dp))
+                    Text(
+                        text = tag.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.padding(2.dp))
+                Text(
+                    text = "${tag.photos.size} photo(s)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                val cover = tag.cover
+                if (cover != null) {
+                    AsyncImage(
+                        model = Uri.parse(cover.uri),
+                        contentDescription = tag.name,
+                        contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp)
-                    ) {
-                        Text(
-                            if (selected.isEmpty()) "Select photos"
-                            else "Add ${selected.size} photo(s)"
-                        )
-                    }
+                            .padding(top = 6.dp)
+                            .aspectRatio(1.6f)
+                            .clip(RoundedCornerShape(6.dp))
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PhotoGrid(
+    photos: List<PickPhoto>,
+    allowMultiple: Boolean,
+    selected: Set<String>,
+    onTap: (PickPhoto) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(104.dp),
+        contentPadding = PaddingValues(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+        modifier = modifier
+    ) {
+        items(photos, key = { it.uri }) { item ->
+            val isSelected = item.uri in selected
+            Box(
+                modifier = Modifier
+                    .aspectRatio(1f)
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { onTap(item) }
+            ) {
+                AsyncImage(
+                    model = Uri.parse(item.uri),
+                    contentDescription = item.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                if (allowMultiple && isSelected) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.35f))
+                    )
+                    Icon(
+                        imageVector = Icons.Filled.CheckCircle,
+                        contentDescription = "Selected",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyBody(message: String) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Text(message, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -284,11 +592,13 @@ private fun PermissionBody(askAgain: Boolean, onRequest: () -> Unit) {
 }
 
 /** Device images, newest first, excluding trashed rows on Android 11+. */
-private fun loadImages(context: android.content.Context): List<PickItem> {
-    val out = mutableListOf<PickItem>()
+private fun loadImages(context: Context): List<PickPhoto> {
+    val out = mutableListOf<PickPhoto>()
+    val bucketColumn = MediaStore.Images.Media.BUCKET_DISPLAY_NAME
     val projection = arrayOf(
         MediaStore.Images.Media._ID,
-        MediaStore.Images.Media.DISPLAY_NAME
+        MediaStore.Images.Media.DISPLAY_NAME,
+        bucketColumn
     )
     val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         "${MediaStore.Images.Media.IS_TRASHED} = 0"
@@ -303,17 +613,50 @@ private fun loadImages(context: android.content.Context): List<PickItem> {
         )?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val nameCol = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+            val bucketCol = cursor.getColumnIndex(bucketColumn)
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
                 val name = if (nameCol >= 0) cursor.getString(nameCol) else null
+                val bucket = if (bucketCol >= 0) cursor.getString(bucketCol) else null
                 val uri = android.content.ContentUris.withAppendedId(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id
                 )
-                out += PickItem(uri.toString(), name ?: "Image")
+                out += PickPhoto(
+                    uri = uri.toString(),
+                    name = name ?: "Image",
+                    folder = bucket?.takeIf { it.isNotBlank() } ?: "Other"
+                )
             }
         }
     } catch (e: Exception) {
         // An unreadable provider must not crash the picker — return what we got.
     }
     return out
+}
+
+/** All photos plus the folder and tag groupings, loaded off the main thread. */
+private fun loadPickerData(context: Context): PickerData {
+    val photos = loadImages(context)
+    val byUri = photos.associateBy { it.uri }
+
+    val folders = photos
+        .groupBy { it.folder }
+        .map { (name, list) -> PickFolder(name, list) }
+        .sortedBy { it.name.lowercase() }
+
+    val tags = try {
+        val dao = AppDatabase.getInstance(context).tagDao()
+        dao.getAllTagsOnce().mapNotNull { tag ->
+            val uris = dao.getImageUrisForTag(tag.id)
+            val tagged = uris.map { uri ->
+                byUri[uri] ?: PickPhoto(uri, uri.substringAfterLast('/'), "")
+            }
+            if (tagged.isEmpty()) null else PickTag(tag.id, tag.name, tagged)
+        }
+    } catch (e: Exception) {
+        // A missing/unreadable database must not crash the picker.
+        emptyList()
+    }
+
+    return PickerData(photos, folders, tags)
 }
