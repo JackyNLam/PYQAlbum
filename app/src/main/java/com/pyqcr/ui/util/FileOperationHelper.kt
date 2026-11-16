@@ -1179,6 +1179,82 @@ object FileOperationHelper {
     }
 
     /**
+     * How far a delete got, and what the screen should ask the user next.
+     *
+     * Android only lets an app remove media it did not contribute through two
+     * routes: All files access, or a SAF write grant on the containing folder.
+     * [attemptDelete] walks them in that order so the "move to trash?" consent
+     * dialog is normally never needed.
+     */
+    sealed class DeleteOutcome {
+        /** Nothing left to do. [removed] = really gone, [trashed] = recyclable bin. */
+        data class Done(val removed: List<String>, val trashed: List<String>) : DeleteOutcome()
+
+        /** Needs the one-time All files access grant before rows can go. */
+        data class NeedsAllFiles(val remaining: List<String>) : DeleteOutcome()
+
+        /** Needs a one-time SAF write grant on [folder]. */
+        data class NeedsFolderGrant(
+            val folder: File,
+            val remaining: List<String>
+        ) : DeleteOutcome()
+
+        /** Last resort: the platform's own trash/delete consent dialog. */
+        data class NeedsConsent(val remaining: List<String>) : DeleteOutcome()
+    }
+
+    /**
+     * Delete [uris] with as little prompting as possible.
+     *
+     * 1. [trashMediaSilently] — direct `IS_TRASHED = 1` write, i.e. the
+     *    recoverable recycle bin, no dialog. Works for the app's own rows and
+     *    whenever All files access is granted.
+     * 2. [deleteMoveSources] — row delete, then the real file, then
+     *    [deleteFileViaSaf] through a remembered folder grant. This is the route
+     *    that works inside an app clone / HONOR Parallel Space.
+     * 3. Everything still left is explained back to the caller, which asks for
+     *    All files access once, then for the folder grant once, and only then
+     *    falls back to the platform consent dialog.
+     *
+     * [allowAllFilesPrompt] / [allowFolderPrompt] let the caller suppress a
+     * prompt it has already shown; [declinedFolders] holds folders whose picker
+     * the user cancelled, so the app does not nag about them again.
+     */
+    suspend fun attemptDelete(
+        context: Context,
+        uris: List<String>,
+        allowAllFilesPrompt: Boolean = true,
+        allowFolderPrompt: Boolean = true,
+        declinedFolders: Set<String> = emptySet()
+    ): DeleteOutcome = withContext(Dispatchers.IO) {
+        if (uris.isEmpty()) return@withContext DeleteOutcome.Done(emptyList(), emptyList())
+
+        val refused = trashMediaSilently(context, uris)
+        val trashed = uris.filter { it !in refused }
+        var remaining = refused
+        if (remaining.isNotEmpty()) {
+            val removed = deleteMoveSources(context, remaining)
+            remaining = remaining.filter { it !in removed }
+            if (remaining.isEmpty()) {
+                return@withContext DeleteOutcome.Done(trashed + removed, trashed)
+            }
+        }
+        if (allowAllFilesPrompt &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            !com.pyqcr.util.PermissionHelper.hasAllFilesAccess()
+        ) {
+            return@withContext DeleteOutcome.NeedsAllFiles(remaining)
+        }
+        if (allowFolderPrompt) {
+            val folder = folderNeedingDeleteGrant(context, remaining)
+            if (folder != null && folder.absolutePath !in declinedFolders) {
+                return@withContext DeleteOutcome.NeedsFolderGrant(folder, remaining)
+            }
+        }
+        DeleteOutcome.NeedsConsent(remaining)
+    }
+
+    /**
      * Folder to ask a one-off SAF write grant for, so [uris] can be deleted
      * silently through [deleteFileViaSaf], or null when every row already sits
      * under a remembered grant (a missing grant is then not the blocker).

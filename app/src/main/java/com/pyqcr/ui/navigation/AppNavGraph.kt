@@ -22,6 +22,7 @@ object Routes {
     const val AI_RATING = "ai_rating?imageUri={imageUri}"
     const val AI_EDIT = "ai_edit"
     const val IMAGE_EDIT = "image_edit"
+    const val WECHAT_GRID = "wechat_grid"
     const val AI_SELECT = "ai_select"
     const val BATCH_EDIT = "batch_edit/{mode}"
     const val VAULT = "vault"
@@ -96,6 +97,9 @@ fun AppNavGraph() {
                 },
                 onNavigateToImageEdit = {
                     navController.navigate(Routes.IMAGE_EDIT)
+                },
+                onNavigateToWechatGrid = {
+                    navController.navigate(Routes.WECHAT_GRID)
                 },
                 onNavigateToVault = {
                     navController.navigate(Routes.VAULT)
@@ -200,6 +204,12 @@ fun AppNavGraph() {
         composable(Routes.IMAGE_EDIT) {
             ImageEditScreen(
                 onBack = { popIfCurrent(Routes.IMAGE_EDIT) }
+            )
+        }
+
+        composable(Routes.WECHAT_GRID) {
+            WechatGridScreen(
+                onBack = { popIfCurrent(Routes.WECHAT_GRID) }
             )
         }
 

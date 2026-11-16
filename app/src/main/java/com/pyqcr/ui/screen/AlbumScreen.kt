@@ -136,6 +136,7 @@ fun AlbumScreen(
     onNavigateToAiSelection: () -> Unit,
     onNavigateToAiEdit: () -> Unit = {},
     onNavigateToImageEdit: () -> Unit = {},
+    onNavigateToWechatGrid: () -> Unit = {},
     onNavigateToVault: () -> Unit = {},
     viewModel: AlbumViewModel = viewModel()
 ) {
@@ -188,6 +189,7 @@ fun AlbumScreen(
         drawerState.snapTo(DrawerValue.Closed)
         when (target) {
             "image_edit" -> onNavigateToImageEdit()
+            "wechat_grid" -> onNavigateToWechatGrid()
             "ai_edit" -> onNavigateToAiEdit()
             "ai_rating" -> onNavigateToAiSelection()
             "vault" -> onNavigateToVault()
@@ -608,17 +610,22 @@ fun AlbumScreen(
         deleteSuccessMessage = "Deleted {n} image(s)"
     }
 
-    // A delete that no silent route could finish: ask ONCE for the file's
-    // top-level folder in the system picker. The SAF write grant is remembered
-    // (SafGrantStore), so the retry — and every later delete in that folder —
-    // runs silently. This is the only way to remove media this app does not own
-    // without the platform consent dialog popping up on every delete.
-    var retryDeleteUris by remember { mutableStateOf<List<String>?>(null) }
-    var retryDeleteTree by remember { mutableStateOf<Uri?>(null) }
+    // ---- delete orchestration -------------------------------------------
+    //
+    // A delete runs as a small state machine: attemptDelete() removes what it
+    // can with no prompt (recycle-bin write, row/file delete, remembered SAF
+    // grant) and reports what it still needs. Asking for All files access ONCE
+    // is what makes every later delete silent — inside HONOR Parallel Space it
+    // is the only way past the repeated "move to trash?" dialog, because a
+    // clone can never inherit the main profile's grant. The folder grant and
+    // the platform dialog remain as fallbacks.
+    var deleteJob by remember { mutableStateOf<DeleteJob?>(null) }
+    var deleteJobInFlight by remember { mutableStateOf<DeleteJob?>(null) }
+    var pendingAllFilesDelete by remember { mutableStateOf<List<String>?>(null) }
+    var pendingFolderDelete by remember { mutableStateOf<List<String>?>(null) }
     var retryDeleteFolder by remember { mutableStateOf<File?>(null) }
-    // Folders whose grant the user already declined in this session — asking
-    // again on every delete would be nagging; those fall straight through to
-    // the platform consent dialog.
+    // Folders whose picker the user already cancelled — one ask per folder,
+    // then straight to the platform consent dialog.
     val declinedDeleteFolders = remember { mutableStateListOf<String>() }
 
     /** Ask the platform for consent to trash [pending] (API 30+). */
@@ -641,15 +648,36 @@ fun AlbumScreen(
         deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
     }
 
-    // One-off folder grant for deletes: the picked tree is remembered, then the
-    // delete is retried through it (silent). Declining falls back to the
-    // platform consent dialog.
+    // All files access, requested for DELETES specifically (copy/move has its
+    // own launcher). Once granted, the silent bin write and the direct delete
+    // both succeed and no dialog ever appears again.
+    val deleteAllFilesLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        val job = deleteJobInFlight
+        deleteJobInFlight = null
+        val pending = pendingAllFilesDelete
+        pendingAllFilesDelete = null
+        if (job != null) {
+            deleteJob = job.copy(
+                uris = pending ?: job.uris,
+                askAllFiles = false
+            )
+        }
+    }
+
+    // One-off folder grant for deletes: the system remembers the tree, so the
+    // retry — and every later delete there — is silent.
     val deleteTreeLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val tree = result.data?.data
-        val pending = retryDeleteUris
-        if (result.resultCode == android.app.Activity.RESULT_OK && tree != null) {
+        val job = deleteJobInFlight
+        deleteJobInFlight = null
+        val pending = pendingFolderDelete
+        pendingFolderDelete = null
+        val granted = result.resultCode == android.app.Activity.RESULT_OK && tree != null
+        if (granted && tree != null) {
             try {
                 context.contentResolver.takePersistableUriPermission(
                     tree,
@@ -659,36 +687,108 @@ fun AlbumScreen(
             } catch (e: Exception) {
                 Log.w("AlbumScreen", "takePersistableUriPermission failed", e)
             }
-            retryDeleteTree = tree
         } else {
             retryDeleteFolder?.let { declinedDeleteFolders += it.absolutePath }
-            retryDeleteFolder = null
-            retryDeleteUris = null
-            retryDeleteTree = null
-            if (!pending.isNullOrEmpty()) launchTrashConsent(pending)
+        }
+        retryDeleteFolder = null
+        if (job != null) {
+            deleteJob = job.copy(
+                uris = pending ?: job.uris,
+                askAllFiles = false,
+                askFolder = granted
+            )
         }
     }
 
-    LaunchedEffect(retryDeleteUris, retryDeleteTree) {
-        val pending = retryDeleteUris ?: return@LaunchedEffect
-        if (retryDeleteTree == null) return@LaunchedEffect
-        retryDeleteUris = null
-        retryDeleteTree = null
-        retryDeleteFolder = null
-        val removed = withContext(Dispatchers.IO) {
-            FileOperationHelper.deleteMoveSources(context, pending)
+    LaunchedEffect(deleteJob) {
+        val job = deleteJob ?: return@LaunchedEffect
+        deleteJob = null
+        deleteJobInFlight = job
+        val outcome = withContext(Dispatchers.IO) {
+            FileOperationHelper.attemptDelete(
+                context = context,
+                uris = job.uris,
+                allowAllFilesPrompt = job.askAllFiles,
+                allowFolderPrompt = job.askFolder,
+                declinedFolders = declinedDeleteFolders.toSet()
+            )
         }
-        if (removed.isNotEmpty()) {
-            viewModel.deleteImages(removed)
-            viewModel.refreshImages()
-        }
-        val leftovers = pending - removed.toSet()
-        if (leftovers.isEmpty()) {
-            snackbarHostState.showSnackbar("Deleted ${removed.size} image(s)")
-            isMultiSelectMode = false
-            selectedImageUris = emptySet()
-        } else {
-            launchTrashConsent(leftovers)
+        when (outcome) {
+            is FileOperationHelper.DeleteOutcome.Done -> {
+                deleteJobInFlight = null
+                if (outcome.removed.isNotEmpty()) {
+                    viewModel.deleteImages(outcome.removed)
+                    viewModel.refreshImages()
+                }
+                val template =
+                    if (outcome.trashed.isNotEmpty()) job.trashTemplate else job.directTemplate
+                snackbarHostState.showSnackbar(template.replace("{n}", "${outcome.removed.size}"))
+                isMultiSelectMode = false
+                selectedImageUris = emptySet()
+            }
+            is FileOperationHelper.DeleteOutcome.NeedsAllFiles -> {
+                deleteJobInFlight = null
+                if (!job.allowDirectDelete) {
+                    // Move source: the verified copy is already elsewhere, so
+                    // keep the original instead of escalating to a dialog.
+                    snackbarHostState.showSnackbar(
+                        "Copied to the destination — originals kept (no write access to delete them)"
+                    )
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                } else {
+                    pendingAllFilesDelete = outcome.remaining
+                    deleteJobInFlight = job
+                    snackbarHostState.showSnackbar(
+                        "Allow \"All files access\" once — deletes are then silent"
+                    )
+                    deleteAllFilesLauncher.launch(
+                        PermissionHelper.allFilesAccessIntent(context)
+                    )
+                }
+            }
+            is FileOperationHelper.DeleteOutcome.NeedsFolderGrant -> {
+                deleteJobInFlight = null
+                if (!job.allowDirectDelete) {
+                    snackbarHostState.showSnackbar(
+                        "Copied to the destination — originals kept (no write access to delete them)"
+                    )
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                } else {
+                    retryDeleteFolder = outcome.folder
+                    pendingFolderDelete = outcome.remaining
+                    deleteJobInFlight = job
+                    snackbarHostState.showSnackbar(
+                        "Allow access to \"${outcome.folder.name}\" once — deletes there will then be silent"
+                    )
+                    deleteTreeLauncher.launch(
+                        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                            addFlags(
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                            )
+                            putExtra(
+                                "android.provider.extra.INITIAL_URI",
+                                SafGrantStore.topLevelDocumentUri(outcome.folder)
+                            )
+                        }
+                    )
+                }
+            }
+            is FileOperationHelper.DeleteOutcome.NeedsConsent -> {
+                deleteJobInFlight = null
+                if (job.allowDirectDelete) {
+                    launchTrashConsent(outcome.remaining, job.trashTemplate)
+                } else {
+                    snackbarHostState.showSnackbar(
+                        "Copied to the destination — originals kept (no write access to delete them)"
+                    )
+                    isMultiSelectMode = false
+                    selectedImageUris = emptySet()
+                }
+            }
         }
     }
 
@@ -973,86 +1073,14 @@ fun AlbumScreen(
      */
     val trashOrDelete: (List<String>, String, String, Boolean) -> Unit = { uris, trashTemplate, directTemplate, allowDirectDelete ->
         if (uris.isNotEmpty()) {
-            scope.launch {
-                // (1) Silent trash: set IS_TRASHED = 1 through the provider —
-                // the exact write the "move to trash?" dialog applies on OK. The
-                // items still land in the recoverable recycle bin, no prompt.
-                val refused = withContext(Dispatchers.IO) {
-                    FileOperationHelper.trashMediaSilently(context, uris)
-                }
-                val gone = (uris - refused.toSet()).toMutableList()
-                // (2) Rows this app may not flag (another app's media and no
-                // All-files access — the normal case inside HONOR Parallel
-                // Space) are still removable silently when the real file is
-                // writable or a SAF folder grant is remembered from an earlier
-                // copy/move: that is what keeps deletes prompt-free there.
-                var pending = refused
-                if (pending.isNotEmpty() && allowDirectDelete) {
-                    val removed = withContext(Dispatchers.IO) {
-                        FileOperationHelper.deleteMoveSources(context, pending)
-                    }
-                    gone += removed
-                    pending = pending - removed.toSet()
-                }
-                if (gone.isNotEmpty()) {
-                    viewModel.deleteImages(gone)
-                }
-                if (pending.isEmpty()) {
-                    snackbarHostState.showSnackbar(
-                        (if (refused.isEmpty()) trashTemplate else directTemplate)
-                            .replace("{n}", "${gone.size}")
-                    )
-                    isMultiSelectMode = false
-                    selectedImageUris = emptySet()
-                    return@launch
-                }
-                if (!allowDirectDelete) {
-                    // Move source with no silent route available: keep the
-                    // original (the verified copy is already at the destination)
-                    // instead of an irreversible permanent delete.
-                    snackbarHostState.showSnackbar(
-                        if (gone.isEmpty()) {
-                            "Copied to the destination — originals kept (no write access to delete them)"
-                        } else {
-                            "Copied ${gone.size}; ${pending.size} original(s) kept (no write access to delete them)"
-                        }
-                    )
-                    isMultiSelectMode = false
-                    selectedImageUris = emptySet()
-                    return@launch
-                }
-                // (3) Nothing silent worked. Ask ONCE for the folder's SAF write
-                // grant: that grant is remembered, so the retry and every later
-                // delete there are silent. Only when a grant already covers the
-                // folder (or the picker is declined) does the platform consent
-                // dialog come in — Android offers no other way to remove media
-                // this app does not own.
-                val folder = withContext(Dispatchers.IO) {
-                    FileOperationHelper.folderNeedingDeleteGrant(context, pending)
-                }
-                if (folder != null && folder.absolutePath !in declinedDeleteFolders) {
-                    retryDeleteUris = pending
-                    retryDeleteFolder = folder
-                    snackbarHostState.showSnackbar(
-                        "Allow access to \"${folder.name}\" once — deletes there will then be silent"
-                    )
-                    deleteTreeLauncher.launch(
-                        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                            addFlags(
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-                            )
-                            putExtra(
-                                "android.provider.extra.INITIAL_URI",
-                                SafGrantStore.topLevelDocumentUri(folder)
-                            )
-                        }
-                    )
-                    return@launch
-                }
-                launchTrashConsent(pending, trashTemplate)
-            }
+            deleteJob = DeleteJob(
+                uris = uris,
+                askAllFiles = allowDirectDelete,
+                askFolder = allowDirectDelete,
+                allowDirectDelete = allowDirectDelete,
+                trashTemplate = trashTemplate,
+                directTemplate = directTemplate
+            )
         }
     }
 
@@ -1478,6 +1506,13 @@ fun AlbumScreen(
                     label = "Image Edit",
                     selected = false,
                     onClick = { pendingDrawerNav = "image_edit" }
+                )
+
+                DrawerItem(
+                    icon = Icons.Default.GridView,
+                    label = "WeChat Grid",
+                    selected = false,
+                    onClick = { pendingDrawerNav = "wechat_grid" }
                 )
 
                 DrawerItem(
@@ -4853,6 +4888,20 @@ private fun RecycleBinViewer(
         }
     }
 }
+
+/**
+ * One pending delete action for the album: which URIs to remove, which prompts
+ * are still allowed (they are switched off after being shown once), and the
+ * messages to report.
+ */
+private data class DeleteJob(
+    val uris: List<String>,
+    val askAllFiles: Boolean,
+    val askFolder: Boolean,
+    val allowDirectDelete: Boolean,
+    val trashTemplate: String,
+    val directTemplate: String
+)
 
 /** Clamp a bin-viewer pan offset so the zoomed media stays within the viewport. */
 private fun clampBinViewerOffset(candidate: Offset, s: Float, viewSize: Size): Offset {
