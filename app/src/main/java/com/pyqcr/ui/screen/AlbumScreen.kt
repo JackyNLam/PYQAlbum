@@ -1754,7 +1754,12 @@ fun AlbumScreen(
                     }
                     val contextUris: List<String> =
                         if (selectedBrowseMode == BrowseMode.RECYCLE_BIN)
-                            trashedMedia.map { it.uri }
+                            // Select All inside the bin covers only the folder
+                            // currently open, never the whole trash.
+                            if (binFolder == null) emptyList()
+                            else trashedMedia
+                                .filter { it.folderName.ifBlank { "Unknown" } == binFolder }
+                                .map { it.uri }
                         else
                             contextImages.map { it.uri }
                     val allContextSelected = contextUris.isNotEmpty() && contextUris.all { it in selectedImageUris }

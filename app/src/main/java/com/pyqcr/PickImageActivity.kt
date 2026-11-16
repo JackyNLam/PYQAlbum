@@ -35,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Label
 import androidx.compose.material3.Button
@@ -64,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.pyqcr.data.db.AppDatabase
 import com.pyqcr.ui.theme.PyqCrTheme
+import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.PermissionHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -474,7 +476,7 @@ private fun TagGrid(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        Icons.Filled.Label,
+                        if (tag.id == -1L) Icons.Filled.Favorite else Icons.Filled.Label,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSecondaryContainer
                     )
@@ -658,5 +660,18 @@ private suspend fun loadPickerData(context: Context): PickerData {
         emptyList()
     }
 
-    return PickerData(photos, folders, tags)
+    // Favourites are not a Room tag: they live in the MediaStore IS_FAVORITE
+    // flag. Surface them in the same Tags tab so an external app can pick them.
+    val favourites = try {
+        FavouriteStore.loadFavouriteUris(context).map { uri ->
+            byUri[uri] ?: PickPhoto(uri, uri.substringAfterLast('/'), "")
+        }
+    } catch (e: Exception) {
+        emptyList()
+    }
+    val tagEntries =
+        if (favourites.isEmpty()) tags
+        else listOf(PickTag(-1L, "Favourites", favourites)) + tags
+
+    return PickerData(photos, folders, tagEntries)
 }

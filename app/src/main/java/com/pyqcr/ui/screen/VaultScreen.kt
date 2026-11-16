@@ -10,6 +10,14 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -28,6 +36,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -39,6 +48,10 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -59,6 +72,7 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -84,6 +98,7 @@ import com.pyqcr.ui.util.MediaStoreUtils
 import com.pyqcr.util.MotionPhotoExtractor
 import com.pyqcr.util.QrCodeReader
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -177,6 +192,20 @@ fun VaultScreen(onBack: () -> Unit) {
     var viewerOffset by remember(viewingId) { mutableStateOf(Offset.Zero) }
     var viewerSize by remember(viewingId) { mutableStateOf(Size.Zero) }
     var showVaultActions by remember(viewingId) { mutableStateOf(false) }
+
+    // Swipe feedback matching the folder-view viewer: the photo never moves;
+    // a directional arrow fades in while the finger travels, the swipe outcome
+    // is decided on gesture end and applied outside the gesture scope, the
+    // action panel slides up, and a swiped-in neighbour fades in from dimmed.
+    val swipeThreshold = with(LocalDensity.current) { 60.dp.toPx() }
+    var hintActive by remember { mutableStateOf(false) }
+    // 1 = right, -1 = left, 2 = up, 3 = down.
+    var hintArrow by remember { mutableIntStateOf(1) }
+    // 0 none, 1 next, 2 previous, 3 close, 4 show actions, 5 settle in place.
+    var pendingSwipe by remember { mutableIntStateOf(0) }
+    // One outcome at a time; re-armed when the viewer moves to a neighbour.
+    var swipeLocked by remember(viewingId) { mutableStateOf(false) }
+    var viewerEnterFade by remember(viewingId) { mutableFloatStateOf(1f) }
 
     // Vault-wide password gate: the vault itself is locked (not just encrypted
     // entries), and the password can be changed from the top bar.
@@ -415,6 +444,48 @@ fun VaultScreen(onBack: () -> Unit) {
             val next = list.getOrNull(idx + delta)
             if (next != null) {
                 openViewer(next)
+            }
+        }
+    }
+
+    // Runs the swipe outcome OUTSIDE the pointer-input restricted scope (same
+    // contract as the folder-view viewer: plain state in the gesture loop,
+    // navigation/animation here).
+    LaunchedEffect(pendingSwipe) {
+        if (pendingSwipe != 0) {
+            swipeLocked = true
+            when (pendingSwipe) {
+                1 -> {
+                    delay(110)
+                    navigateViewer(1)
+                }
+                2 -> {
+                    delay(110)
+                    navigateViewer(-1)
+                }
+                3 -> {
+                    delay(110)
+                    closeViewer()
+                }
+                4 -> showVaultActions = true
+            }
+            hintActive = false
+            if (pendingSwipe == 4 || pendingSwipe == 5) swipeLocked = false
+            pendingSwipe = 0
+        }
+    }
+
+    // A swiped-in neighbour fades in from a dimmed state — the same quiet cue
+    // the folder-view viewer uses, without moving the image.
+    LaunchedEffect(viewingId, viewerSize.width) {
+        if (viewingId != null && viewerSize.width > 0f) {
+            viewerEnterFade = 0.35f
+            animate(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = tween(180)
+            ) { fraction, _ ->
+                viewerEnterFade = 0.35f + 0.65f * fraction
             }
         }
     }
@@ -1162,22 +1233,48 @@ fun VaultScreen(onBack: () -> Unit) {
                                             if (single.positionChanged()) {
                                                 verticalAccum += single.positionChange().y
                                                 horizontalAccum += single.positionChange().x
+                                                // Directional hint only: the photo
+                                                // stays put while the finger moves.
+                                                hintArrow =
+                                                    if (kotlin.math.abs(horizontalAccum) >
+                                                        kotlin.math.abs(verticalAccum)
+                                                    ) {
+                                                        if (horizontalAccum < 0f) -1 else 1
+                                                    } else {
+                                                        if (verticalAccum < 0f) 2 else 3
+                                                    }
+                                                hintActive = true
                                                 single.consume()
                                             }
                                         }
                                     } while (event.changes.any { it.pressed })
-                                    // Gesture ended at scale 1 — swipe up/down
+                                    // Gesture ended at scale 1 — record the outcome only;
+                                    // the effect above animates/navigates.
                                     if (!transformMode) {
-                                        if (verticalAccum < -80f) {
-                                            showVaultActions = true
-                                        } else if (verticalAccum > 80f) {
-                                            // Swipe down closes the viewer and
-                                            // returns to the folder thumbnails.
-                                            closeViewer()
-                                        } else if (horizontalAccum < -80f) {
-                                            navigateViewer(1)
-                                        } else if (horizontalAccum > 80f) {
-                                            navigateViewer(-1)
+                                        if (!swipeLocked) {
+                                            val list = entries.filter {
+                                                it.folder.ifBlank { "Uncategorised" } == currentFolder
+                                            }
+                                            val idx = viewingEntry?.let { current ->
+                                                list.indexOfFirst { it.id == current.id }
+                                            } ?: -1
+                                            val hasNext = idx >= 0 && idx < list.size - 1
+                                            val hasPrev = idx > 0
+                                            val currentId = viewingEntry?.id
+                                            if (currentId != null) {
+                                                swipeLocked = true
+                                                pendingSwipe = when {
+                                                    verticalAccum < -swipeThreshold -> 4
+                                                    verticalAccum > swipeThreshold -> 3
+                                                    horizontalAccum < -swipeThreshold ->
+                                                        if (hasNext) 1 else 5
+                                                    horizontalAccum > swipeThreshold ->
+                                                        if (hasPrev) 2 else 5
+                                                    else -> 5
+                                                }
+                                            }
+                                        } else {
+                                            hintActive = false
                                         }
                                     }
                                 }
@@ -1216,7 +1313,9 @@ fun VaultScreen(onBack: () -> Unit) {
                                         .crossfade(true)
                                         .build(),
                                     contentDescription = entry.displayName,
-                                    modifier = Modifier.fillMaxSize(),
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .graphicsLayer { alpha = viewerEnterFade },
                                     contentScale = ContentScale.Fit
                                 )
                                 if (!showMotionVideo && motionVideoPath != null) {
@@ -1238,6 +1337,40 @@ fun VaultScreen(onBack: () -> Unit) {
                                     MotionPhotoPlayer(
                                         videoPath = motionVideoPath!!,
                                         onClose = { showMotionVideo = false }
+                                    )
+                                }
+                            }
+                            // The photo itself never moves — a soft arrow fades in toward the
+                            // swipe direction, matching the folder viewer.
+                            val hintAlpha by animateFloatAsState(
+                                targetValue = if (hintActive) 1f else 0f,
+                                animationSpec = tween(durationMillis = 140),
+                                label = "vaultSwipeHintAlpha"
+                            )
+                            if (hintAlpha > 0.01f) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(88.dp)
+                                        .graphicsLayer {
+                                            alpha = hintAlpha
+                                            val s = 0.88f + 0.12f * hintAlpha
+                                            scaleX = s
+                                            scaleY = s
+                                        }
+                                        .clip(RoundedCornerShape(percent = 50))
+                                        .background(Color.Black.copy(alpha = 0.30f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = when (hintArrow) {
+                                            -1 -> Icons.Default.KeyboardArrowLeft
+                                            1 -> Icons.Default.KeyboardArrowRight
+                                            2 -> Icons.Default.KeyboardArrowUp
+                                            else -> Icons.Default.KeyboardArrowDown
+                                        },
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(52.dp)
                                     )
                                 }
                             }
@@ -1263,7 +1396,17 @@ fun VaultScreen(onBack: () -> Unit) {
                     }
 
                     // Swipe-up actions panel: encrypt / decrypt / move out / delete
-                    if (showVaultActions) {
+                    AnimatedVisibility(
+                        visible = showVaultActions,
+                        enter = slideInVertically(
+                            initialOffsetY = { it },
+                            animationSpec = tween(220)
+                        ) + fadeIn(tween(160)),
+                        exit = slideOutVertically(
+                            targetOffsetY = { it },
+                            animationSpec = tween(180)
+                        ) + fadeOut(tween(140))
+                    ) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
