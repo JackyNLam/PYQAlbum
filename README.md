@@ -14,7 +14,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
   - **Grid**: 3 columns, square thumbnails (1:1 aspect ratio)
   - **Waterfall (River)**: 3 columns, Pinterest-style staggered heights
   - **Justified Grid**: 3 images per row, fixed height (120dp), dynamic width proportional to aspect ratio
-- **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Edit, AI Rating, Photo Vault, Recycle Bin
+- **Navigation**: Left-side drawer menu (☰) — Folder, Tag, AI Edit, **Image Edit**, AI Rating, Photo Vault, Recycle Bin
 - **System Back key** steps back through the open layers instead of exiting the gallery on the first press: drawer → full-screen bin viewer → recycle-bin folder view → multi-select → folder/tag drill-down → back to Folder browse (dialogs and dialogs-based viewers close themselves on Back)
 - **Click thumbnail** → full-screen detail view (safe null handling, no crash)
 - **Long-press** → enters multi-select mode directly (no intermediate dialog); bottom bar shows selected count, action menu (⋮), and Cancel
@@ -43,8 +43,17 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Copy**: files are written via ContentResolver stream to the chosen folder (works on all Android versions); standard and non-standard media folders are first tried through MediaStore `RELATIVE_PATH`, then direct file I/O (when All files access is already granted), then SAF. Videos go into the Video collection instead of Images
 - **Move**: **in-place first** — the MediaStore row's `RELATIVE_PATH` is updated, so MediaProvider moves the physical file while keeping the **same row** (content URI, tags, ratings and favourites stay valid). There is no copy to lose and no source to delete, and no permission dialog is normally involved. The row's new folder, byte size and readability are verified, and the row is put back if the move did not land. When the provider refuses (a row the app may not write, SD card, non-media folder) the file is **copied** — MediaStore `RELATIVE_PATH` (any media folder) → direct file I/O → SAF — then **read back and byte-size verified**, and only then is the original sent to the **recycle bin** (API 30+ trash request — recoverable, never a silent permanent delete). Destinations are **re-verified immediately before the trash request and again when the system dialog returns**, so a copy that vanished keeps its original; with no recycle bin available the originals are kept and the move honestly degrades to a copy. The old `File.renameTo` + row-delete branch is gone: it was the only irreversible path, and a phantom rename on virtualised storage (HONOR Parallel Space) plus the row delete lost user photos
 - **All files access prompts removed**: the copy/move flow no longer interrupts with an "All files access" explanation dialog — it just runs (MediaStore for every media folder, direct paths when the permission is already granted, SAF otherwise) and reports honestly if a destination refuses the write
+- **All folders permission**: the app asks for Android's **All files access** special permission (`MANAGE_EXTERNAL_STORAGE`) once after photo access is granted, and the drawer's **Allow all folders** item (it turns into **All folders allowed** when granted) re-opens the system toggle at any time — so browsing, copy/move and export can reach **every folder on the phone**, not just the media/photo collections. Read/write of media still goes through MediaStore; the grant only widens direct-path access
+- **Image Edit** (left drawer → **Image Edit**): a non-AI editor for one or more photos, with the flattened result saved as a new image in `Pictures/PYQAlbum` (published to the MediaStore like every other app-created image). Pick a photo, then:
+  - **Crop** — drag a rectangle on the preview and **Apply crop**
+  - **Resize** — the same width presets (500 / 1000 / 2000 / custom) and optional **Pad to square** with a background color as the batch resize
+  - **Pen** — draw on the photo with a color palette (8 colors) and a size slider
+  - **Pixelate** — paint over a region to mosaic the underlying pixels
+  - **Text** — add a label with Small / Medium / Large size and 6 color choices, then tap the image to place it
+  - **Layers / Reveal** — **Add layer** stacks another photo on top at the same position (`fitOverlayToBase`); select the layer and paint with the **Reveal** brush to cut a free-shape hole so the photo underneath shows through that area (exactly the "photo A on top of photo B, show B in a selected region" workflow). Layers can be selected, removed and stacked in order
+  - An **Undo** action reverts the last edit, and **Save** writes the flattened composite
 - **Default destination**: `Pictures/PYQAlbum/` (fallback if external folder can't be resolved)
-- **Visible to other apps (WeChat, file browsers)**: every image the app creates (collage, AI Edit result + debug images, screenshots, resized copies, vault **Move out**) is written through MediaStore under `Pictures/…`, its `IS_PENDING` flag is cleared, and the file is then handed to `MediaScannerConnection` — so third-party pickers, including WeChat's chat **+ → Photos** picker, index a new image immediately even on OEMs that leave a freshly inserted row unpublished. Note that media **flags** (`IS_FAVORITE`) are not read by WeChat at all — only the image file itself matters
+- **Visible to other apps (WeChat, file browsers)**: every image the app creates (collage, AI Edit result + debug images, **Image Edit result**, screenshots, resized copies, vault **Move out**) is written through MediaStore under `Pictures/…`, its `IS_PENDING` flag is cleared, and the file is then handed to `MediaScannerConnection` — so third-party pickers, including WeChat's chat **+ → Photos** picker, index a new image immediately even on OEMs that leave a freshly inserted row unpublished. Note that media **flags** (`IS_FAVORITE`) are not read by WeChat at all — only the image file itself matters
 - **Picker for other apps**: PYQAlbum now registers `ACTION_GET_CONTENT` (`image/*`, plus generic file requests) and `ACTION_PICK` (`image/*`), so browsers and social apps **list PYQAlbum in their photo/file chooser**. `PickImageActivity` opens on a **folder view** with **Folders / Tags / All photos** tabs — tap a folder (MediaStore bucket) or a PYQAlbum tag to browse its photos (the Tags tab also has a **Favourites** tile built from the MediaStore favourite flag, so favourited photos can be picked by tag too), then pick from there (multi-select when the caller sets `EXTRA_ALLOW_MULTIPLE`, selections can span folders/tags) and returns the chosen content URIs with a read grant in `data`, `ClipData` and `EXTRA_STREAM`; it asks for photo access only if the app does not have it yet
 - **Full-screen image**: No top bar at all in the full-screen viewer; **swipe down to go back** to thumbnail grid (folder or tag context preserved); **swipe up to reveal** a small semi-transparent floating bar with one icon per function (Info / Tags / AI Rating / AI Edit / Favourite / Resize / Rename / Copy / Move / Vault / Delete — each opens its own dialog); **swipe left/right** to navigate to next/previous image in the same folder/tag. Swipes are animated: the photo stays perfectly still while a soft directional arrow fades in to show where the swipe is going, the newly opened neighbour fades in briefly, and the action bar slides up/down instead of popping in
 - **Session restore**: the folder you were in and its scroll position are restored when you come back to the app — also after the system reclaimed the backgrounded activity while you were in another app — and the zoom/pan framing survives activity recreation. Returning from an enlarged image puts the **same top thumbnail back on top in every sort and group mode** (the anchor is the image URI, so grouping headers, re-sorting and late-loading videos cannot shift it)
@@ -82,11 +91,11 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 │           │   └── repository/ ...       # MediaStore scan + Room flows
 │           ├── ui/
 │           │   ├── component/ ...        # ImageThumbnail, WaterfallGrid, JustifiedGrid, RatingBar, TagChip
-│           │   ├── navigation/ ...       # AppNavGraph with 9 routes
-│           │   ├── screen/ ...           # All screens (incl. VaultScreen — password vault)
+│           │   ├── navigation/ ...       # AppNavGraph with 10 routes
+│           │   ├── screen/ ...           # All screens (incl. VaultScreen — password vault, ImageEditScreen — crop/draw/layers)
 │           │   ├── theme/ ...            # Material3 dynamic color
 │           │   └── viewmodel/ ...        # AlbumViewModel
-│           └── util/ ...                 # ImageUtil, BatchProcessor, PermissionHelper, MotionPhotoExtractor
+│           └── util/ ...                 # ImageUtil, ImageEditEngine, BatchProcessor, PermissionHelper, MotionPhotoExtractor
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── gradle.properties
@@ -97,7 +106,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 ---
 
-## 9 Navigation Routes
+## 10 Navigation Routes
 
 | Route | Screen | Purpose |
 |-------|--------|---------|
@@ -106,6 +115,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | `rating` | `RatingScreen` | Sort/filter by user rating or AI score *(still accessible via nav route)* |
 | `image_detail/{uri}` | `ImageDetailScreen` | Full-screen view, swipe down to go back, swipe up for the floating icon action bar; zoom/pan, **GIF playback with the video control bar** (play/pause + seek + ±10 s + screenshot), motion-photo playback, **video playback** (folder-browse videos play here like images, with play/pause + seek bar + ±10 s controls + screenshot), no top bar at all (no title, no back arrow — swipe down or system Back exits), file size/AI Rating/AI Edit toggles + Favourite via the bar's dialogs |
 | `ai_edit` | `AiEditScreen` | **AI Image Editing**: qwen-image-2.0 — first image(s) + area/brush selection + optional second/third reference images + prompt (10 saved slots) |
+| `image_edit` | `ImageEditScreen` | **Image Edit**: crop, resize, pen/pixelate drawing, text labels, and multi-photo layers with a free-shape reveal brush (photo B shows through painted areas of the layer above); saves a flattened copy to `Pictures/PYQAlbum` |
 | `ai_rating` | `AiRatingScreen` | **AI Rating**: config + selected image grid + submit to DashScope; the detail-screen AI Rating toggle feeds the shared selection queue |
 | `ai_select` | `AiSelectScreen` | **Bridge screen** — automatically forwards to AiRatingScreen |
 | `batch_edit/{mode}` | `BatchEditScreen` | Batch tag / rate / resize |
@@ -118,7 +128,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 
 | Action | Result |
 |--------|--------|
-| **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Edit / AI Rating / Photo Vault / Recycle Bin |
+| **☰ (top-left hamburger)** | Opens the left drawer: Folder / Tag / AI Edit / **Image Edit** / AI Rating / Photo Vault / Recycle Bin, plus **Allow all folders** (All files access grant) |
 | **Tap folder card** (Folder mode) | Enter folder to see its media in the selected layout (folder cards show item count = images + videos, sortable by modified date / count / name); the **All Folders** card at the top shows every folder's items (images + videos) at once |
 | **Tap thumbnail** | Opens full-screen detail view |
 | **Long-press thumbnail** | Action dialog: Assign Rating / Add Tag / Select for AI Rating (toggle) |
@@ -131,8 +141,9 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 | **Toolbar Sort button** (folder list) | Dropdown: ↓Modified date (default) / ↑Modified date / ↓Count / ↑Count / ↑Name / ↓Name |
 | **Toolbar Sort button** (inside folder) | Dropdown: ↓Modified date (default) / ↑Modified date / ↑Name / ↓Name / Rating ↓ / Rating ↑ / AI Score ↓ / AI Score ↑ / Group by submenu |
 | **Toolbar Sort button** → **Group by submenu** | None / Day / Month / Year / Rating Score / AI Score — group bar headers; **long-press a header to batch-select every image in that group** |
-| **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Edit / AI Rating |
+| **Left drawer** | Switch between Folder, Tag browse modes, or go to AI Edit / **Image Edit** / AI Rating |
 | **AI Edit** | Via drawer ✏️ |
+| **Image Edit** | Via drawer 🖌 — pick a photo, then crop, resize, draw/pixelate, add text, or stack layers and paint the reveal area |
 | **AI Rating** | Via drawer ✨ |
 | **Multi-select mode** | Batch actions (⋮ menu): Select All / Deselect All / Collage / Tag / Rate / **Favourite** / Remove Tags / **AI Rating** (asks whether to toggle the queue or remove stored AI info when scores already exist; otherwise toggles the queue) / **Rename** (enabled on exactly one selection) / Copy to… / Move to… / **Move to Vault** / Delete (recycle bin first on Android 11+; inside the bin the ⋮ menu offers **Restore** and **Delete permanently** instead) |
 | **Select All / Deselect All** (⋮ in multi-select) | Toggles selection of every image in the current folder or tag view |

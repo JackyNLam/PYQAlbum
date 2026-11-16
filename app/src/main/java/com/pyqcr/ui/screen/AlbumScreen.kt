@@ -102,6 +102,7 @@ import com.pyqcr.ui.viewmodel.FolderListSortMode
 import com.pyqcr.ui.viewmodel.GroupByMode
 import com.pyqcr.util.FavouriteStore
 import com.pyqcr.util.ImageUtil
+import com.pyqcr.util.PermissionHelper
 import com.pyqcr.util.QrCodeReader
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
@@ -133,6 +134,7 @@ fun AlbumScreen(
     onImageClick: (String, imageList: List<String>) -> Unit,
     onNavigateToAiSelection: () -> Unit,
     onNavigateToAiEdit: () -> Unit = {},
+    onNavigateToImageEdit: () -> Unit = {},
     onNavigateToVault: () -> Unit = {},
     viewModel: AlbumViewModel = viewModel()
 ) {
@@ -160,6 +162,16 @@ fun AlbumScreen(
     // Drawer state
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    // "All files access" (API 30+): when granted, copy/move/export can write to
+    // every folder on the phone instead of just media collections. The state is
+    // re-read on resume because the toggle lives in the system Settings app.
+    var hasAllFilesAccess by remember { mutableStateOf(PermissionHelper.hasAllFilesAccess()) }
+    val allFilesAccessLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        hasAllFilesAccess = PermissionHelper.hasAllFilesAccess()
+    }
 
     var selectedBrowseMode by rememberSaveable { mutableStateOf(BrowseMode.FOLDER) }
     var selectedViewLayout by rememberSaveable { mutableStateOf(ViewLayout.GRID) }
@@ -502,6 +514,7 @@ fun AlbumScreen(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                hasAllFilesAccess = PermissionHelper.hasAllFilesAccess()
                 scope.launch {
                     val fresh = withContext(Dispatchers.IO) {
                         FavouriteStore.loadFavouriteUris(context)
@@ -1104,7 +1117,26 @@ fun AlbumScreen(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         hasPermission = granted
-        if (granted) viewModel.refreshImages()
+        if (granted) {
+            viewModel.refreshImages()
+            // Ask once for "All files access" so folder browsing, copy/move and
+            // export can reach non-media folders — not just photo collections.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                !PermissionHelper.hasAllFilesAccess()
+            ) {
+                val prefs = context.getSharedPreferences("pyqcr_permissions", Context.MODE_PRIVATE)
+                if (!prefs.getBoolean("asked_all_files_access", false)) {
+                    prefs.edit().putBoolean("asked_all_files_access", true).apply()
+                    try {
+                        allFilesAccessLauncher.launch(
+                            PermissionHelper.allFilesAccessIntent(context)
+                        )
+                    } catch (e: Exception) {
+                        Log.w("AlbumScreen", "All-files settings unavailable", e)
+                    }
+                }
+            }
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -1270,6 +1302,16 @@ fun AlbumScreen(
                 )
 
                 DrawerItem(
+                    icon = Icons.Default.Brush,
+                    label = "Image Edit",
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onNavigateToImageEdit()
+                    }
+                )
+
+                DrawerItem(
                     icon = Icons.Default.AutoAwesome,
                     label = "AI Rating",
                     selected = false,
@@ -1286,6 +1328,24 @@ fun AlbumScreen(
                     onClick = {
                         scope.launch { drawerState.close() }
                         onNavigateToVault()
+                    }
+                )
+
+                DrawerItem(
+                    icon = if (hasAllFilesAccess) Icons.Default.FolderOpen else Icons.Default.CreateNewFolder,
+                    label = if (hasAllFilesAccess) "All folders allowed" else "Allow all folders",
+                    selected = hasAllFilesAccess,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        if (!hasAllFilesAccess) {
+                            try {
+                                allFilesAccessLauncher.launch(
+                                    PermissionHelper.allFilesAccessIntent(context)
+                                )
+                            } catch (e: Exception) {
+                                Log.w("AlbumScreen", "All-files settings unavailable", e)
+                            }
+                        }
                     }
                 )
 

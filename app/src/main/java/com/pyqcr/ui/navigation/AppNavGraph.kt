@@ -21,6 +21,7 @@ object Routes {
     const val IMAGE_DETAIL = "image_detail/{imageUri}"
     const val AI_RATING = "ai_rating?imageUri={imageUri}"
     const val AI_EDIT = "ai_edit"
+    const val IMAGE_EDIT = "image_edit"
     const val AI_SELECT = "ai_select"
     const val BATCH_EDIT = "batch_edit/{mode}"
     const val VAULT = "vault"
@@ -81,6 +82,9 @@ fun AppNavGraph() {
                 },
                 onNavigateToAiEdit = {
                     navController.navigate(Routes.AI_EDIT)
+                },
+                onNavigateToImageEdit = {
+                    navController.navigate(Routes.IMAGE_EDIT)
                 },
                 onNavigateToVault = {
                     navController.navigate(Routes.VAULT)
@@ -178,6 +182,12 @@ fun AppNavGraph() {
 
         composable(Routes.AI_EDIT) {
             AiEditScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.IMAGE_EDIT) {
+            ImageEditScreen(
                 onBack = { navController.popBackStack() }
             )
         }
