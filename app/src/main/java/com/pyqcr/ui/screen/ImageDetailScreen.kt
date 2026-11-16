@@ -1135,12 +1135,16 @@ fun ImageDetailScreen(
                                         VaultStorage.importFromGallery(context, imageUri, name)
                                     }
                                     if (imported) {
-                                        trashUris(
-                                            listOf(imageUri),
-                                            "Moved to photo vault",
-                                            "Moved to photo vault",
-                                            false
-                                        )
+                                        // The vault copy is byte-verified, so the
+                                        // gallery original goes silently — no
+                                        // system trash dialog for a move.
+                                        withContext(Dispatchers.IO) {
+                                            FileOperationHelper.deleteMoveSources(
+                                                context, listOf(imageUri)
+                                            )
+                                        }
+                                        snackbarHostState.showSnackbar("Moved to photo vault")
+                                        onBack()
                                     } else {
                                         snackbarHostState.showSnackbar("Could not move to the vault")
                                     }

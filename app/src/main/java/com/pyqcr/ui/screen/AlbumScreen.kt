@@ -164,6 +164,36 @@ fun AlbumScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
+    // A DrawerState restored from the saveable registry can come back as Open
+    // (or half-open) after returning from another destination — navigation
+    // disposes this screen before the close animation finishes. That renders a
+    // scrim with no usable sheet, i.e. a blank screen that swallows every
+    // touch. Always start closed.
+    LaunchedEffect(Unit) {
+        try {
+            drawerState.snapTo(DrawerValue.Closed)
+        } catch (e: Exception) {
+            Log.w("AlbumScreen", "Could not reset drawer state", e)
+        }
+    }
+
+    // Drawer → other screen. The drawer is closed FIRST and navigation happens
+    // only once it finished: navigating immediately disposes this screen in the
+    // middle of the close animation, and the restored (Open) drawer state then
+    // left a blank, touch-blocking scrim over the album.
+    var pendingDrawerNav by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(pendingDrawerNav) {
+        val target = pendingDrawerNav ?: return@LaunchedEffect
+        pendingDrawerNav = null
+        drawerState.snapTo(DrawerValue.Closed)
+        when (target) {
+            "image_edit" -> onNavigateToImageEdit()
+            "ai_edit" -> onNavigateToAiEdit()
+            "ai_rating" -> onNavigateToAiSelection()
+            "vault" -> onNavigateToVault()
+        }
+    }
+
     // "All files access" (API 30+): asked once right after the media permission
     // so copy/move/export can reach non-media folders. There is deliberately no
     // drawer toggle for it — it is a one-time system setting, not a mode.
@@ -1314,40 +1344,28 @@ fun AlbumScreen(
                     icon = Icons.Default.Brush,
                     label = "Image Edit",
                     selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onNavigateToImageEdit()
-                    }
+                    onClick = { pendingDrawerNav = "image_edit" }
                 )
 
                 DrawerItem(
                     icon = Icons.Default.Edit,
                     label = "AI Edit",
                     selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onNavigateToAiEdit()
-                    }
+                    onClick = { pendingDrawerNav = "ai_edit" }
                 )
 
                 DrawerItem(
                     icon = Icons.Default.AutoAwesome,
                     label = "AI Rating",
                     selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onNavigateToAiSelection()
-                    }
+                    onClick = { pendingDrawerNav = "ai_rating" }
                 )
 
                 DrawerItem(
                     icon = Icons.Default.Lock,
                     label = "Photo Vault",
                     selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onNavigateToVault()
-                    }
+                    onClick = { pendingDrawerNav = "vault" }
                 )
 
                 DrawerItem(
@@ -1867,16 +1885,14 @@ fun AlbumScreen(
                             showDestinationDialog = true
                         },
                         onMoveToVault = {
-                            // Move = copy into the vault (no encryption — the vault's
-                            // app-private storage already hides them), then the
-                            // originals leave the gallery (recycle bin first).
+                            // Copy into the vault (no encryption — the vault's
+                            // app-private storage already hides them), then drop
+                            // the gallery originals SILENTLY: the vault copy is
+                            // byte-verified, so no system trash dialog is needed.
                             val uris = selectedImageUris.toList()
-                            if (uris.isEmpty()) {
-                                // nothing selected — nothing to do
-                            } else {
+                            if (uris.isNotEmpty()) {
                                 scope.launch {
                                     var ok = 0
-                                    var fail = 0
                                     val importedUris = mutableListOf<String>()
                                     for (uri in uris) {
                                         val name = VaultStorage.galleryDisplayName(context, uri)
@@ -1890,24 +1906,28 @@ fun AlbumScreen(
                                         if (result) {
                                             ok++
                                             importedUris.add(uri)
-                                        } else {
-                                            fail++
                                         }
                                     }
                                     if (ok == 0) {
                                         snackbarHostState.showSnackbar("Could not move images to the vault")
                                         return@launch
                                     }
-                                    // Originals leave the gallery — recycle bin first
-                                    trashOrDelete(
-                                        importedUris,
-                                        "Moved {n} image(s) to the vault",
-                                        "Moved {n} image(s) to the vault",
-                                        false
-                                    )
-                                    if (fail > 0) {
-                                        snackbarHostState.showSnackbar("$fail image(s) failed to copy to the vault")
+                                    val removed = withContext(Dispatchers.IO) {
+                                        FileOperationHelper.deleteMoveSources(context, importedUris)
                                     }
+                                    if (removed.isNotEmpty()) viewModel.deleteImages(removed)
+                                    val kept = importedUris.size - removed.size
+                                    snackbarHostState.showSnackbar(
+                                        if (kept == 0) {
+                                            "Moved ${removed.size} image(s) to the vault"
+                                        } else {
+                                            "Moved ${removed.size} image(s) to the vault — " +
+                                                "$kept original(s) kept"
+                                        }
+                                    )
+                                    isMultiSelectMode = false
+                                    selectedImageUris = emptySet()
+                                    viewModel.refreshImages()
                                 }
                             }
                         },

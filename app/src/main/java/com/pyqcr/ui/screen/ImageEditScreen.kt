@@ -105,18 +105,25 @@ fun ImageEditScreen(onBack: () -> Unit) {
 
     // The images chosen in the folder view's batch menu (⋮ → Edit images).
     // Only these are offered here — both the initial picker and "add layer".
-    val selectedUris = remember { ImageEditSelectionStore.load(context) }
+    val storedUris = remember { ImageEditSelectionStore.load(context) }
 
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
+    // URIs that still resolve to a real gallery row. A photo deleted (in the
+    // app, in Parallel Space, or by another gallery) must disappear from the
+    // picker instead of lingering as an unopenable placeholder.
+    var editableUris by remember { mutableStateOf(storedUris) }
+    var prunedCount by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
-        if (selectedUris.isEmpty()) return@LaunchedEffect
+        if (storedUris.isEmpty()) return@LaunchedEffect
         repository.getAllImages().collect { list ->
             val byUri = list.associateBy { it.uri }
-            allImages = selectedUris.map { uri ->
-                byUri[uri] ?: ImageItem(
-                    uri = uri,
-                    displayName = uri.substringAfterLast('/').ifBlank { "image" }
-                )
+            val alive = storedUris.filter { byUri.containsKey(it) }
+            allImages = alive.mapNotNull { byUri[it] }
+            editableUris = alive
+            if (alive.size != storedUris.size) {
+                prunedCount = storedUris.size - alive.size
+                // Persist the pruned selection so the next visit starts clean.
+                ImageEditSelectionStore.save(context, alive)
             }
         }
     }
@@ -293,8 +300,12 @@ fun ImageEditScreen(onBack: () -> Unit) {
     ) { padding ->
         val current = doc
         if (current == null) {
-            if (selectedUris.isEmpty()) {
-                NoSelectionScreen(padding = padding, onBack = onBack)
+            if (editableUris.isEmpty()) {
+                NoSelectionScreen(
+                    padding = padding,
+                    onBack = onBack,
+                    prunedCount = prunedCount
+                )
             } else {
                 EditorImagePicker(
                     images = allImages,
@@ -612,7 +623,11 @@ fun ImageEditScreen(onBack: () -> Unit) {
  * to edit here until the user picks photos there.
  */
 @Composable
-private fun NoSelectionScreen(padding: PaddingValues, onBack: () -> Unit) {
+private fun NoSelectionScreen(
+    padding: PaddingValues,
+    onBack: () -> Unit,
+    prunedCount: Int = 0
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -635,9 +650,15 @@ private fun NoSelectionScreen(padding: PaddingValues, onBack: () -> Unit) {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "In the folder view, select one or more photos, then open the ⋮ menu " +
-                "and choose \"Edit images\". Only those photos are shown here — as " +
-                "the edit target and as layers.",
+            if (prunedCount > 0) {
+                "$prunedCount selected photo(s) are no longer in the gallery. " +
+                    "Select photos again from the folder view, then open the ⋮ " +
+                    "menu and choose \"Edit images\"."
+            } else {
+                "In the folder view, select one or more photos, then open the ⋮ menu " +
+                    "and choose \"Edit images\". Only those photos are shown here — as " +
+                    "the edit target and as layers."
+            },
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant

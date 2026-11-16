@@ -65,6 +65,17 @@ fun AppNavGraph() {
         return null
     }
 
+    /**
+     * Pop [route] only while it is on top. A duplicate back (fast double tap, a
+     * gesture plus a button) must never also pop the album, which left the
+     * NavHost with nothing to draw — a blank screen with no way out.
+     */
+    fun popIfCurrent(route: String) {
+        if (navController.currentDestination?.route == route) {
+            navController.popBackStack()
+        }
+    }
+
     NavHost(
         navController = navController,
         startDestination = Routes.ALBUM
@@ -175,32 +186,32 @@ fun AppNavGraph() {
                 ?.takeIf { it.isNotBlank() }
                 ?.let { Uri.decode(it) }
             AiRatingScreen(
-                onBack = { navController.popBackStack() },
+                onBack = { popIfCurrent(Routes.AI_RATING) },
                 initialSelectedUris = if (preSelected != null) setOf(preSelected) else emptySet()
             )
         }
 
         composable(Routes.AI_EDIT) {
             AiEditScreen(
-                onBack = { navController.popBackStack() }
+                onBack = { popIfCurrent(Routes.AI_EDIT) }
             )
         }
 
         composable(Routes.IMAGE_EDIT) {
             ImageEditScreen(
-                onBack = { navController.popBackStack() }
+                onBack = { popIfCurrent(Routes.IMAGE_EDIT) }
             )
         }
 
         composable(Routes.AI_SELECT) {
             AiSelectScreen(
-                onBack = { navController.popBackStack() }
+                onBack = { popIfCurrent(Routes.AI_SELECT) }
             )
         }
 
         composable(Routes.VAULT) {
             VaultScreen(
-                onBack = { navController.popBackStack() }
+                onBack = { popIfCurrent(Routes.VAULT) }
             )
         }
 
@@ -213,7 +224,7 @@ fun AppNavGraph() {
             val mode = backStackEntry.arguments?.getString("mode") ?: "tag"
             BatchEditScreen(
                 mode = mode,
-                onBack = { navController.popBackStack() }
+                onBack = { popIfCurrent(Routes.BATCH_EDIT) }
             )
         }
     }
