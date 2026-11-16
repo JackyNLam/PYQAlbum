@@ -635,7 +635,7 @@ private fun loadImages(context: Context): List<PickPhoto> {
 }
 
 /** All photos plus the folder and tag groupings, loaded off the main thread. */
-private fun loadPickerData(context: Context): PickerData {
+private suspend fun loadPickerData(context: Context): PickerData {
     val photos = loadImages(context)
     val byUri = photos.associateBy { it.uri }
 
