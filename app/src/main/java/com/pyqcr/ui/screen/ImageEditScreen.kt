@@ -38,6 +38,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -51,6 +52,7 @@ import com.pyqcr.util.EditStrokePoint
 import com.pyqcr.util.EditTextItem
 import com.pyqcr.util.ImageEditDoc
 import com.pyqcr.util.ImageEditEngine
+import com.pyqcr.util.ImageEditSelectionStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -101,9 +103,22 @@ fun ImageEditScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
 
+    // The images chosen in the folder view's batch menu (⋮ → Edit images).
+    // Only these are offered here — both the initial picker and "add layer".
+    val selectedUris = remember { ImageEditSelectionStore.load(context) }
+
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
     LaunchedEffect(Unit) {
-        repository.getAllImages().collect { allImages = it }
+        if (selectedUris.isEmpty()) return@LaunchedEffect
+        repository.getAllImages().collect { list ->
+            val byUri = list.associateBy { it.uri }
+            allImages = selectedUris.map { uri ->
+                byUri[uri] ?: ImageItem(
+                    uri = uri,
+                    displayName = uri.substringAfterLast('/').ifBlank { "image" }
+                )
+            }
+        }
     }
 
     var doc by remember { mutableStateOf<ImageEditDoc?>(null) }
@@ -278,12 +293,16 @@ fun ImageEditScreen(onBack: () -> Unit) {
     ) { padding ->
         val current = doc
         if (current == null) {
-            EditorImagePicker(
-                images = allImages,
-                padding = padding,
-                busy = busy,
-                onPick = { openImage(it) }
-            )
+            if (selectedUris.isEmpty()) {
+                NoSelectionScreen(padding = padding, onBack = onBack)
+            } else {
+                EditorImagePicker(
+                    images = allImages,
+                    padding = padding,
+                    busy = busy,
+                    onPick = { openImage(it) }
+                )
+            }
         } else {
             val bitmap = preview ?: current.base
             val imageW = bitmap.width
@@ -551,7 +570,7 @@ fun ImageEditScreen(onBack: () -> Unit) {
                     title = { Text("Add photo as layer") },
                     text = {
                         if (allImages.isEmpty()) {
-                            Text("No photos found")
+                            Text("No selected photos to add")
                         } else {
                             LazyVerticalGrid(
                                 columns = GridCells.Adaptive(80.dp),
@@ -586,6 +605,47 @@ fun ImageEditScreen(onBack: () -> Unit) {
 }
 
 // ------------------------------------------------------------------ picker
+
+/**
+ * Shown when Image Edit is opened without a batch selection (e.g. from the
+ * drawer). Selection lives in the folder view's ⋮ menu, so there is nothing
+ * to edit here until the user picks photos there.
+ */
+@Composable
+private fun NoSelectionScreen(padding: PaddingValues, onBack: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            Icons.Default.Brush,
+            contentDescription = null,
+            modifier = Modifier.size(44.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "No photos selected",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "In the folder view, select one or more photos, then open the ⋮ menu " +
+                "and choose \"Edit images\". Only those photos are shown here — as " +
+                "the edit target and as layers.",
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(20.dp))
+        Button(onClick = onBack) { Text("Go back") }
+    }
+}
 
 @Composable
 private fun EditorImagePicker(

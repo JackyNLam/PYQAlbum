@@ -101,6 +101,7 @@ import com.pyqcr.ui.viewmodel.FolderSortMode
 import com.pyqcr.ui.viewmodel.FolderListSortMode
 import com.pyqcr.ui.viewmodel.GroupByMode
 import com.pyqcr.util.FavouriteStore
+import com.pyqcr.util.ImageEditSelectionStore
 import com.pyqcr.util.ImageUtil
 import com.pyqcr.util.PermissionHelper
 import com.pyqcr.util.QrCodeReader
@@ -163,15 +164,12 @@ fun AlbumScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
-    // "All files access" (API 30+): when granted, copy/move/export can write to
-    // every folder on the phone instead of just media collections. The state is
-    // re-read on resume because the toggle lives in the system Settings app.
-    var hasAllFilesAccess by remember { mutableStateOf(PermissionHelper.hasAllFilesAccess()) }
+    // "All files access" (API 30+): asked once right after the media permission
+    // so copy/move/export can reach non-media folders. There is deliberately no
+    // drawer toggle for it — it is a one-time system setting, not a mode.
     val allFilesAccessLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
-    ) {
-        hasAllFilesAccess = PermissionHelper.hasAllFilesAccess()
-    }
+    ) { }
 
     var selectedBrowseMode by rememberSaveable { mutableStateOf(BrowseMode.FOLDER) }
     var selectedViewLayout by rememberSaveable { mutableStateOf(ViewLayout.GRID) }
@@ -269,6 +267,13 @@ fun AlbumScreen(
     var pendingMoveResult by remember {
         mutableStateOf<Triple<String, List<String>, Map<String, String>>?>(null)
     }
+
+    // Destination folder that refused a direct write (e.g. an ordinary folder
+    // inside HONOR Parallel Space, where All files access does not apply).
+    // The copy/move is retried after the user confirms the same folder in the
+    // system picker, whose SAF grant covers the write.
+    var retryCopyMove by remember { mutableStateOf<Pair<String, File>?>(null) }
+    var retryTreeUri by remember { mutableStateOf<Uri?>(null) }
 
     // QR code reading (folder view): decode the selected images off the main
     // thread, then show the payload with Copy buttons.
@@ -397,6 +402,19 @@ fun AlbumScreen(
                         if (dest != src) remap[src] = dest
                         if (r.sourceNeedsDeletion) sourcesToDelete += src
                     }
+                    // Nothing landed and no SAF grant was available: the folder
+                    // refused a direct write (ordinary folders inside HONOR
+                    // Parallel Space do this even with All files access, because
+                    // the grant belongs to the main profile). Ask the system for
+                    // write access to that same folder and retry with the grant.
+                    // Unreadable sources are not a write problem — retrying them
+                    // would only show the picker for nothing.
+                    val writeBlocked = failures.isNotEmpty() &&
+                        failures.none { it.startsWith("Cannot read the source") }
+                    if (successCount == 0 && treeUri == null && destDir != null && writeBlocked) {
+                        retryCopyMove = operation to destDir
+                        return@launch
+                    }
                     val folderLabel = destinationFolderLabel(destDir, treeUri)
                     var keepOriginalsNote = ""
 
@@ -492,6 +510,58 @@ fun AlbumScreen(
         }
     }
 
+    // Retry launcher for a destination that refused a direct write: the user
+    // confirms the same folder in the system picker, then the copy/move runs
+    // again through the granted tree URI.
+    val retryTreeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val tree = result.data?.data
+        if (result.resultCode == android.app.Activity.RESULT_OK && tree != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    tree,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                Log.w("FolderPicker", "takePersistableUriPermission failed", e)
+            }
+            retryTreeUri = tree
+        } else {
+            retryCopyMove = null
+            retryTreeUri = null
+            copyMoveMessage = "Write access was not granted — nothing was changed"
+            scope.launch { snackbarHostState.showSnackbar(copyMoveMessage) }
+        }
+    }
+
+    LaunchedEffect(retryCopyMove, retryTreeUri) {
+        val request = retryCopyMove ?: return@LaunchedEffect
+        val tree = retryTreeUri
+        if (tree == null) {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                )
+                putExtra(
+                    android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                    initialTreeUriFor(request.second)
+                )
+            }
+            retryTreeLauncher.launch(intent)
+        } else {
+            val dir = resolveTreeUriToPath(tree) ?: request.second
+            retryCopyMove = null
+            retryTreeUri = null
+            selectedTreeUri = tree
+            targetFolderForOperation = dir
+            launchCopyMove(request.first, selectedImageUris.toList(), dir, tree)
+        }
+    }
+
     // Load AI selected URIs
     LaunchedEffect(Unit) {
         aiSelectedUris = loadAiSelectedUris(context)
@@ -514,7 +584,6 @@ fun AlbumScreen(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                hasAllFilesAccess = PermissionHelper.hasAllFilesAccess()
                 scope.launch {
                     val fresh = withContext(Dispatchers.IO) {
                         FavouriteStore.loadFavouriteUris(context)
@@ -1332,24 +1401,6 @@ fun AlbumScreen(
                 )
 
                 DrawerItem(
-                    icon = if (hasAllFilesAccess) Icons.Default.FolderOpen else Icons.Default.CreateNewFolder,
-                    label = if (hasAllFilesAccess) "All folders allowed" else "Allow all folders",
-                    selected = hasAllFilesAccess,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        if (!hasAllFilesAccess) {
-                            try {
-                                allFilesAccessLauncher.launch(
-                                    PermissionHelper.allFilesAccessIntent(context)
-                                )
-                            } catch (e: Exception) {
-                                Log.w("AlbumScreen", "All-files settings unavailable", e)
-                            }
-                        }
-                    }
-                )
-
-                DrawerItem(
                     icon = Icons.Default.Delete,
                     label = "Recycle Bin",
                     selected = selectedBrowseMode == BrowseMode.RECYCLE_BIN,
@@ -1926,6 +1977,14 @@ fun AlbumScreen(
                         },
                         onAiEdit = {
                             showAiEditRoleDialog = true
+                        },
+                        onEditImages = {
+                            // Image Edit only offers the photos selected here —
+                            // both as edit targets and as layers.
+                            ImageEditSelectionStore.save(context, selectedImageUris.toList())
+                            isMultiSelectMode = false
+                            selectedImageUris = emptySet()
+                            onNavigateToImageEdit()
                         },
                         onReadQr = {
                             scanQrCodes(selectedImageUris.toList())
@@ -3024,6 +3083,7 @@ private fun BatchMultiSelectBar(
     onResize: () -> Unit,
     onRename: () -> Unit,
     onAiEdit: () -> Unit,
+    onEditImages: () -> Unit,
     onReadQr: () -> Unit,
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit,
@@ -3113,6 +3173,11 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onAiEdit() },
                         text = { Text("AI Edit") },
                         leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onEditImages() },
+                        text = { Text("Edit images") },
+                        leadingIcon = { Icon(Icons.Default.Brush, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     DropdownMenuItem(
                         onClick = { showMenu = false; onReadQr() },
@@ -4039,6 +4104,40 @@ internal fun resolveTreeUriToPath(treeUri: Uri): File? {
     } catch (e: Exception) {
         null
     }
+}
+
+/**
+ * DocumentsProvider URI for [dir], used as EXTRA_INITIAL_URI so the system
+ * picker opens on the folder whose write was refused instead of the root.
+ */
+private fun initialTreeUriFor(dir: File): Uri {
+    val path = try { dir.canonicalPath } catch (e: Exception) { dir.absolutePath }
+    val root = try {
+        android.os.Environment.getExternalStorageDirectory().canonicalPath
+    } catch (e: Exception) {
+        android.os.Environment.getExternalStorageDirectory().absolutePath
+    }
+    val docId = when {
+        path == root -> "primary:"
+        path.startsWith("$root${File.separator}") ->
+            "primary:" + path.removePrefix("$root${File.separator}")
+        path.startsWith("/storage/") -> {
+            val after = path.removePrefix("/storage/")
+            val volume = after.substringBefore(File.separatorChar)
+            val rest = after.substringAfter(File.separatorChar, "")
+            when {
+                // /storage/emulated/<user>/<rest> — the provider is per-user.
+                volume == "emulated" ->
+                    "primary:" + rest.substringAfter(File.separatorChar, "")
+                volume.isNotBlank() -> "$volume:$rest"
+                else -> "primary:"
+            }
+        }
+        else -> "primary:"
+    }
+    return android.provider.DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents", docId
+    )
 }
 
 /** Human-readable name of the copy/move destination for the result snackbar. */
