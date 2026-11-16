@@ -151,6 +151,9 @@ fun ImageDetailScreen(
     var qrScanning by remember(imageUri) { mutableStateOf(false) }
     var qrResults by remember(imageUri) { mutableStateOf<List<QrScanResult>?>(null) }
     var qrEmpty by remember(imageUri) { mutableStateOf(false) }
+    // Set when a move destination failed the write probe — the picker below
+    // opens so the write can succeed through a granted tree instead.
+    var retryFolderPick by remember(imageUri) { mutableStateOf<File?>(null) }
     val coroutineScope = rememberCoroutineScope()
 
     fun scanQr() {
@@ -562,14 +565,26 @@ fun ImageDetailScreen(
 
     /**
      * Copy/move this image through the in-app folder browser (or the SAF tree
-     * picker); moves re-map tag cross-refs and then drop the gallery originals
-     * via the recycle-bin path.
+     * picker); moves re-map tag cross-refs and then remove the gallery original
+     * silently (no trash dialog) once the copy was read back.
      */
     val launchCopyMove: (String, List<String>, File?, Uri?) -> Unit = { op, uris, destDir, treeUri ->
         // Reuse a grant the user already gave for this folder tree so a repeat
         // copy/move writes silently instead of asking again.
         val safTree = treeUri ?: destDir?.let { SafGrantStore.findGrant(context, it) }
         coroutineScope.launch {
+            // A move deletes the original afterwards, so prove the destination
+            // is writable first; when it is not, the caller opens the system
+            // folder picker instead of copying and then failing to clean up.
+            if (op == "move" && safTree == null && destDir != null) {
+                val writable = withContext(Dispatchers.IO) {
+                    FileOperationHelper.canWriteToDestination(context, destDir, null)
+                }
+                if (!writable) {
+                    retryFolderPick = destDir
+                    return@launch
+                }
+            }
             val results = withContext(Dispatchers.IO) {
                 if (op == "move") {
                     FileOperationHelper.batchMoveViaFiles(context, uris, destDir, safTree)
@@ -621,31 +636,23 @@ fun ImageDetailScreen(
                         }
                     }
                 }
-                // Rows this app created can go without the trash confirmation
-                // (the destination was read back above); anything else still
-                // takes the recoverable recycle-bin path.
+                // Remove the originals silently: the copy was read back above, so the
+                // gallery row / real file is deleted directly — no trash dialog.
+                // Anything that survives stays in the gallery and was reported.
                 if (needTrash.isNotEmpty()) {
-                    val owned = withContext(Dispatchers.IO) {
-                        FileOperationHelper.deleteMediaOwned(
-                            context,
-                            needTrash.filter { src ->
-                                val dest = verified.firstOrNull { it.first == src }?.second
-                                dest != null &&
-                                    FileOperationHelper.isVerifiedDestination(context, dest) &&
-                                    FileOperationHelper.ownsMediaRow(context, src)
-                            }
+                    val deleted = withContext(Dispatchers.IO) {
+                        FileOperationHelper.deleteMoveSources(context, needTrash)
+                    }
+                    if (deleted.size < needTrash.size) {
+                        snackbarHostState.showSnackbar(
+                            "${needTrash.size - deleted.size} original(s) could not be deleted"
                         )
                     }
-                    needTrash.removeAll(owned)
                 }
-                if (needTrash.isNotEmpty()) {
-                    trashUris(needTrash, "Moved image(s)", "Moved image(s)", false)
-                } else {
-                    withContext(Dispatchers.IO) {
-                        repository.refreshImagesFromMediaStore()
-                    }
-                    onBack()
+                withContext(Dispatchers.IO) {
+                    repository.refreshImagesFromMediaStore()
                 }
+                onBack()
             } else {
                 withContext(Dispatchers.IO) {
                     repository.refreshImagesFromMediaStore()
@@ -664,6 +671,16 @@ fun ImageDetailScreen(
             targetFolderForOperation = destDir
             launchCopyMove(destinationDialogOp, listOf(imageUri), destDir, uri)
         }
+    }
+
+    // Write probe failed: open the system picker on that folder so the move can
+    // go through a granted tree (remembered by SafGrantStore for next time).
+    LaunchedEffect(retryFolderPick) {
+        val dir = retryFolderPick ?: return@LaunchedEffect
+        retryFolderPick = null
+        destinationDialogOp = "move"
+        targetFolderForOperation = dir
+        folderPickerLauncher.launch(null)
     }
 
     /**

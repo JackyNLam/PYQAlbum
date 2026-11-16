@@ -1478,50 +1478,138 @@ object FileOperationHelper {
      * Returns the number successfully deleted.
      */
     suspend fun deleteMediaDirect(context: Context, uris: List<String>): Int = withContext(Dispatchers.IO) {
-        deleteMediaOwned(context, uris).size
+        deleteMoveSources(context, uris).size
     }
 
     /**
-     * Delete rows this app owns, without the system trash dialog. Returns the
-     * URIs that are really gone; anything the provider refuses stays in the
-     * list's complement so the caller can fall back to the recycle bin.
+     * Delete move sources directly, with NO system confirmation dialog.
+     *
+     * A move must leave the file only in the destination, so the caller runs
+     * this after the copy was read back and verified. Two routes, both silent:
+     * the MediaStore row (allowed for rows this app owns and whenever All files
+     * access is granted) and, when the provider refuses, deleting the real file
+     * behind it. The now-stale MediaStore row is cleaned by re-scanning the
+     * deleted path. Returns the URIs that are really gone; anything left stays
+     * in the gallery and is reported, never silently lost.
      */
-    suspend fun deleteMediaOwned(context: Context, uris: List<String>): List<String> =
+    suspend fun deleteMoveSources(context: Context, uris: List<String>): List<String> =
         withContext(Dispatchers.IO) {
             val deleted = mutableListOf<String>()
             for (u in uris) {
+                val uri = try {
+                    Uri.parse(u)
+                } catch (e: Exception) {
+                    null
+                } ?: continue
                 try {
-                    if (context.contentResolver.delete(Uri.parse(u), null, null) > 0) {
+                    if (context.contentResolver.delete(uri, null, null) > 0) {
                         deleted += u
+                        continue
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "deleteMediaOwned failed for $u", e)
+                    Log.w(TAG, "Resolver delete refused for $u — trying the file path", e)
+                }
+                val path = resolveMediaPath(context, u)
+                if (path != null) {
+                    val removed = try {
+                        File(path).let { it.exists() && it.delete() }
+                    } catch (e: Exception) {
+                        false
+                    }
+                    if (removed) {
+                        try {
+                            context.contentResolver.delete(uri, null, null)
+                        } catch (_: Exception) {
+                        }
+                        try {
+                            MediaStoreUtils.scanFile(context, path)
+                        } catch (_: Exception) {
+                        }
+                        deleted += u
+                    }
                 }
             }
             deleted
         }
 
     /**
-     * True when this app created the MediaStore row. Such a row can be deleted
-     * directly (no system confirmation), which is what lets a move skip the
-     * trash dialog for the app's own files.
+     * Probe whether the app can really create files in a destination BEFORE a
+     * move starts. Copies the strategy order of [copyImage]: real file path,
+     * SAF tree, then a MediaStore insert — each probe is created and removed
+     * again, so nothing is left behind.
      */
-    fun ownsMediaRow(context: Context, uriStr: String): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
-        return try {
-            context.contentResolver.query(
-                Uri.parse(uriStr),
-                arrayOf(MediaStore.MediaColumns.OWNER_PACKAGE_NAME),
-                null, null, null
-            )?.use { cursor ->
-                if (!cursor.moveToFirst()) return false
-                val idx = cursor.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
-                idx >= 0 && cursor.getString(idx) == context.packageName
-            } ?: false
-        } catch (e: Exception) {
-            Log.w(TAG, "ownsMediaRow failed for $uriStr", e)
-            false
+    suspend fun canWriteToDestination(
+        context: Context,
+        destDir: File?,
+        treeUri: Uri? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        val probeName = ".pyqcr_write_probe_${System.nanoTime()}"
+        if (destDir != null) {
+            try {
+                val dirExists = destDir.isDirectory || destDir.mkdirs()
+                if (dirExists) {
+                    val probe = File(destDir, probeName)
+                    if (probe.createNewFile()) {
+                        probe.delete()
+                        return@withContext true
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "File probe failed for $destDir", e)
+            }
         }
+        if (treeUri != null) {
+            try {
+                val dirDocId = resolveSafDirDocumentId(context, treeUri, destDir)
+                if (dirDocId.isNotBlank()) {
+                    val dirDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, dirDocId)
+                    val created = createSafDocument(
+                        context, treeUri, dirDocUri, "application/octet-stream", probeName
+                    )
+                    if (created != null) {
+                        try {
+                            DocumentsContract.deleteDocument(context.contentResolver, created)
+                        } catch (_: Exception) {
+                        }
+                        return@withContext true
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "SAF probe failed for $treeUri", e)
+            }
+        }
+        // Standard media collections accept an insert even when direct file I/O
+        // is blocked, so probe that too (pending rows stay invisible).
+        val relPath = resolveMediaStorePath(destDir) ?: resolveMediaStorePathFromTreeUri(treeUri)
+        if (relPath != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            var probeUri: Uri? = null
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, "$probeName.jpg")
+                    put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                probeUri = context.contentResolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
+                )
+                val target = probeUri
+                val ok = target != null &&
+                    context.contentResolver.openOutputStream(target)
+                        ?.use { it.write(ByteArray(8)) } != null
+                if (ok) return@withContext true
+            } catch (e: Exception) {
+                Log.w(TAG, "MediaStore probe failed for $relPath", e)
+            } finally {
+                probeUri?.let { uri ->
+                    try {
+                        context.contentResolver.delete(uri, null, null)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+        false
     }
 
     /**

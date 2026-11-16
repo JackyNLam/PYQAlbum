@@ -8,7 +8,6 @@ import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animate
@@ -233,34 +232,21 @@ fun VaultScreen(onBack: () -> Unit) {
 
     val scope = rememberCoroutineScope()
 
-    // Originals of moved images leave the gallery — recycle bin first (API 30+,
-    // one system dialog for the whole batch), permanent delete on older APIs.
-    val trashLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            Toast.makeText(context, "Originals moved to the recycle bin", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /** Send [uris] (already copied into the vault) to the recycle bin. */
-    val trashOriginals: (List<String>) -> Unit = { uris ->
+    // Originals of moved images leave the gallery. The vault copy was written
+    // and byte-verified first, so the removal is direct — no system trash
+    // dialog to confirm, matching how a move behaves elsewhere in the app.
+    val removeOriginals: (List<String>) -> Unit = { uris ->
         if (uris.isNotEmpty()) {
-            val trashRequest = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                FileOperationHelper.createTrashRequest(context, uris)
-            } else {
-                null
-            }
-            if (trashRequest != null) {
-                trashLauncher.launch(IntentSenderRequest.Builder(trashRequest).build())
-            } else {
-                // No recycle bin (API < 30): never permanently delete a move
-                // source — the verified vault copy exists, so keep the gallery
-                // original and tell the user it was a copy.
+            scope.launch {
+                val removed = withContext(Dispatchers.IO) {
+                    FileOperationHelper.deleteMoveSources(context, uris)
+                }
+                val kept = uris.size - removed.size
                 Toast.makeText(
                     context,
-                    "Copied to the vault — originals kept (recycle bin unavailable)",
-                    Toast.LENGTH_LONG
+                    if (kept == 0) "Originals removed from the gallery"
+                    else "$kept original(s) kept — could not be deleted from the gallery",
+                    Toast.LENGTH_SHORT
                 ).show()
             }
         }
@@ -1080,8 +1066,8 @@ fun VaultScreen(onBack: () -> Unit) {
                                         else "Moved $ok, $fail failed",
                                         Toast.LENGTH_SHORT
                                     ).show()
-                                    // Originals leave the gallery — recycle bin first
-                                    trashOriginals(movedUris)
+                                    // Originals leave the gallery — the vault copy is already verified
+                                    removeOriginals(movedUris)
                                 }
                             },
                             enabled = importSelection.isNotEmpty() && !importing
@@ -2309,7 +2295,9 @@ private fun VaultBatchBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 4.dp)
-                .navigationBarsPadding()
+                // No navigationBarsPadding(): this bar lives in the Scaffold's
+                // content, whose paddingValues already include the system bars.
+                // Adding the inset again made the bar twice as tall.
                 .height(44.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -3056,6 +3044,35 @@ object VaultStorage {
                     context.contentResolver.delete(destUri!!, null, null)
                     return null
                 }
+            }
+            // The vault entry is about to be deleted, so prove the gallery copy is
+            // really there: a write that silently landed nothing (strict ROM
+            // providers) must not count as a successful move.
+            val written = try {
+                val sizeFromFd = context.contentResolver
+                    .openFileDescriptor(destUri!!, "r")
+                    ?.use { it.statSize } ?: -1L
+                when {
+                    sizeFromFd == bytes.size.toLong() -> true
+                    sizeFromFd > 0L -> false
+                    // Some providers report no size — fall back to counting.
+                    else -> context.contentResolver.openInputStream(destUri!!)?.use { input ->
+                        val buffer = ByteArray(8192)
+                        var total = 0L
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            total += read
+                        }
+                        total == bytes.size.toLong()
+                    } ?: false
+                }
+            } catch (e: Exception) {
+                false
+            }
+            if (!written) {
+                try { context.contentResolver.delete(destUri!!, null, null) } catch (_: Exception) {}
+                return null
             }
             // Index the exported copy so other apps (WeChat's chat picker,
             // file browsers) see it right away.

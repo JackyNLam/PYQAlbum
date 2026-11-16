@@ -261,13 +261,6 @@ fun AlbumScreen(
     var showDestinationDialog by remember { mutableStateOf(false) }
     var destinationDialogOp by remember { mutableStateOf("copy") }
 
-    // Move: stores (snackbar message, source URIs to delete, old→new URI map for
-    // re-pointing tag cross-refs) while waiting for the system delete-request
-    // dialog (createDeleteRequest) to return.
-    var pendingMoveResult by remember {
-        mutableStateOf<Triple<String, List<String>, Map<String, String>>?>(null)
-    }
-
     // Destination folder that refused a direct write (e.g. an ordinary folder
     // inside HONOR Parallel Space, where All files access does not apply).
     // The copy/move is retried after the user confirms the same folder in the
@@ -292,45 +285,6 @@ fun AlbumScreen(
         }
     }
 
-    // System delete confirmation launcher for MOVE — one dialog for all source files
-    // that were copied via MediaStore/SAF (API 30+). On confirm the originals are
-    // trashed; on cancel the copies remain (the move becomes a copy).
-    val moveDeleteLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        val pending = pendingMoveResult ?: return@rememberLauncherForActivityResult
-        pendingMoveResult = null
-        scope.launch {
-            val message = pending.first
-            val uris = pending.second
-            val remap = pending.third
-            // Re-check the destinations immediately before removing the originals:
-            // a copy that has vanished since the batch finished must not cost the
-            // user the source. Anything unverifiable stays where it is.
-            val confirmed = withContext(Dispatchers.IO) {
-                uris.filter { src ->
-                    val dest = remap[src]
-                    dest != null && FileOperationHelper.isVerifiedDestination(context, dest)
-                }
-            }
-            val skipped = uris.size - confirmed.size
-            val finalMessage = if (result.resultCode == android.app.Activity.RESULT_OK) {
-                // Tags follow the moved files — re-point their cross-refs to the new
-                // URIs BEFORE the old rows (and their cross-refs) are removed.
-                remapMovedTags(remap.filterKeys { it in confirmed })
-                if (confirmed.isNotEmpty()) viewModel.deleteImages(confirmed)
-                val base = message.replace("Copied", "Moved")
-                if (skipped > 0) "$base — $skipped original(s) kept (destination missing)" else base
-            } else {
-                "$message — originals kept"
-            }
-            snackbarHostState.showSnackbar(finalMessage)
-            isMultiSelectMode = false
-            selectedImageUris = emptySet()
-            viewModel.refreshImages()
-        }
-    }
-
     /** Launch a copy or move operation on selected URIs. */
     val launchCopyMove: (String, List<String>, File?, Uri?) -> Unit = { operation, uris, destDir, treeUri ->
         // Reuse a grant the user already gave for this tree (one prompt per
@@ -343,6 +297,19 @@ fun AlbumScreen(
         } else {
             scope.launch {
                 try {
+                    // A move removes the original afterwards, so prove the
+                    // destination is writable BEFORE copying anything. When the
+                    // probe fails, ask for a SAF grant on this folder tree and
+                    // retry — that grant is remembered, so it is asked once.
+                    if (operation == "move" && safTree == null) {
+                        val writable = withContext(Dispatchers.IO) {
+                            FileOperationHelper.canWriteToDestination(context, destDir, null)
+                        }
+                        if (!writable && destDir != null) {
+                            retryCopyMove = operation to destDir
+                            return@launch
+                        }
+                    }
                     // Collect a per-file failure reason so the user sees WHY files failed
                     val failures = mutableListOf<String>()
                     val results = if (operation == "copy") {
@@ -402,66 +369,38 @@ fun AlbumScreen(
                     val folderLabel = destinationFolderLabel(destDir, treeUri)
                     var keepOriginalsNote = ""
 
-                    // Move: sources copied via SAF/MediaStore need their original removed.
-                    //
-                    // Rows this app created are deleted directly — the copy was
-                    // just read back, and MediaStore lets an app remove its own
-                    // rows with no dialog, so the trash confirmation is skipped
-                    // for them.
-                    //
-                    // Foreign rows still go through one createTrashRequest dialog
-                    // on API 30+ and land in the recoverable recycle bin — never a
-                    // silent permanent delete.
+                    // Move: the originals must leave the gallery, so the destination is
+                    // probed for write access FIRST and the sources are removed
+                    // only after the copy was read back. Removal is silent (no
+                    // system trash dialog): the app deletes the MediaStore row /
+                    // real file directly — which Android allows for its own rows
+                    // and with All files access — and anything it cannot delete
+                    // stays in the gallery and is reported.
                     if (operation == "move") {
                         val deferredRemap = remap.filterKeys { it in sourcesToDelete }
                         remapMovedTags(remap - deferredRemap.keys)
 
-                        if (sourcesToDelete.isNotEmpty()) {
-                            val ownedCandidates = withContext(Dispatchers.IO) {
-                                sourcesToDelete.filter { src ->
-                                    val dest = remap[src]
-                                    dest != null &&
-                                        FileOperationHelper.isVerifiedDestination(context, dest) &&
-                                        FileOperationHelper.ownsMediaRow(context, src)
-                                }
-                            }
-                            val owned = FileOperationHelper.deleteMediaOwned(context, ownedCandidates)
-                            if (owned.isNotEmpty()) {
-                                remapMovedTags(deferredRemap.filterKeys { it in owned })
-                                sourcesToDelete.removeAll(owned)
-                                viewModel.deleteImages(owned)
+                        val deletable = withContext(Dispatchers.IO) {
+                            sourcesToDelete.filter { src ->
+                                val dest = remap[src]
+                                dest != null &&
+                                    FileOperationHelper.isVerifiedDestination(context, dest)
                             }
                         }
-
-                        if (sourcesToDelete.isNotEmpty()) {
-                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                                // Trash (recoverable), volume-qualified inside — never a
-                                // silent permanent delete of move sources.
-                                val request = FileOperationHelper.createTrashRequest(context, sourcesToDelete)
-                                if (request != null) {
-                                    val baseMsg = buildString {
-                                        append("Copied $successCount/${uris.size} images to $folderLabel")
-                                        if (failures.isNotEmpty()) {
-                                            append("\n${failures.size} failed — ${failures.first()}")
-                                        }
-                                    }
-                                    pendingMoveResult = Triple(
-                                        baseMsg,
-                                        sourcesToDelete.toList(),
-                                        deferredRemap.filterKeys { it in sourcesToDelete }
-                                    )
-                                    moveDeleteLauncher.launch(IntentSenderRequest.Builder(request).build())
-                                    return@launch
-                                }
+                        val noVerifiedCopy = sourcesToDelete.size - deletable.size
+                        val deleted = FileOperationHelper.deleteMoveSources(context, deletable)
+                        if (deleted.isNotEmpty()) {
+                            remapMovedTags(deferredRemap.filterKeys { it in deleted })
+                            viewModel.deleteImages(deleted)
+                        }
+                        val kept = sourcesToDelete.size - deleted.size
+                        if (kept > 0) {
+                            val reason = when {
+                                noVerifiedCopy > 0 && noVerifiedCopy == kept ->
+                                    "destination could not be verified"
+                                else -> "could not be deleted from the gallery"
                             }
-                            // No recoverable trash available (API < 30 or the
-                            // request could not be built). NEVER fall back to a
-                            // permanent delete of the originals: the verified
-                            // copies are in the destination, so leaving the
-                            // originals in place is a safe "move = copy" and
-                            // the user stays in control of the deletion.
-                            remapMovedTags(deferredRemap.filterKeys { it in sourcesToDelete })
-                            keepOriginalsNote = " — originals kept (recycle bin unavailable)"
+                            keepOriginalsNote = " — $kept original(s) kept ($reason)"
                         }
                     }
 
@@ -1372,22 +1311,22 @@ fun AlbumScreen(
                 HorizontalDivider()
 
                 DrawerItem(
-                    icon = Icons.Default.Edit,
-                    label = "AI Edit",
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onNavigateToAiEdit()
-                    }
-                )
-
-                DrawerItem(
                     icon = Icons.Default.Brush,
                     label = "Image Edit",
                     selected = false,
                     onClick = {
                         scope.launch { drawerState.close() }
                         onNavigateToImageEdit()
+                    }
+                )
+
+                DrawerItem(
+                    icon = Icons.Default.Edit,
+                    label = "AI Edit",
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onNavigateToAiEdit()
                     }
                 )
 
