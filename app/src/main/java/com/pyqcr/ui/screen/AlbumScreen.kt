@@ -591,56 +591,63 @@ fun AlbumScreen(
     // provider details so the behaviour can be reported back verbatim.
     var deleteDebugReport by remember { mutableStateOf<String?>(null) }
 
+    /**
+     * Every delete ends here so the user ALWAYS gets a toast with the verified
+     * count — success, partial or nothing — plus a logcat line. Declared before
+     * its first use (Kotlin local declarations cannot be forward-referenced).
+     */
+    fun reportDeleteOutcome(done: Int, total: Int) {
+        val text = "Deleted $done/$total file(s)"
+        try {
+            Toast.makeText(
+                context,
+                text,
+                if (done == total) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+            ).show()
+        } catch (e: Exception) {
+            Log.w("AlbumScreen", "delete toast failed", e)
+        }
+        Log.i("AlbumScreen", text)
+    }
+
     // System delete confirmation launcher (API 30+) — one dialog for the whole batch
     val deleteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            val uris = pendingDeleteUris ?: selectedImageUris.toList()
-            val message = deleteSuccessMessage
-            isMultiSelectMode = false
-            selectedImageUris = emptySet()
-            // The OS can report success and still leave the rows behind (a
-            // clone does exactly that), so verify before claiming x/x.
-            scope.launch {
-                val survivors = withContext(Dispatchers.IO) {
-                    FileOperationHelper.survivingUris(context, uris)
-                }
-                val doneUris = uris.filterNot { it in survivors }
-                if (doneUris.isNotEmpty()) {
-                    viewModel.deleteImages(doneUris)
-                }
-                viewModel.refreshImages()
-                if (doneUris.isNotEmpty()) {
-                    Toast.makeText(
-                        context,
-                        "Deleted ${doneUris.size}/${uris.size} file(s)",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    snackbarHostState.showSnackbar(message.replace("{n}", "${doneUris.size}"))
-                }
-                if (survivors.isNotEmpty()) {
-                    if (doneUris.isEmpty()) {
-                        Toast.makeText(
-                            context,
-                            "Deleted 0/${uris.size} file(s)",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                    deleteDebugReport =
-                        FileOperationHelper.describeDeleteFailure(context, survivors)
-                }
-            }
-        } else {
-            // Denied — but some ROMs apply the trash request even when they
-            // report RESULT_CANCELED, so reload the album to match reality
-            // instead of showing an image that no longer exists.
-            scope.launch {
-                viewModel.refreshImages()
-            }
-        }
+        val uris = pendingDeleteUris ?: selectedImageUris.toList()
+        val message = deleteSuccessMessage
+        val approved = result.resultCode == android.app.Activity.RESULT_OK
         pendingDeleteUris = null
         deleteSuccessMessage = "Deleted {n} image(s)"
+        isMultiSelectMode = false
+        selectedImageUris = emptySet()
+        // The OS can report success and still leave the rows behind (a clone
+        // does exactly that) — and some ROMs apply the trash while reporting
+        // RESULT_CANCELED. Verify both ways and report the real count.
+        scope.launch {
+            val survivors = withContext(Dispatchers.IO) {
+                FileOperationHelper.survivingUris(context, uris)
+            }
+            val doneUris = uris.filterNot { it in survivors }
+            if (doneUris.isNotEmpty()) {
+                viewModel.deleteImages(doneUris)
+                reportDeleteOutcome(doneUris.size, uris.size)
+                snackbarHostState.showSnackbar(message.replace("{n}", "${doneUris.size}"))
+            }
+            viewModel.refreshImages()
+            if (survivors.isNotEmpty()) {
+                if (approved) {
+                    if (doneUris.isEmpty()) reportDeleteOutcome(0, uris.size)
+                    deleteDebugReport =
+                        FileOperationHelper.safeDeleteFailure(context, survivors)
+                } else if (doneUris.isEmpty()) {
+                    try {
+                        Toast.makeText(context, "Delete cancelled", Toast.LENGTH_SHORT).show()
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
     }
 
     // ---- delete orchestration -------------------------------------------
@@ -661,6 +668,35 @@ fun AlbumScreen(
     // then straight to the platform consent dialog.
     val declinedDeleteFolders = remember { mutableStateListOf<String>() }
 
+    /**
+     * Last-resort delete when the platform dialog cannot be used or cannot be
+     * opened at all (a clone often refuses both). Deletes the real files
+     * directly, then always reports the verified count and, on failure, the
+     * copyable diagnostics dialog.
+     */
+    fun directDeleteFallback(pending: List<String>, message: String) {
+        scope.launch {
+            val removed = withContext(Dispatchers.IO) {
+                FileOperationHelper.forceDeleteByPath(context, pending)
+            }
+            if (removed.isNotEmpty()) {
+                viewModel.deleteImages(removed)
+                viewModel.refreshImages()
+                reportDeleteOutcome(removed.size, pending.size)
+                snackbarHostState.showSnackbar(message.replace("{n}", "${removed.size}"))
+            } else {
+                reportDeleteOutcome(0, pending.size)
+                snackbarHostState.showSnackbar("Could not delete ${pending.size} image(s)")
+            }
+            if (removed.size < pending.size) {
+                val failed = pending.filterNot { it in removed }
+                deleteDebugReport = FileOperationHelper.safeDeleteFailure(context, failed)
+            }
+            isMultiSelectMode = false
+            selectedImageUris = emptySet()
+        }
+    }
+
     /** Ask the platform for consent to trash [pending] (API 30+). */
     fun launchTrashConsent(pending: List<String>, message: String = "Moved {n} image(s) to the recycle bin") {
         val sender = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -677,41 +713,21 @@ fun AlbumScreen(
         }
         if (sender == null) {
             // No consent request can be built for these rows (a clone refuses
-            // to build one, and some ROMs reject foreign media outright). Try
-            // the direct file delete instead of dead-ending the user.
-            scope.launch {
-                val removed = withContext(Dispatchers.IO) {
-                    FileOperationHelper.forceDeleteByPath(context, pending)
-                }
-                if (removed.isNotEmpty()) {
-                    viewModel.deleteImages(removed)
-                    viewModel.refreshImages()
-                    Toast.makeText(
-                        context,
-                        "Deleted ${removed.size}/${pending.size} file(s)",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    snackbarHostState.showSnackbar(message.replace("{n}", "${removed.size}"))
-                } else {
-                    Toast.makeText(
-                        context,
-                        "Deleted 0/${pending.size} file(s)",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    snackbarHostState.showSnackbar("Could not delete ${pending.size} image(s)")
-                }
-                if (removed.size < pending.size) {
-                    val failed = pending.filterNot { it in removed }
-                    deleteDebugReport = FileOperationHelper.describeDeleteFailure(context, failed)
-                }
-                isMultiSelectMode = false
-                selectedImageUris = emptySet()
-            }
+            // to build one, and some ROMs reject foreign media outright).
+            directDeleteFallback(pending, message)
             return
         }
         pendingDeleteUris = pending
         deleteSuccessMessage = message
-        deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        try {
+            deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        } catch (e: Exception) {
+            // The dialog itself cannot be opened (clone / stripped DocumentsUI):
+            // never dead-end — delete directly and report.
+            Log.w("AlbumScreen", "trash consent dialog unavailable", e)
+            pendingDeleteUris = null
+            directDeleteFallback(pending, message)
+        }
     }
 
     // All files access, requested for DELETES specifically (copy/move has its
@@ -778,7 +794,7 @@ fun AlbumScreen(
                     )
                     if (failed != null) {
                         deleteDebugReport =
-                            FileOperationHelper.describeDeleteFailure(context, failed)
+                            FileOperationHelper.safeDeleteFailure(context, failed)
                     }
                 }
             }
@@ -797,14 +813,40 @@ fun AlbumScreen(
         val job = deleteJob ?: return@LaunchedEffect
         deleteJob = null
         deleteJobInFlight = job
-        val outcome = withContext(Dispatchers.IO) {
-            FileOperationHelper.attemptDelete(
-                context = context,
-                uris = job.uris,
-                allowAllFilesPrompt = job.askAllFiles,
-                allowFolderPrompt = job.askFolder,
-                declinedFolders = declinedDeleteFolders.toSet()
-            )
+        // Immediate feedback so the delete is never silent, even if a later
+        // stage throws or the platform dialog refuses to appear.
+        try {
+            Toast.makeText(
+                context,
+                "Deleting ${job.uris.size} file(s)…",
+                Toast.LENGTH_SHORT
+            ).show()
+        } catch (_: Exception) {
+        }
+        val outcome = try {
+            withContext(Dispatchers.IO) {
+                FileOperationHelper.attemptDelete(
+                    context = context,
+                    uris = job.uris,
+                    allowAllFilesPrompt = job.askAllFiles,
+                    allowFolderPrompt = job.askFolder,
+                    declinedFolders = declinedDeleteFolders.toSet()
+                )
+            }
+        } catch (e: Exception) {
+            // A provider/ROM exception must not leave the user without any
+            // feedback (an exception here cancels the effect silently).
+            Log.e("AlbumScreen", "attemptDelete failed", e)
+            null
+        }
+        if (outcome == null) {
+            deleteJobInFlight = null
+            reportDeleteOutcome(0, job.uris.size)
+            deleteDebugReport =
+                FileOperationHelper.safeDeleteFailure(context, job.uris)
+            isMultiSelectMode = false
+            selectedImageUris = emptySet()
+            return@LaunchedEffect
         }
         when (outcome) {
             is FileOperationHelper.DeleteOutcome.Done -> {
@@ -818,11 +860,7 @@ fun AlbumScreen(
                 val doneCount = outcome.removed.size + outcome.trashed.size
                 val template =
                     if (outcome.trashed.isNotEmpty()) job.trashTemplate else job.directTemplate
-                Toast.makeText(
-                    context,
-                    "Deleted $doneCount/${job.uris.size} file(s)",
-                    Toast.LENGTH_SHORT
-                ).show()
+                reportDeleteOutcome(doneCount, job.uris.size)
                 snackbarHostState.showSnackbar(template.replace("{n}", "$doneCount"))
                 isMultiSelectMode = false
                 selectedImageUris = emptySet()
@@ -1087,6 +1125,7 @@ fun AlbumScreen(
                 }
                 binFolder = null
                 binViewerIndex = -1
+                reportDeleteOutcome(removed, pending.size)
                 snackbarHostState.showSnackbar(
                     if (remaining.isEmpty()) {
                         "Deleted ${pending.size} item(s) permanently"
@@ -1110,6 +1149,7 @@ fun AlbumScreen(
                 val removed = pending.size - remaining.size
                 if (removed > 0) {
                     viewModel.deleteImages(pending - remaining.toSet())
+                    reportDeleteOutcome(removed, pending.size)
                     snackbarHostState.showSnackbar(
                         "Deleted $removed of ${pending.size} item(s); ${remaining.size} kept in the recycle bin"
                     )
@@ -1257,6 +1297,7 @@ fun AlbumScreen(
                     }
                     binFolder = null
                     binViewerIndex = -1
+                    reportDeleteOutcome(uris.size, uris.size)
                     snackbarHostState.showSnackbar("Deleted ${uris.size} item(s) permanently")
                     isMultiSelectMode = false
                     selectedImageUris = emptySet()
@@ -1296,10 +1337,12 @@ fun AlbumScreen(
                         // Everything was already gone — nothing left to delete.
                         binFolder = null
                         binViewerIndex = -1
+                        reportDeleteOutcome(uris.size, uris.size)
                         snackbarHostState.showSnackbar("Deleted ${uris.size} item(s) permanently")
                         isMultiSelectMode = false
                         selectedImageUris = emptySet()
                     } else {
+                        reportDeleteOutcome(deletedCount, uris.size)
                         snackbarHostState.showSnackbar("Could not delete $failedCount item(s)")
                     }
                 }
@@ -2972,6 +3015,7 @@ fun AlbumScreen(
                                             trashedMedia = withContext(Dispatchers.IO) {
                                                 repository.getTrashedMedia()
                                             }
+                                            reportDeleteOutcome(1, 1)
                                             snackbarHostState.showSnackbar("Deleted permanently")
                                         } else {
                                             // Only hand LIVE rows to the system
@@ -2987,6 +3031,7 @@ fun AlbumScreen(
                                                 trashedMedia = withContext(Dispatchers.IO) {
                                                     repository.getTrashedMedia()
                                                 }
+                                                reportDeleteOutcome(1, 1)
                                                 snackbarHostState.showSnackbar("Deleted permanently")
                                             } else {
                                                 // Direct trash-volume delete failed

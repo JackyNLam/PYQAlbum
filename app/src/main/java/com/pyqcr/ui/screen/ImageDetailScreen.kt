@@ -530,14 +530,36 @@ fun ImageDetailScreen(
     // Shown when the delete could not remove the file; holds the provider
     // details so the clone behaviour can be reported verbatim.
     var deleteDebugReport by remember { mutableStateOf<String?>(null) }
+
+    /**
+     * Single place for delete feedback so a toast always appears — success,
+     * partial or nothing — plus a logcat line. Declared before first use
+     * (Kotlin local declarations cannot be forward-referenced).
+     */
+    fun reportDeleteOutcome(done: Int, total: Int) {
+        val text = "Deleted $done/$total file(s)"
+        try {
+            Toast.makeText(
+                context,
+                text,
+                if (done == total) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+            ).show()
+        } catch (e: Exception) {
+            android.util.Log.w("ImageDetail", "delete toast failed", e)
+        }
+        android.util.Log.i("ImageDetail", text)
+    }
+
     val deleteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         val pending = pendingDeleteUris
+        val approved = result.resultCode == android.app.Activity.RESULT_OK
         pendingDeleteUris = null
-        if (result.resultCode == android.app.Activity.RESULT_OK && pending != null) {
+        if (pending != null) {
             coroutineScope.launch {
-                // The OS can say OK and still leave the row behind, so check.
+                // The OS can say OK and still leave the row behind, and some
+                // ROMs apply the trash while reporting RESULT_CANCELED.
                 val survivors = withContext(Dispatchers.IO) {
                     FileOperationHelper.survivingUris(context, pending)
                 }
@@ -546,23 +568,20 @@ fun ImageDetailScreen(
                     repository.refreshImagesFromMediaStore()
                 }
                 if (done > 0) {
-                    Toast.makeText(
-                        context,
-                        "Deleted $done/${pending.size} file(s)",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    reportDeleteOutcome(done, pending.size)
                     snackbarHostState.showSnackbar(pendingDeleteMessage)
                     onBack()
+                } else if (approved) {
+                    reportDeleteOutcome(0, pending.size)
                 } else {
-                    Toast.makeText(
-                        context,
-                        "Deleted 0/${pending.size} file(s)",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    try {
+                        Toast.makeText(context, "Delete cancelled", Toast.LENGTH_SHORT).show()
+                    } catch (_: Exception) {
+                    }
                 }
-                if (survivors.isNotEmpty()) {
+                if (survivors.isNotEmpty() && approved) {
                     deleteDebugReport =
-                        FileOperationHelper.describeDeleteFailure(context, survivors)
+                        FileOperationHelper.safeDeleteFailure(context, survivors)
                 }
             }
         }
@@ -613,6 +632,35 @@ fun ImageDetailScreen(
     var retryDeleteFolder by remember { mutableStateOf<File?>(null) }
     var declinedDeleteFolder by remember { mutableStateOf<String?>(null) }
 
+    /**
+     * Last-resort delete when the platform dialog cannot be used or opened
+     * (a clone usually refuses). Deletes the file directly, then always
+     * reports the verified count and, on failure, the diagnostics dialog.
+     */
+    fun directDeleteFallback(pending: List<String>, message: String) {
+        coroutineScope.launch {
+            val removed = withContext(Dispatchers.IO) {
+                FileOperationHelper.forceDeleteByPath(context, pending)
+            }
+            if (removed.isNotEmpty()) {
+                reportDeleteOutcome(removed.size, pending.size)
+                snackbarHostState.showSnackbar(message)
+                withContext(Dispatchers.IO) {
+                    repository.refreshImagesFromMediaStore()
+                }
+                onBack()
+            } else {
+                reportDeleteOutcome(0, pending.size)
+                snackbarHostState.showSnackbar("Could not delete the image")
+                deleteDebugReport =
+                    FileOperationHelper.safeDeleteFailure(context, pending)
+                withContext(Dispatchers.IO) {
+                    repository.refreshImagesFromMediaStore()
+                }
+            }
+        }
+    }
+
     /** Ask the platform for consent to trash [pending] (API 30+). */
     fun launchTrashConsent(pending: List<String>, message: String) {
         val sender = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -630,40 +678,20 @@ fun ImageDetailScreen(
         if (sender == null) {
             // No consent request can be built (a clone refuses one, some ROMs
             // reject foreign media). Delete the file directly instead.
-            coroutineScope.launch {
-                val removed = withContext(Dispatchers.IO) {
-                    FileOperationHelper.forceDeleteByPath(context, pending)
-                }
-                if (removed.isNotEmpty()) {
-                    Toast.makeText(
-                        context,
-                        "Deleted ${removed.size}/${pending.size} file(s)",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    snackbarHostState.showSnackbar(message)
-                    withContext(Dispatchers.IO) {
-                        repository.refreshImagesFromMediaStore()
-                    }
-                    onBack()
-                } else {
-                    Toast.makeText(
-                        context,
-                        "Deleted 0/${pending.size} file(s)",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    snackbarHostState.showSnackbar("Could not delete the image")
-                    deleteDebugReport =
-                        FileOperationHelper.describeDeleteFailure(context, pending)
-                    withContext(Dispatchers.IO) {
-                        repository.refreshImagesFromMediaStore()
-                    }
-                }
-            }
+            directDeleteFallback(pending, message)
             return
         }
         pendingDeleteUris = pending
         pendingDeleteMessage = message
-        deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        try {
+            deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        } catch (e: Exception) {
+            // Dialog cannot be opened (clone / stripped DocumentsUI) — never
+            // dead-end: delete directly and report.
+            android.util.Log.w("ImageDetail", "trash consent dialog unavailable", e)
+            pendingDeleteUris = null
+            directDeleteFallback(pending, message)
+        }
     }
 
     val deleteAllFilesLauncher = rememberLauncherForActivityResult(
@@ -721,7 +749,7 @@ fun ImageDetailScreen(
                     )
                     if (failed != null) {
                         deleteDebugReport =
-                            FileOperationHelper.describeDeleteFailure(context, failed)
+                            FileOperationHelper.safeDeleteFailure(context, failed)
                     }
                 }
             }
@@ -740,14 +768,36 @@ fun ImageDetailScreen(
         val job = deleteJob ?: return@LaunchedEffect
         deleteJob = null
         deleteJobInFlight = job
-        val outcome = withContext(Dispatchers.IO) {
-            FileOperationHelper.attemptDelete(
-                context = context,
-                uris = job.uris,
-                allowAllFilesPrompt = job.askAllFiles,
-                allowFolderPrompt = job.askFolder,
-                declinedFolders = setOfNotNull(declinedDeleteFolder)
-            )
+        // Immediate feedback so the delete is never silent, even if a later
+        // stage throws or the platform dialog refuses to appear.
+        try {
+            Toast.makeText(
+                context,
+                "Deleting ${job.uris.size} file(s)…",
+                Toast.LENGTH_SHORT
+            ).show()
+        } catch (_: Exception) {
+        }
+        val outcome = try {
+            withContext(Dispatchers.IO) {
+                FileOperationHelper.attemptDelete(
+                    context = context,
+                    uris = job.uris,
+                    allowAllFilesPrompt = job.askAllFiles,
+                    allowFolderPrompt = job.askFolder,
+                    declinedFolders = setOfNotNull(declinedDeleteFolder)
+                )
+            }
+        } catch (e: Exception) {
+            // Never leave the user without feedback if the provider throws.
+            android.util.Log.e("ImageDetail", "attemptDelete failed", e)
+            null
+        }
+        if (outcome == null) {
+            deleteJobInFlight = null
+            reportDeleteOutcome(0, job.uris.size)
+            deleteDebugReport = FileOperationHelper.safeDeleteFailure(context, job.uris)
+            return@LaunchedEffect
         }
         when (outcome) {
             is FileOperationHelper.DeleteOutcome.Done -> {
@@ -756,11 +806,7 @@ fun ImageDetailScreen(
                     repository.refreshImagesFromMediaStore()
                 }
                 val doneCount = outcome.removed.size + outcome.trashed.size
-                Toast.makeText(
-                    context,
-                    "Deleted $doneCount/${job.uris.size} file(s)",
-                    Toast.LENGTH_SHORT
-                ).show()
+                reportDeleteOutcome(doneCount, job.uris.size)
                 snackbarHostState.showSnackbar(
                     if (outcome.trashed.isNotEmpty()) job.trashTemplate else job.directTemplate
                 )

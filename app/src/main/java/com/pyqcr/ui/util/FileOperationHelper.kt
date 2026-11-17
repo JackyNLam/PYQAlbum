@@ -1776,6 +1776,20 @@ object FileOperationHelper {
         }
 
     /**
+     * [describeDeleteFailure] that can never throw — the failure dialog must
+     * always have something to show, even if a provider query dies midway.
+     */
+    suspend fun safeDeleteFailure(context: Context, uris: List<String>): String {
+        return try {
+            describeDeleteFailure(context, uris)
+        } catch (e: Exception) {
+            Log.w(TAG, "describeDeleteFailure failed", e)
+            "Delete failed (details unavailable: ${e.message})\n" +
+                uris.take(3).joinToString("\n")
+        }
+    }
+
+    /**
      * Move [uris] into the recoverable system recycle bin WITHOUT showing the
      * platform confirmation dialog: set `IS_TRASHED = 1` directly, which is the
      * exact write MediaProvider performs when the user confirms a
