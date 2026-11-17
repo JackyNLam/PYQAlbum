@@ -1628,6 +1628,13 @@ fun AlbumScreen(
                     }
                 )
 
+                DrawerItem(
+                    icon = Icons.Default.Search,
+                    label = "Search",
+                    selected = false,
+                    onClick = { pendingDrawerNav = "search" }
+                )
+
                 // Rating tab removed — sorting by rating is now done via the Sort button
                 // inside a folder's image grid view.
 
@@ -1661,13 +1668,6 @@ fun AlbumScreen(
                     label = "AI Rating",
                     selected = false,
                     onClick = { pendingDrawerNav = "ai_rating" }
-                )
-
-                DrawerItem(
-                    icon = Icons.Default.Search,
-                    label = "Search",
-                    selected = false,
-                    onClick = { pendingDrawerNav = "search" }
                 )
 
                 DrawerItem(
@@ -2278,7 +2278,7 @@ fun AlbumScreen(
                                     )
                                 }
                             } else {
-                                WechatGridSelectionStore.save(context, uris)
+                                WechatGridSelectionStore.add(context, uris)
                                 isMultiSelectMode = false
                                 selectedImageUris = emptySet()
                                 onNavigateToWechatGrid()

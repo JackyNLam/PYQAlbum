@@ -28,6 +28,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import coil3.compose.AsyncImage
@@ -60,6 +61,31 @@ fun WechatGridScreen(onBack: () -> Unit) {
         repository.getAllImages().collect { images = it }
     }
 
+    // The photo pool. The folder view's batch menu (⋮ → WeChat Grid) and the
+    // viewer's swipe-up bar ADD to it, so the next batch grows the same pool
+    // instead of replacing it. Both pickers below list this pool and nothing
+    // else — the rest of the gallery is never offered inside this screen.
+    var pool by remember { mutableStateOf(WechatGridSelectionStore.loadPool(context)) }
+
+    // Drop entries whose photo is gone (deleted elsewhere) so the picker never
+    // shows an unopenable tile, and write the pruned pool back. Only image URIs
+    // are pruned: the folder grid's batch selection can include videos, which
+    // are not part of `images` but must stay in the pool.
+    LaunchedEffect(images, pool) {
+        if (images.isEmpty() || pool.isEmpty()) return@LaunchedEffect
+        val alive = images.map { it.uri }.toSet()
+        val kept = pool.filter { it in alive || !it.contains("/images/") }
+        if (kept.size != pool.size) {
+            WechatGridSelectionStore.savePool(context, kept)
+            pool = kept
+        }
+    }
+
+    val poolImages = remember(pool, images) {
+        val byUri = images.associateBy { it.uri }
+        pool.mapNotNull { byUri[it] }
+    }
+
     var mode by remember { mutableIntStateOf(54) }
     var centerUri by remember { mutableStateOf<String?>(null) }
     var others by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -73,13 +99,15 @@ fun WechatGridScreen(onBack: () -> Unit) {
     var showReorder by remember { mutableStateOf(false) }
     var previewUri by remember { mutableStateOf<String?>(null) }
 
-    // Photos handed over from the folder view or the viewer: the first one is
-    // the center photo, the rest fill the hidden photos in that order.
-    LaunchedEffect(Unit) {
-        val pending = WechatGridSelectionStore.load(context) ?: return@LaunchedEffect
-        WechatGridSelectionStore.clear(context)
-        centerUri = pending.center
-        val hidden = pending.hidden.take(WechatGridEngine.MODES.last())
+    // Seed the grid from the pool once the library has loaded: the first photo
+    // becomes the center photo, the rest fill the hidden slots in pool order.
+    // One shot — later edits inside this screen must not be overwritten.
+    var seededFromPool by remember { mutableStateOf(false) }
+    LaunchedEffect(poolImages) {
+        if (seededFromPool || poolImages.isEmpty()) return@LaunchedEffect
+        seededFromPool = true
+        centerUri = poolImages.first().uri
+        val hidden = poolImages.drop(1).map { it.uri }.take(WechatGridEngine.MODES.last())
         if (hidden.isNotEmpty()) {
             others = hidden
             mode = WechatGridEngine.MODES.firstOrNull { it >= hidden.size }
@@ -158,7 +186,7 @@ fun WechatGridScreen(onBack: () -> Unit) {
         if (editingCenter != null) {
             WechatGridPicker(
                 title = if (editingCenter) "Choose the center photo" else "Choose hidden photos",
-                images = images,
+                images = poolImages,
                 selected = pickerSelection,
                 limit = if (editingCenter) 1 else mode,
                 padding = padding,
@@ -247,6 +275,35 @@ fun WechatGridScreen(onBack: () -> Unit) {
                                 Text(if (centerUri == null) "Choose" else "Change")
                             }
                         }
+                    }
+                }
+            }
+
+            // ---- pool ----
+            // Where the photos come from: the folder view's batch menu and a
+            // photo's WeChat Grid button add to this pool, and both "Choose"
+            // pickers above/list below it. Clear pool empties it for good.
+            item {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        "Pool: ${pool.size} photo(s) — the only photos " +
+                            "the pickers offer",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (pool.isNotEmpty()) {
+                        TextButton(onClick = {
+                            WechatGridSelectionStore.clear(context)
+                            pool = emptyList()
+                            centerUri = null
+                            others = emptyList()
+                            results = emptyList()
+                            status = ""
+                        }) { Text("Clear pool") }
                     }
                 }
             }
@@ -564,8 +621,14 @@ private fun WechatGridPicker(
             TextButton(onClick = onDone) { Text("Done") }
         }
         if (images.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No photos in the gallery")
+            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    "The pool is empty. Add photos from the folder view's ⋮ menu " +
+                        "(WeChat Grid) or from a photo's WeChat Grid button.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
             }
         } else {
         LazyVerticalGrid(

@@ -1414,12 +1414,11 @@ fun ImageDetailScreen(
                                     active = qrScanning
                                 ) { scanQr() }
                             }
-                            // Open WeChat Grid with this photo as the center
-                            // tile (the rest are picked there or in the folder
-                            // view's batch menu).
+                            // Add this photo to the WeChat Grid pool, then open
+                            // the screen (the pool is what its pickers list).
                             if (!isVideo) {
                                 DetailIconButton(Icons.Default.GridView, "WeChat Grid") {
-                                    WechatGridSelectionStore.save(context, listOf(imageUri))
+                                    WechatGridSelectionStore.add(context, listOf(imageUri))
                                     onOpenWechatGrid()
                                 }
                             }

@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sort
@@ -233,295 +233,307 @@ fun SearchScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Search") },
+                title = { Text(if (applied == null) "Search" else "Search results") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    if (applied != null) {
+                        // Back to the form with everything still filled in — the
+                        // criteria and the result list never share the screen.
+                        TextButton(onClick = { applied = null }) {
+                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Filters")
+                        }
                     }
                 }
             )
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 360.dp)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = nameQuery,
-                    onValueChange = { nameQuery = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Filename contains") },
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    trailingIcon = {
-                        if (nameQuery.isNotEmpty()) {
-                            IconButton(onClick = { nameQuery = "" }) {
-                                Icon(Icons.Default.Clear, contentDescription = "Clear")
-                            }
-                        }
-                    },
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Text,
-                        imeAction = ImeAction.Search
-                    ),
-                    // The keyboard's Search key runs exactly what the button
-                    // runs — the list never changes while typing.
-                    keyboardActions = KeyboardActions(onSearch = { runSearch() })
-                )
-
-                Box {
+            if (applied == null) {
+                // ---- criteria only ------------------------------------------
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     OutlinedTextField(
-                        value = folderQuery,
-                        onValueChange = { folderQuery = it },
+                        value = nameQuery,
+                        onValueChange = { nameQuery = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("Folder name contains") },
+                        label = { Text("Filename contains") },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                         trailingIcon = {
-                            IconButton(onClick = { showFolderMenu = true }) {
-                                Icon(Icons.Default.ExpandMore, contentDescription = "Folders")
+                            if (nameQuery.isNotEmpty()) {
+                                IconButton(onClick = { nameQuery = "" }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear")
+                                }
                             }
-                        }
+                        },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Text,
+                            imeAction = ImeAction.Search
+                        ),
+                        // The keyboard's Search key runs exactly what the button
+                        // runs — the list never changes while typing.
+                        keyboardActions = KeyboardActions(onSearch = { runSearch() })
                     )
-                    DropdownMenu(
-                        expanded = showFolderMenu,
-                        onDismissRequest = { showFolderMenu = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("All folders") },
-                            onClick = {
-                                folderQuery = ""
-                                showFolderMenu = false
+
+                    Box {
+                        OutlinedTextField(
+                            value = folderQuery,
+                            onValueChange = { folderQuery = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text("Folder name contains") },
+                            trailingIcon = {
+                                IconButton(onClick = { showFolderMenu = true }) {
+                                    Icon(Icons.Default.ExpandMore, contentDescription = "Folders")
+                                }
                             }
                         )
-                        folders.forEach { folder ->
+                        DropdownMenu(
+                            expanded = showFolderMenu,
+                            onDismissRequest = { showFolderMenu = false }
+                        ) {
                             DropdownMenuItem(
-                                text = { Text(folder) },
+                                text = { Text("All folders") },
                                 onClick = {
-                                    folderQuery = folder
+                                    folderQuery = ""
                                     showFolderMenu = false
                                 }
                             )
+                            folders.forEach { folder ->
+                                DropdownMenuItem(
+                                    text = { Text(folder) },
+                                    onClick = {
+                                        folderQuery = folder
+                                        showFolderMenu = false
+                                    }
+                                )
+                            }
                         }
                     }
-                }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = dateFrom,
-                        onValueChange = { dateFrom = it },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        label = { Text("From") },
-                        placeholder = { Text("2025-01-31") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                    )
-                    OutlinedTextField(
-                        value = dateTo,
-                        onValueChange = { dateTo = it },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        label = { Text("To") },
-                        placeholder = { Text("2025-12-31") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                    )
-                }
-                val badFrom = dateFrom.isNotBlank() && parseDateBound(dateFrom, false) == null
-                val badTo = dateTo.isNotBlank() && parseDateBound(dateTo, true) == null
-                if (badFrom || badTo) {
-                    Text(
-                        "Date needs yyyy-MM-dd, yyyy-MM or yyyy",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                ) {
-                    Chip("Today") { setLastDays(1) }
-                    Chip("7 days") { setLastDays(7) }
-                    Chip("30 days") { setLastDays(30) }
-                    Chip("This year") { setThisYear() }
-                    Chip("Any date") {
-                        dateFrom = ""
-                        dateTo = ""
-                    }
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = minSizeMb,
-                        onValueChange = { minSizeMb = it },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        label = { Text("Min MB") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
-                    )
-                    OutlinedTextField(
-                        value = maxSizeMb,
-                        onValueChange = { maxSizeMb = it },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        label = { Text("Max MB") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
-                    )
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                ) {
-                    Chip("< 1 MB") {
-                        minSizeMb = ""
-                        maxSizeMb = "1"
-                    }
-                    Chip("1–10 MB") {
-                        minSizeMb = "1"
-                        maxSizeMb = "10"
-                    }
-                    Chip("10–50 MB") {
-                        minSizeMb = "10"
-                        maxSizeMb = "50"
-                    }
-                    Chip("> 50 MB") {
-                        minSizeMb = "50"
-                        maxSizeMb = ""
-                    }
-                    Chip("Any size") {
-                        minSizeMb = ""
-                        maxSizeMb = ""
-                    }
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                ) {
-                    Text(
-                        text = if (minRating <= 0f) "Any rating" else "Rating ≥ %.1f ★".format(minRating),
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.width(120.dp)
-                    )
-                    (1..5).forEach { stars ->
-                        FilterChip(
-                            selected = minRating == stars.toFloat(),
-                            onClick = {
-                                minRating = if (minRating == stars.toFloat()) 0f else stars.toFloat()
-                            },
-                            label = { Text("$stars★") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = dateFrom,
+                            onValueChange = { dateFrom = it },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            label = { Text("From") },
+                            placeholder = { Text("2025-01-31") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
+                        OutlinedTextField(
+                            value = dateTo,
+                            onValueChange = { dateTo = it },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            label = { Text("To") },
+                            placeholder = { Text("2025-12-31") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                         )
                     }
-                }
-
-                Text(
-                    text = if (minAiScore <= 0f) "Any AI score"
-                    else "AI score ≥ ${minAiScore.toInt()}",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Slider(
-                    value = minAiScore,
-                    onValueChange = { minAiScore = it },
-                    valueRange = 0f..100f,
-                    steps = 19
-                )
-                Spacer(Modifier.height(4.dp))
-                // The only thing that runs a search: pressing it snapshots the
-                // form and fills the list below. Typing never filters.
-                Button(
-                    onClick = { runSearch() },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        Icons.Default.Search,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Search")
-                }
-            }
-
-            HorizontalDivider()
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
-            ) {
-                Text(
-                    text = if (applied == null) "${images.size} photos"
-                    else "${results.size} of ${images.size}",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-                )
-                Box {
-                    TextButton(onClick = { showSortMenu = true }) {
-                        Icon(Icons.Default.Sort, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(sort.label, style = MaterialTheme.typography.bodyMedium)
+                    val badFrom = dateFrom.isNotBlank() && parseDateBound(dateFrom, false) == null
+                    val badTo = dateTo.isNotBlank() && parseDateBound(dateTo, true) == null
+                    if (badFrom || badTo) {
+                        Text(
+                            "Date needs yyyy-MM-dd, yyyy-MM or yyyy",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
-                    DropdownMenu(
-                        expanded = showSortMenu,
-                        onDismissRequest = { showSortMenu = false }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
                     ) {
-                        SearchSort.values().forEach { option ->
-                            DropdownMenuItem(
-                                text = { Text(option.label) },
+                        Chip("Today") { setLastDays(1) }
+                        Chip("7 days") { setLastDays(7) }
+                        Chip("30 days") { setLastDays(30) }
+                        Chip("This year") { setThisYear() }
+                        Chip("Any date") {
+                            dateFrom = ""
+                            dateTo = ""
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = minSizeMb,
+                            onValueChange = { minSizeMb = it },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            label = { Text("Min MB") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                        )
+                        OutlinedTextField(
+                            value = maxSizeMb,
+                            onValueChange = { maxSizeMb = it },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            label = { Text("Max MB") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                        )
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    ) {
+                        Chip("< 1 MB") {
+                            minSizeMb = ""
+                            maxSizeMb = "1"
+                        }
+                        Chip("1–10 MB") {
+                            minSizeMb = "1"
+                            maxSizeMb = "10"
+                        }
+                        Chip("10–50 MB") {
+                            minSizeMb = "10"
+                            maxSizeMb = "50"
+                        }
+                        Chip("> 50 MB") {
+                            minSizeMb = "50"
+                            maxSizeMb = ""
+                        }
+                        Chip("Any size") {
+                            minSizeMb = ""
+                            maxSizeMb = ""
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    ) {
+                        Text(
+                            text = if (minRating <= 0f) "Any rating" else "Rating ≥ %.1f ★".format(minRating),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.width(120.dp)
+                        )
+                        (1..5).forEach { stars ->
+                            FilterChip(
+                                selected = minRating == stars.toFloat(),
                                 onClick = {
-                                    sort = option
-                                    showSortMenu = false
-                                }
+                                    minRating = if (minRating == stars.toFloat()) 0f else stars.toFloat()
+                                },
+                                label = { Text("$stars★") }
                             )
                         }
                     }
-                }
-                if (hasFilters || applied != null) {
-                    OutlinedButton(onClick = { clearFilters() }) {
-                        Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Clear")
-                    }
-                }
-            }
 
-            if (results.isEmpty()) {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Icon(
-                        Icons.Default.Search,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.size(36.dp)
-                    )
-                    Spacer(Modifier.height(12.dp))
                     Text(
-                        text = when {
-                            images.isEmpty() -> "No photos in the library yet."
-                            applied == null -> "Set the filters and press Search."
-                            else -> "Nothing matches the last search."
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = if (minAiScore <= 0f) "Any AI score"
+                        else "AI score ≥ ${minAiScore.toInt()}",
+                        style = MaterialTheme.typography.bodyMedium
                     )
+                    Slider(
+                        value = minAiScore,
+                        onValueChange = { minAiScore = it },
+                        valueRange = 0f..100f,
+                        steps = 19
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    // The only thing that runs a search: pressing it snapshots the
+                    // form and switches this screen to the result list. Typing in a
+                    // field never re-filters the library.
+                    Button(
+                        onClick = { runSearch() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            Icons.Default.Search,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Search")
+                    }
+                    Spacer(Modifier.height(16.dp))
                 }
             } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 24.dp)
-                ) {
-                    items(results, key = { it.uri }) { item ->
-                        SearchResultRow(
-                            item = item,
-                            onClick = { onImageClick(item.uri, resultUris) }
+                // ---- results only -------------------------------------------
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = "${results.size} of ${images.size}",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f)
                         )
-                        HorizontalDivider()
+                        Box {
+                            TextButton(onClick = { showSortMenu = true }) {
+                                Icon(Icons.Default.Sort, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(sort.label, style = MaterialTheme.typography.bodyMedium)
+                            }
+                            DropdownMenu(
+                                expanded = showSortMenu,
+                                onDismissRequest = { showSortMenu = false }
+                            ) {
+                                SearchSort.values().forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(option.label) },
+                                        onClick = {
+                                            sort = option
+                                            showSortMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        if (hasFilters) {
+                            OutlinedButton(onClick = { clearFilters() }) {
+                                Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Clear")
+                            }
+                        }
+                    }
+
+                    if (results.isEmpty()) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                Icons.Default.Search,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.outline,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                text = if (images.isEmpty()) "No photos in the library yet."
+                                else "Nothing matches these filters.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = 24.dp)
+                        ) {
+                            items(results, key = { it.uri }) { item ->
+                                SearchResultRow(
+                                    item = item,
+                                    onClick = { onImageClick(item.uri, resultUris) }
+                                )
+                                HorizontalDivider()
+                            }
+                        }
                     }
                 }
             }
