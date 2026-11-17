@@ -1371,7 +1371,7 @@ object FileOperationHelper {
                     }
                 }
                 resolveDataPath(context, u)?.let { candidates += it }
-                val gone = candidates.any { path ->
+                val goneByFile = candidates.any { path ->
                     val file = File(path)
                     val existed = try {
                         file.exists()
@@ -1390,6 +1390,9 @@ object FileOperationHelper {
                         }
                     }
                 }
+                // A clone may have no usable absolute path at all; the SAF
+                // grant is matched on the row's RELATIVE_PATH instead.
+                val gone = goneByFile || deleteViaSafByRelativePath(context, u)
                 if (gone) {
                     try {
                         context.contentResolver.delete(uri, null, null)
@@ -1417,13 +1420,22 @@ object FileOperationHelper {
     suspend fun folderNeedingDeleteGrant(context: Context, uris: List<String>): File? =
         withContext(Dispatchers.IO) {
             for (u in uris) {
-                val path = resolveMediaPath(context, u) ?: continue
-                val file = File(path)
-                val dir = file.parentFile ?: continue
-                val grant = com.pyqcr.util.SafGrantStore.findGrant(context, dir)
-                if (grant == null || !canDeleteViaSaf(context, grant, file)) {
+                // A grant that already reaches this row by RELATIVE_PATH needs
+                // no new prompt — and works whether or not an absolute path
+                // can be built for the clone's storage.
+                if (canDeleteViaSafByRelativePath(context, u)) continue
+                val path = resolveMediaPath(context, u)
+                if (path != null) {
+                    val file = File(path)
+                    val dir = file.parentFile ?: continue
+                    val grant = com.pyqcr.util.SafGrantStore.findGrant(context, dir)
+                    if (grant != null && canDeleteViaSaf(context, grant, file)) continue
                     return@withContext dir
                 }
+                // No absolute path: name the folder from RELATIVE_PATH so the
+                // picker can still be opened at the right place.
+                val folder = relativeFolderFile(context, u)
+                if (folder != null) return@withContext folder
             }
             null
         }
@@ -1435,6 +1447,170 @@ object FileOperationHelper {
             val dirDocId = resolveSafDirDocumentId(context, treeUri, dir)
             if (dirDocId.isBlank()) return false
             findSafChildDocumentId(context, treeUri, dirDocId, file.name) != null
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Folder segments + file name of a MediaStore row, as the provider reports
+     * them (`RELATIVE_PATH` is volume-relative, e.g. "DCIM/Camera/"). Unlike
+     * [resolveMediaPath] this needs no volume root, so it still works in an
+     * app clone whose storage root (`/storage/emulated/<user>/`) does not match
+     * the tree the SAF grant was taken on.
+     */
+    private fun rowRelativeParts(context: Context, uri: String): Pair<List<String>, String>? {
+        return try {
+            var folder: List<String>? = null
+            var name: String? = null
+            context.contentResolver.query(
+                Uri.parse(uri),
+                arrayOf(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    MediaStore.MediaColumns.DISPLAY_NAME
+                ),
+                null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val relIdx = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                    val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                    val rel = if (relIdx >= 0) cursor.getString(relIdx) else null
+                    if (nameIdx >= 0) name = cursor.getString(nameIdx)
+                    if (rel != null) folder = rel.split('/').filter { it.isNotBlank() }
+                }
+            }
+            val folderValue = folder
+            val nameValue = name
+            if (folderValue != null && !nameValue.isNullOrBlank()) {
+                folderValue to nameValue
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "rowRelativeParts failed for $uri: ${e.message}")
+            null
+        }
+    }
+
+    /** Volume-relative folder of a row as a File, built without any absolute-path query. */
+    private fun relativeFolderFile(context: Context, uri: String): File? {
+        val folder = rowRelativeParts(context, uri)?.first ?: return null
+        if (folder.isEmpty()) return null
+        return File(
+            Environment.getExternalStorageDirectory(),
+            folder.joinToString(File.separator)
+        )
+    }
+
+    /** Path segments of a SAF tree's document id ("primary:DCIM/Camera" → ["DCIM","Camera"]). */
+    private fun treeDocumentSegments(treeUri: Uri): List<String>? {
+        return try {
+            val docId = DocumentsContract.getTreeDocumentId(treeUri)
+            val colon = docId.indexOf(':')
+            val path = if (colon >= 0) docId.substring(colon + 1) else docId
+            path.split('/').filter { it.isNotBlank() }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Document URI of a row inside any persisted SAF write grant, matched on
+     * the row's `RELATIVE_PATH` instead of an absolute file path.
+     *
+     * This is the route that removes media inside HONOR Parallel Space: the
+     * clone owns neither the MediaStore row nor All files access, and its
+     * storage root can differ from the tree the grant was taken on, so
+     * [deleteFileViaSaf]'s path comparison may find no grant even though one
+     * covers the folder. Comparing `primary:DCIM/…` style document ids has no
+     * such dependency.
+     */
+    private fun findSafDocUriForRow(context: Context, uri: String): Uri? {
+        val parts = rowRelativeParts(context, uri) ?: return null
+        val name = parts.second
+        val rowSegments = parts.first + name
+        val permissions = try {
+            context.contentResolver.persistedUriPermissions
+        } catch (e: Exception) {
+            Log.w(TAG, "persistedUriPermissions unavailable", e)
+            return null
+        }
+        for (permission in permissions) {
+            if (!permission.isWritePermission) continue
+            val treeUri = permission.uri
+            val treeSegments = treeDocumentSegments(treeUri) ?: continue
+            if (treeSegments.size >= rowSegments.size) continue
+            var matches = true
+            for (i in treeSegments.indices) {
+                if (!treeSegments[i].equals(rowSegments[i], ignoreCase = true)) {
+                    matches = false
+                    break
+                }
+            }
+            if (!matches) continue
+            var docId = try {
+                DocumentsContract.getTreeDocumentId(treeUri)
+            } catch (e: Exception) {
+                null
+            } ?: continue
+            var reachable = true
+            for (i in treeSegments.size until rowSegments.size - 1) {
+                val child = findSafChildDocumentId(context, treeUri, docId, rowSegments[i])
+                if (child == null) {
+                    reachable = false
+                    break
+                }
+                docId = child
+            }
+            if (!reachable) continue
+            val fileDocId = findSafChildDocumentId(context, treeUri, docId, name) ?: continue
+            return try {
+                DocumentsContract.buildDocumentUriUsingTree(treeUri, fileDocId)
+            } catch (e: Exception) {
+                null
+            }
+        }
+        return null
+    }
+
+    /**
+     * Delete a row's real file through a remembered SAF grant, using only its
+     * volume-relative path. Returns true only when the provider confirmed the
+     * document deletion; the stale MediaStore row is removed afterwards.
+     */
+    private fun deleteViaSafByRelativePath(context: Context, uri: String): Boolean {
+        val docUri = findSafDocUriForRow(context, uri) ?: return false
+        return try {
+            val deleted = DocumentsContract.deleteDocument(context.contentResolver, docUri)
+            if (deleted) {
+                try {
+                    context.contentResolver.delete(Uri.parse(uri), null, null)
+                } catch (_: Exception) {
+                }
+                // Drop the stale row from the gallery: rescan by absolute path
+                // when one is known, otherwise rebuild it from RELATIVE_PATH.
+                try {
+                    val scanPath = resolveMediaPath(context, uri)
+                        ?: rowRelativeParts(context, uri)?.let { parts ->
+                            relativeFolderFile(context, uri)
+                                ?.let { File(it, parts.second).absolutePath }
+                        }
+                    if (scanPath != null) MediaStoreUtils.scanFile(context, scanPath)
+                } catch (_: Exception) {
+                }
+                Log.i(TAG, "SAF relative-path delete removed $uri")
+            }
+            deleted
+        } catch (e: Exception) {
+            Log.w(TAG, "SAF relative-path delete failed for $uri", e)
+            false
+        }
+    }
+
+    /** True when [deleteViaSafByRelativePath] could remove [uri] without a prompt. */
+    private fun canDeleteViaSafByRelativePath(context: Context, uri: String): Boolean {
+        return try {
+            findSafDocUriForRow(context, uri) != null
         } catch (e: Exception) {
             false
         }
@@ -1868,6 +2044,7 @@ object FileOperationHelper {
                     Log.w(TAG, "Resolver delete refused for $u — trying the file path", e)
                 }
                 val path = resolveMediaPath(context, u)
+                var removed = false
                 if (path != null) {
                     val removedByFile = try {
                         File(path).let { it.exists() && it.delete() }
@@ -1878,17 +2055,24 @@ object FileOperationHelper {
                     // the raw path is writable, but a remembered SAF grant on
                     // the folder is — that grant is what makes this silent.
                     val removedBySaf = !removedByFile && deleteFileViaSaf(context, path)
-                    if (removedByFile || removedBySaf) {
-                        try {
-                            context.contentResolver.delete(uri, null, null)
-                        } catch (_: Exception) {
-                        }
+                    removed = removedByFile || removedBySaf
+                }
+                // Last silent route, independent of any absolute path guess:
+                // match the row's RELATIVE_PATH against the persisted SAF
+                // trees (a clone's storage root need not match them).
+                if (!removed) removed = deleteViaSafByRelativePath(context, u)
+                if (removed) {
+                    try {
+                        context.contentResolver.delete(uri, null, null)
+                    } catch (_: Exception) {
+                    }
+                    if (path != null) {
                         try {
                             MediaStoreUtils.scanFile(context, path)
                         } catch (_: Exception) {
                         }
-                        deleted += u
                     }
+                    deleted += u
                 }
             }
             deleted

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -594,6 +595,11 @@ fun AlbumScreen(
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             val uris = pendingDeleteUris ?: selectedImageUris.toList()
             viewModel.deleteImages(uris)
+            Toast.makeText(
+                context,
+                "Deleted ${uris.size}/${uris.size} file(s)",
+                Toast.LENGTH_SHORT
+            ).show()
             scope.launch {
                 snackbarHostState.showSnackbar(deleteSuccessMessage.replace("{n}", "${uris.size}"))
             }
@@ -632,7 +638,14 @@ fun AlbumScreen(
     /** Ask the platform for consent to trash [pending] (API 30+). */
     fun launchTrashConsent(pending: List<String>, message: String = "Moved {n} image(s) to the recycle bin") {
         val sender = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            FileOperationHelper.createTrashRequest(context, pending)
+            // A clone can throw here instead of returning null — treat it as
+            // "no request available" and fall through to the direct delete.
+            try {
+                FileOperationHelper.createTrashRequest(context, pending)
+            } catch (e: Exception) {
+                Log.w("AlbumScreen", "createTrashRequest failed", e)
+                null
+            }
         } else {
             null
         }
@@ -647,6 +660,11 @@ fun AlbumScreen(
                 if (removed.isNotEmpty()) {
                     viewModel.deleteImages(removed)
                     viewModel.refreshImages()
+                    Toast.makeText(
+                        context,
+                        "Deleted ${removed.size}/${pending.size} file(s)",
+                        Toast.LENGTH_SHORT
+                    ).show()
                     snackbarHostState.showSnackbar(message.replace("{n}", "${removed.size}"))
                 } else {
                     snackbarHostState.showSnackbar("Could not delete ${pending.size} image(s)")
@@ -689,8 +707,9 @@ fun AlbumScreen(
         deleteJobInFlight = null
         val pending = pendingFolderDelete
         pendingFolderDelete = null
-        val granted = result.resultCode == android.app.Activity.RESULT_OK && tree != null
-        if (granted && tree != null) {
+        val folder = retryDeleteFolder
+        val picked = result.resultCode == android.app.Activity.RESULT_OK && tree != null
+        if (picked && tree != null) {
             try {
                 context.contentResolver.takePersistableUriPermission(
                     tree,
@@ -700,8 +719,29 @@ fun AlbumScreen(
             } catch (e: Exception) {
                 Log.w("AlbumScreen", "takePersistableUriPermission failed", e)
             }
+        }
+        // Believe the picker only when the grant is really there: a clone that
+        // accepts the tree but drops the persisted permission would otherwise
+        // re-open the picker forever.
+        val granted = if (picked && folder != null) {
+            try {
+                SafGrantStore.findGrant(context, folder) != null
+            } catch (e: Exception) {
+                false
+            }
         } else {
-            retryDeleteFolder?.let { declinedDeleteFolders += it.absolutePath }
+            false
+        }
+        if (!granted) {
+            folder?.let { declinedDeleteFolders += it.absolutePath }
+            if (picked) {
+                // Honest, and no repeat prompts for this folder.
+                scope.launch {
+                    snackbarHostState.showSnackbar(
+                        "Android did not keep the folder grant — cannot delete there"
+                    )
+                }
+            }
         }
         retryDeleteFolder = null
         if (job != null) {
@@ -733,9 +773,17 @@ fun AlbumScreen(
                     viewModel.deleteImages(outcome.removed)
                     viewModel.refreshImages()
                 }
+                // Trashed rows are gone from the gallery too — count them, or
+                // the message reports "0" for a delete that worked.
+                val doneCount = outcome.removed.size + outcome.trashed.size
                 val template =
                     if (outcome.trashed.isNotEmpty()) job.trashTemplate else job.directTemplate
-                snackbarHostState.showSnackbar(template.replace("{n}", "${outcome.removed.size}"))
+                Toast.makeText(
+                    context,
+                    "Deleted $doneCount/${job.uris.size} file(s)",
+                    Toast.LENGTH_SHORT
+                ).show()
+                snackbarHostState.showSnackbar(template.replace("{n}", "$doneCount"))
                 isMultiSelectMode = false
                 selectedImageUris = emptySet()
             }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Environment
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -530,7 +531,13 @@ fun ImageDetailScreen(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK && pendingDeleteUris != null) {
+            val uris = pendingDeleteUris ?: emptyList()
             coroutineScope.launch {
+                Toast.makeText(
+                    context,
+                    "Deleted ${uris.size}/${uris.size} file(s)",
+                    Toast.LENGTH_SHORT
+                ).show()
                 snackbarHostState.showSnackbar(pendingDeleteMessage)
                 withContext(Dispatchers.IO) {
                     repository.refreshImagesFromMediaStore()
@@ -557,7 +564,14 @@ fun ImageDetailScreen(
     /** Ask the platform for consent to trash [pending] (API 30+). */
     fun launchTrashConsent(pending: List<String>, message: String) {
         val sender = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            FileOperationHelper.createTrashRequest(context, pending)
+            // A clone can throw here instead of returning null — treat it as
+            // "no request available" and fall through to the direct delete.
+            try {
+                FileOperationHelper.createTrashRequest(context, pending)
+            } catch (e: Exception) {
+                android.util.Log.w("ImageDetail", "createTrashRequest failed", e)
+                null
+            }
         } else {
             null
         }
@@ -569,6 +583,11 @@ fun ImageDetailScreen(
                     FileOperationHelper.forceDeleteByPath(context, pending)
                 }
                 if (removed.isNotEmpty()) {
+                    Toast.makeText(
+                        context,
+                        "Deleted ${removed.size}/${pending.size} file(s)",
+                        Toast.LENGTH_SHORT
+                    ).show()
                     snackbarHostState.showSnackbar(message)
                     withContext(Dispatchers.IO) {
                         repository.refreshImagesFromMediaStore()
@@ -608,8 +627,9 @@ fun ImageDetailScreen(
         deleteJobInFlight = null
         val pending = pendingFolderDelete
         pendingFolderDelete = null
-        val granted = result.resultCode == android.app.Activity.RESULT_OK && tree != null
-        if (granted && tree != null) {
+        val folder = retryDeleteFolder
+        val picked = result.resultCode == android.app.Activity.RESULT_OK && tree != null
+        if (picked && tree != null) {
             try {
                 context.contentResolver.takePersistableUriPermission(
                     tree,
@@ -619,8 +639,28 @@ fun ImageDetailScreen(
             } catch (e: Exception) {
                 android.util.Log.w("ImageDetail", "takePersistableUriPermission failed", e)
             }
+        }
+        // Believe the picker only when the grant is really there: a clone that
+        // accepts the tree but drops the persisted permission would otherwise
+        // re-open the picker forever.
+        val granted = if (picked && folder != null) {
+            try {
+                SafGrantStore.findGrant(context, folder) != null
+            } catch (e: Exception) {
+                false
+            }
         } else {
-            retryDeleteFolder?.let { declinedDeleteFolder = it.absolutePath }
+            false
+        }
+        if (!granted) {
+            folder?.let { declinedDeleteFolder = it.absolutePath }
+            if (picked) {
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(
+                        "Android did not keep the folder grant — cannot delete there"
+                    )
+                }
+            }
         }
         retryDeleteFolder = null
         if (job != null) {
@@ -651,6 +691,12 @@ fun ImageDetailScreen(
                 withContext(Dispatchers.IO) {
                     repository.refreshImagesFromMediaStore()
                 }
+                val doneCount = outcome.removed.size + outcome.trashed.size
+                Toast.makeText(
+                    context,
+                    "Deleted $doneCount/${job.uris.size} file(s)",
+                    Toast.LENGTH_SHORT
+                ).show()
                 snackbarHostState.showSnackbar(
                     if (outcome.trashed.isNotEmpty()) job.trashTemplate else job.directTemplate
                 )
