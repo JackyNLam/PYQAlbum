@@ -587,6 +587,9 @@ fun AlbumScreen(
     // current multi-selection. Lets "Move to Vault" trash only the images that
     // were actually copied out of the gallery.
     var pendingDeleteUris by remember { mutableStateOf<List<String>?>(null) }
+    // Shown when a delete could not remove everything; holds the exact
+    // provider details so the behaviour can be reported back verbatim.
+    var deleteDebugReport by remember { mutableStateOf<String?>(null) }
 
     // System delete confirmation launcher (API 30+) — one dialog for the whole batch
     val deleteLauncher = rememberLauncherForActivityResult(
@@ -594,17 +597,40 @@ fun AlbumScreen(
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             val uris = pendingDeleteUris ?: selectedImageUris.toList()
-            viewModel.deleteImages(uris)
-            Toast.makeText(
-                context,
-                "Deleted ${uris.size}/${uris.size} file(s)",
-                Toast.LENGTH_SHORT
-            ).show()
-            scope.launch {
-                snackbarHostState.showSnackbar(deleteSuccessMessage.replace("{n}", "${uris.size}"))
-            }
+            val message = deleteSuccessMessage
             isMultiSelectMode = false
             selectedImageUris = emptySet()
+            // The OS can report success and still leave the rows behind (a
+            // clone does exactly that), so verify before claiming x/x.
+            scope.launch {
+                val survivors = withContext(Dispatchers.IO) {
+                    FileOperationHelper.survivingUris(context, uris)
+                }
+                val doneUris = uris.filterNot { it in survivors }
+                if (doneUris.isNotEmpty()) {
+                    viewModel.deleteImages(doneUris)
+                }
+                viewModel.refreshImages()
+                if (doneUris.isNotEmpty()) {
+                    Toast.makeText(
+                        context,
+                        "Deleted ${doneUris.size}/${uris.size} file(s)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    snackbarHostState.showSnackbar(message.replace("{n}", "${doneUris.size}"))
+                }
+                if (survivors.isNotEmpty()) {
+                    if (doneUris.isEmpty()) {
+                        Toast.makeText(
+                            context,
+                            "Deleted 0/${uris.size} file(s)",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    deleteDebugReport =
+                        FileOperationHelper.describeDeleteFailure(context, survivors)
+                }
+            }
         } else {
             // Denied — but some ROMs apply the trash request even when they
             // report RESULT_CANCELED, so reload the album to match reality
@@ -667,7 +693,16 @@ fun AlbumScreen(
                     ).show()
                     snackbarHostState.showSnackbar(message.replace("{n}", "${removed.size}"))
                 } else {
+                    Toast.makeText(
+                        context,
+                        "Deleted 0/${pending.size} file(s)",
+                        Toast.LENGTH_LONG
+                    ).show()
                     snackbarHostState.showSnackbar("Could not delete ${pending.size} image(s)")
+                }
+                if (removed.size < pending.size) {
+                    val failed = pending.filterNot { it in removed }
+                    deleteDebugReport = FileOperationHelper.describeDeleteFailure(context, failed)
                 }
                 isMultiSelectMode = false
                 selectedImageUris = emptySet()
@@ -734,12 +769,17 @@ fun AlbumScreen(
         }
         if (!granted) {
             folder?.let { declinedDeleteFolders += it.absolutePath }
+            val failed = pending
             if (picked) {
                 // Honest, and no repeat prompts for this folder.
                 scope.launch {
                     snackbarHostState.showSnackbar(
                         "Android did not keep the folder grant — cannot delete there"
                     )
+                    if (failed != null) {
+                        deleteDebugReport =
+                            FileOperationHelper.describeDeleteFailure(context, failed)
+                    }
                 }
             }
         }
@@ -869,6 +909,38 @@ fun AlbumScreen(
                 }
             }
         }
+    }
+
+    // Failure details for a delete that did not remove everything: volume
+    // form, row owner, resolved path, SAF reachability. Copyable so the exact
+    // clone behaviour can be reported.
+    deleteDebugReport?.let { report ->
+        AlertDialog(
+            onDismissRequest = { deleteDebugReport = null },
+            title = { Text("Delete failed — details") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text(report, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        val cm = context.getSystemService(
+                            android.content.Context.CLIPBOARD_SERVICE
+                        ) as? android.content.ClipboardManager
+                        cm?.setPrimaryClip(
+                            android.content.ClipData.newPlainText("delete", report)
+                        )
+                    } catch (_: Exception) {
+                    }
+                    deleteDebugReport = null
+                }) { Text("Copy & close") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteDebugReport = null }) { Text("Close") }
+            }
+        )
     }
 
     // Favourite confirmation launcher (Android 13+) — marks items the app does

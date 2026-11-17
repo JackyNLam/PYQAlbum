@@ -1357,11 +1357,7 @@ object FileOperationHelper {
         withContext(Dispatchers.IO) {
             val deleted = mutableListOf<String>()
             for (u in uris) {
-                val uri = try {
-                    Uri.parse(u)
-                } catch (e: Exception) {
-                    null
-                } ?: continue
+                if (u.isBlank()) continue
                 val candidates = LinkedHashSet<String>()
                 resolveMediaPath(context, u)?.let { path ->
                     candidates += path
@@ -1394,10 +1390,7 @@ object FileOperationHelper {
                 // grant is matched on the row's RELATIVE_PATH instead.
                 val gone = goneByFile || deleteViaSafByRelativePath(context, u)
                 if (gone) {
-                    try {
-                        context.contentResolver.delete(uri, null, null)
-                    } catch (_: Exception) {
-                    }
+                    deleteRowAnyWay(context, u)
                     try {
                         candidates.firstOrNull()?.let { MediaStoreUtils.scanFile(context, it) }
                     } catch (_: Exception) {
@@ -1617,6 +1610,172 @@ object FileOperationHelper {
     }
 
     /**
+     * Every provider address this row may be writable through.
+     *
+     * A clone / forked MediaProvider does not always accept the same URI form:
+     * the generic `content://media/external/…` address, the
+     * `MediaStore.getMediaUri()` rewrite (`…/external_primary/…`) and a rebuilt
+     * `…/file/<id>` entry can each hit a different internal volume. Writes on
+     * the wrong form return 0 with no exception, which looks like "the clone
+     * cannot delete" — so every silent route tries all of them.
+     */
+    private fun mediaUriCandidates(context: Context, raw: String): List<Uri> {
+        val out = mutableListOf<Uri>()
+        val parsed = try {
+            Uri.parse(raw)
+        } catch (e: Exception) {
+            return out
+        }
+        out += parsed
+        val volumeUri = try {
+            MediaStore.getMediaUri(context, parsed)
+        } catch (e: Exception) {
+            null
+        }
+        if (volumeUri != null && !out.contains(volumeUri)) out += volumeUri
+        val id = try {
+            parsed.lastPathSegment?.toLongOrNull()
+        } catch (e: Exception) {
+            null
+        }
+        if (id != null) {
+            val volumes = mutableListOf<String>()
+            uriVolumeName(parsed)?.let { volumes += it }
+            volumes += MediaStore.VOLUME_EXTERNAL_PRIMARY
+            volumes += MediaStore.VOLUME_EXTERNAL
+            for (volume in volumes) {
+                try {
+                    // Built by hand instead of MediaStore.Files.getContentUri(volume)
+                    // so no extra provider API is required here.
+                    val filesUri = Uri.parse("content://media/$volume/file")
+                    val rebuilt = ContentUris.withAppendedId(filesUri, id)
+                    if (!out.contains(rebuilt)) out += rebuilt
+                } catch (e: Exception) {
+                }
+            }
+        }
+        return out
+    }
+
+    /** Volume segment of a MediaStore URI (`content://media/<volume>/…`). */
+    private fun uriVolumeName(parsed: Uri): String? = try {
+        parsed.pathSegments.firstOrNull()
+    } catch (e: Exception) {
+        null
+    }
+
+    /** Remove the MediaStore row through whichever candidate address accepts it. */
+    private suspend fun deleteRowAnyWay(context: Context, raw: String): Boolean =
+        withContext(Dispatchers.IO) {
+            for (candidate in mediaUriCandidates(context, raw)) {
+                val n = try {
+                    context.contentResolver.delete(candidate, null, null)
+                } catch (e: Exception) {
+                    Log.w(TAG, "row delete refused for $candidate", e)
+                    0
+                }
+                if (n > 0) return@withContext true
+            }
+            false
+        }
+
+    /**
+     * URIs from [uris] that the provider STILL lists after a delete — i.e. the
+     * rows whose deletion silently failed (a clone can accept a delete/trash
+     * request and then do nothing). Used to report an honest x/y count.
+     */
+    suspend fun survivingUris(context: Context, uris: List<String>): List<String> =
+        withContext(Dispatchers.IO) {
+            uris.filter { raw ->
+                try {
+                    context.contentResolver.query(
+                        Uri.parse(raw),
+                        arrayOf(MediaStore.MediaColumns._ID),
+                        null, null, null
+                    )?.use { it.count > 0 } ?: false
+                } catch (e: Exception) {
+                    false
+                }
+            }
+        }
+
+    /**
+     * Human-readable diagnostic of why a delete could not remove [uris].
+     * Shown in the app's failure dialog so the exact clone behaviour can be
+     * reported back (volume form, row owner, path resolution, SAF reach).
+     */
+    suspend fun describeDeleteFailure(context: Context, uris: List<String>): String =
+        withContext(Dispatchers.IO) {
+            val sb = StringBuilder()
+            sb.append("secondary user (clone): ")
+                .append(com.pyqcr.util.PermissionHelper.isCloneProfile())
+            sb.append("\nall files access: ")
+                .append(com.pyqcr.util.PermissionHelper.hasAllFilesAccess())
+            sb.append("\nSDK: ").append(Build.VERSION.SDK_INT)
+            val grants = try {
+                context.contentResolver.persistedUriPermissions
+            } catch (e: Exception) {
+                emptyList()
+            }
+            sb.append("\nSAF write grants: ").append(grants.count { it.isWritePermission })
+            sb.append("\nrequested: ").append(uris.size).append(", still listed: ")
+                .append(uris.count { u ->
+                    try {
+                        context.contentResolver.query(
+                            Uri.parse(u), arrayOf(MediaStore.MediaColumns._ID), null, null, null
+                        )?.use { it.count > 0 } ?: false
+                    } catch (e: Exception) {
+                        false
+                    }
+                })
+            uris.take(3).forEach { raw ->
+                sb.append("\n— ").append(raw)
+                val parsed = try {
+                    Uri.parse(raw)
+                } catch (e: Exception) {
+                    null
+                }
+                if (parsed != null) {
+                    sb.append("\n  volume: ").append(uriVolumeName(parsed) ?: "<none>")
+                    val owner = try {
+                        context.contentResolver.query(
+                            parsed,
+                            arrayOf(MediaStore.MediaColumns.OWNER_PACKAGE_NAME),
+                            null, null, null
+                        )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+                    } catch (e: Exception) {
+                        "?"
+                    }
+                    sb.append("\n  owner: ").append(owner ?: "null")
+                    val rel = rowRelativeParts(context, raw)
+                    sb.append("\n  RELATIVE_PATH: ").append(rel?.first?.joinToString("/") ?: "<none>")
+                    sb.append("\n  DISPLAY_NAME: ").append(rel?.second ?: "<none>")
+                    val abs = resolveMediaPath(context, raw)
+                    val exists = if (abs != null) {
+                        try {
+                            File(abs).exists()
+                        } catch (e: Exception) {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                    sb.append("\n  path: ").append(abs ?: "<unresolved>")
+                        .append(" (exists=").append(exists).append(")")
+                    val mediaUri = try {
+                        MediaStore.getMediaUri(context, parsed)?.toString()
+                    } catch (e: Exception) {
+                        "<error>"
+                    }
+                    sb.append("\n  mediaUri: ").append(mediaUri ?: "<null>")
+                    sb.append("\n  SAF can reach file: ").append(canDeleteViaSafByRelativePath(context, raw))
+                }
+            }
+            sb.append("\nLog: adb logcat -s FileOpHelper")
+            sb.toString()
+        }
+
+    /**
      * Move [uris] into the recoverable system recycle bin WITHOUT showing the
      * platform confirmation dialog: set `IS_TRASHED = 1` directly, which is the
      * exact write MediaProvider performs when the user confirms a
@@ -1643,13 +1802,7 @@ object FileOperationHelper {
                 var trashed = false
                 try {
                     val parsed = Uri.parse(raw)
-                    val candidates = mutableListOf(parsed)
-                    try {
-                        val volumeUri = MediaStore.getMediaUri(context, parsed)
-                        if (volumeUri != null && volumeUri != parsed) candidates.add(volumeUri)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "could not resolve the volume URI of $parsed", e)
-                    }
+                    val candidates = mediaUriCandidates(context, raw)
                     for (candidate in candidates) {
                         val n = try {
                             context.contentResolver.update(candidate, values, null, null)
@@ -1661,6 +1814,7 @@ object FileOperationHelper {
                         }
                         if (n > 0) {
                             trashed = true
+                            Log.i(TAG, "trashMediaSilently: $raw trashed via $candidate ($n row)")
                             break
                         }
                     }
@@ -2030,13 +2184,20 @@ object FileOperationHelper {
         withContext(Dispatchers.IO) {
             val deleted = mutableListOf<String>()
             for (u in uris) {
-                val uri = try {
-                    Uri.parse(u)
-                } catch (e: Exception) {
-                    null
-                } ?: continue
+                if (u.isBlank()) continue
                 try {
-                    if (context.contentResolver.delete(uri, null, null) > 0) {
+                    var rowDeleted = false
+                    for (candidate in mediaUriCandidates(context, u)) {
+                        try {
+                            if (context.contentResolver.delete(candidate, null, null) > 0) {
+                                rowDeleted = true
+                                break
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Resolver delete refused for $candidate — trying the next form", e)
+                        }
+                    }
+                    if (rowDeleted) {
                         deleted += u
                         continue
                     }
@@ -2062,10 +2223,7 @@ object FileOperationHelper {
                 // trees (a clone's storage root need not match them).
                 if (!removed) removed = deleteViaSafByRelativePath(context, u)
                 if (removed) {
-                    try {
-                        context.contentResolver.delete(uri, null, null)
-                    } catch (_: Exception) {
-                    }
+                    deleteRowAnyWay(context, u)
                     if (path != null) {
                         try {
                             MediaStoreUtils.scanFile(context, path)

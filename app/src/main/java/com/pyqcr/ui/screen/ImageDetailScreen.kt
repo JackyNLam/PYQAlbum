@@ -527,25 +527,77 @@ fun ImageDetailScreen(
     // DB and leave the detail screen (the image no longer exists).
     var pendingDeleteUris by remember { mutableStateOf<List<String>?>(null) }
     var pendingDeleteMessage by remember { mutableStateOf("") }
+    // Shown when the delete could not remove the file; holds the provider
+    // details so the clone behaviour can be reported verbatim.
+    var deleteDebugReport by remember { mutableStateOf<String?>(null) }
     val deleteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK && pendingDeleteUris != null) {
-            val uris = pendingDeleteUris ?: emptyList()
+        val pending = pendingDeleteUris
+        pendingDeleteUris = null
+        if (result.resultCode == android.app.Activity.RESULT_OK && pending != null) {
             coroutineScope.launch {
-                Toast.makeText(
-                    context,
-                    "Deleted ${uris.size}/${uris.size} file(s)",
-                    Toast.LENGTH_SHORT
-                ).show()
-                snackbarHostState.showSnackbar(pendingDeleteMessage)
+                // The OS can say OK and still leave the row behind, so check.
+                val survivors = withContext(Dispatchers.IO) {
+                    FileOperationHelper.survivingUris(context, pending)
+                }
+                val done = pending.size - survivors.size
                 withContext(Dispatchers.IO) {
                     repository.refreshImagesFromMediaStore()
                 }
-                onBack()
+                if (done > 0) {
+                    Toast.makeText(
+                        context,
+                        "Deleted $done/${pending.size} file(s)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    snackbarHostState.showSnackbar(pendingDeleteMessage)
+                    onBack()
+                } else {
+                    Toast.makeText(
+                        context,
+                        "Deleted 0/${pending.size} file(s)",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                if (survivors.isNotEmpty()) {
+                    deleteDebugReport =
+                        FileOperationHelper.describeDeleteFailure(context, survivors)
+                }
             }
         }
-        pendingDeleteUris = null
+    }
+
+    // Failure details for a delete that did not remove the file: volume form,
+    // row owner, resolved path, SAF reachability. Copyable so the exact clone
+    // behaviour can be reported.
+    deleteDebugReport?.let { report ->
+        AlertDialog(
+            onDismissRequest = { deleteDebugReport = null },
+            title = { Text("Delete failed — details") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text(report, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        val cm = context.getSystemService(
+                            android.content.Context.CLIPBOARD_SERVICE
+                        ) as? android.content.ClipboardManager
+                        cm?.setPrimaryClip(
+                            android.content.ClipData.newPlainText("delete", report)
+                        )
+                    } catch (_: Exception) {
+                    }
+                    deleteDebugReport = null
+                }) { Text("Copy & close") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteDebugReport = null }) { Text("Close") }
+            }
+        )
     }
 
     // ---- delete orchestration -------------------------------------------
@@ -594,7 +646,14 @@ fun ImageDetailScreen(
                     }
                     onBack()
                 } else {
+                    Toast.makeText(
+                        context,
+                        "Deleted 0/${pending.size} file(s)",
+                        Toast.LENGTH_LONG
+                    ).show()
                     snackbarHostState.showSnackbar("Could not delete the image")
+                    deleteDebugReport =
+                        FileOperationHelper.describeDeleteFailure(context, pending)
                     withContext(Dispatchers.IO) {
                         repository.refreshImagesFromMediaStore()
                     }
@@ -654,11 +713,16 @@ fun ImageDetailScreen(
         }
         if (!granted) {
             folder?.let { declinedDeleteFolder = it.absolutePath }
+            val failed = pending
             if (picked) {
                 coroutineScope.launch {
                     snackbarHostState.showSnackbar(
                         "Android did not keep the folder grant — cannot delete there"
                     )
+                    if (failed != null) {
+                        deleteDebugReport =
+                            FileOperationHelper.describeDeleteFailure(context, failed)
+                    }
                 }
             }
         }
