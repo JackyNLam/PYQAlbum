@@ -581,7 +581,8 @@ fun ImageDetailScreen(
                 }
                 if (survivors.isNotEmpty() && approved) {
                     deleteDebugReport =
-                        FileOperationHelper.safeDeleteFailure(context, survivors)
+                        "${done} of ${pending.size} file(s) deleted\n\n" +
+                            FileOperationHelper.safeDeleteFailure(context, survivors)
                 }
             }
         }
@@ -626,7 +627,18 @@ fun ImageDetailScreen(
     // inside an HONOR Parallel Space clone), a one-off folder grant, or — as a
     // last resort — the platform consent dialog. Mirrors the album batch delete.
     var deleteJob by remember { mutableStateOf<DetailDeleteJob?>(null) }
+    // The effect below is keyed on this counter, NOT on deleteJob: writing the
+    // key from inside the effect would cancel the coroutine that is running it
+    // ("The coroutine scope left the composition") and abort the delete.
+    var deleteRequestId by remember { mutableIntStateOf(0) }
     var deleteJobInFlight by remember { mutableStateOf<DetailDeleteJob?>(null) }
+
+    /** Queue [job] and wake the delete effect (used for first deletes and retries). */
+    fun startDeleteJob(job: DetailDeleteJob) {
+        deleteJob = job
+        deleteRequestId += 1
+    }
+
     var pendingAllFilesDelete by remember { mutableStateOf<List<String>?>(null) }
     var pendingFolderDelete by remember { mutableStateOf<List<String>?>(null) }
     var retryDeleteFolder by remember { mutableStateOf<File?>(null) }
@@ -653,7 +665,8 @@ fun ImageDetailScreen(
                 reportDeleteOutcome(0, pending.size)
                 snackbarHostState.showSnackbar("Could not delete the image")
                 deleteDebugReport =
-                    FileOperationHelper.safeDeleteFailure(context, pending)
+                    "0 of ${pending.size} file(s) deleted\n\n" +
+                        FileOperationHelper.safeDeleteFailure(context, pending)
                 withContext(Dispatchers.IO) {
                     repository.refreshImagesFromMediaStore()
                 }
@@ -702,7 +715,7 @@ fun ImageDetailScreen(
         val pending = pendingAllFilesDelete
         pendingAllFilesDelete = null
         if (job != null) {
-            deleteJob = job.copy(uris = pending ?: job.uris, askAllFiles = false)
+            startDeleteJob(job.copy(uris = pending ?: job.uris, askAllFiles = false))
         }
     }
 
@@ -749,24 +762,26 @@ fun ImageDetailScreen(
                     )
                     if (failed != null) {
                         deleteDebugReport =
-                            FileOperationHelper.safeDeleteFailure(context, failed)
+                            "0 of ${failed.size} file(s) deleted\n\n" +
+                                FileOperationHelper.safeDeleteFailure(context, failed)
                     }
                 }
             }
         }
         retryDeleteFolder = null
         if (job != null) {
-            deleteJob = job.copy(
-                uris = pending ?: job.uris,
-                askAllFiles = false,
-                askFolder = granted
+            startDeleteJob(
+                job.copy(
+                    uris = pending ?: job.uris,
+                    askAllFiles = false,
+                    askFolder = granted
+                )
             )
         }
     }
 
-    LaunchedEffect(deleteJob) {
+    LaunchedEffect(deleteRequestId) {
         val job = deleteJob ?: return@LaunchedEffect
-        deleteJob = null
         deleteJobInFlight = job
         // Immediate feedback so the delete is never silent, even if a later
         // stage throws or the platform dialog refuses to appear.
@@ -796,7 +811,8 @@ fun ImageDetailScreen(
         if (outcome == null) {
             deleteJobInFlight = null
             reportDeleteOutcome(0, job.uris.size)
-            deleteDebugReport = FileOperationHelper.safeDeleteFailure(context, job.uris)
+            deleteDebugReport = "0 of ${job.uris.size} file(s) deleted\n\n" +
+                FileOperationHelper.safeDeleteFailure(context, job.uris)
             return@LaunchedEffect
         }
         when (outcome) {
@@ -836,7 +852,7 @@ fun ImageDetailScreen(
                         // retry without that step instead of stalling.
                         android.util.Log.w("ImageDetail", "All-files settings unavailable", e)
                         pendingAllFilesDelete = null
-                        deleteJob = job.copy(askAllFiles = false)
+                        startDeleteJob(job.copy(askAllFiles = false))
                     }
                 }
             }
@@ -877,7 +893,7 @@ fun ImageDetailScreen(
                         pendingFolderDelete = null
                         retryDeleteFolder = null
                         declinedDeleteFolder = outcome.folder.absolutePath
-                        deleteJob = job.copy(askFolder = false)
+                        startDeleteJob(job.copy(askFolder = false))
                     }
                 }
             }
@@ -907,13 +923,15 @@ fun ImageDetailScreen(
      */
     val trashUris: (List<String>, String, String, Boolean) -> Unit = { uris, trashMsg, directMsg, allowDirectDelete ->
         if (uris.isNotEmpty()) {
-            deleteJob = DetailDeleteJob(
-                uris = uris,
-                askAllFiles = allowDirectDelete,
-                askFolder = allowDirectDelete,
-                allowDirectDelete = allowDirectDelete,
-                trashTemplate = trashMsg,
-                directTemplate = directMsg
+            startDeleteJob(
+                DetailDeleteJob(
+                    uris = uris,
+                    askAllFiles = allowDirectDelete,
+                    askFolder = allowDirectDelete,
+                    allowDirectDelete = allowDirectDelete,
+                    trashTemplate = trashMsg,
+                    directTemplate = directMsg
+                )
             )
         }
     }

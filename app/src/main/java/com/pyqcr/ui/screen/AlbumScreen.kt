@@ -639,7 +639,8 @@ fun AlbumScreen(
                 if (approved) {
                     if (doneUris.isEmpty()) reportDeleteOutcome(0, uris.size)
                     deleteDebugReport =
-                        FileOperationHelper.safeDeleteFailure(context, survivors)
+                        "${doneUris.size} of ${uris.size} file(s) deleted\n\n" +
+                            FileOperationHelper.safeDeleteFailure(context, survivors)
                 } else if (doneUris.isEmpty()) {
                     try {
                         Toast.makeText(context, "Delete cancelled", Toast.LENGTH_SHORT).show()
@@ -660,7 +661,18 @@ fun AlbumScreen(
     // clone can never inherit the main profile's grant. The folder grant and
     // the platform dialog remain as fallbacks.
     var deleteJob by remember { mutableStateOf<DeleteJob?>(null) }
+    // The effect below is keyed on this counter, NOT on deleteJob: writing the
+    // key from inside the effect would cancel the coroutine that is running it
+    // ("The coroutine scope left the composition") and abort the delete.
+    var deleteRequestId by remember { mutableIntStateOf(0) }
     var deleteJobInFlight by remember { mutableStateOf<DeleteJob?>(null) }
+
+    /** Queue [job] and wake the delete effect (used for first deletes and retries). */
+    fun startDeleteJob(job: DeleteJob) {
+        deleteJob = job
+        deleteRequestId += 1
+    }
+
     var pendingAllFilesDelete by remember { mutableStateOf<List<String>?>(null) }
     var pendingFolderDelete by remember { mutableStateOf<List<String>?>(null) }
     var retryDeleteFolder by remember { mutableStateOf<File?>(null) }
@@ -690,7 +702,9 @@ fun AlbumScreen(
             }
             if (removed.size < pending.size) {
                 val failed = pending.filterNot { it in removed }
-                deleteDebugReport = FileOperationHelper.safeDeleteFailure(context, failed)
+                deleteDebugReport =
+                    "${removed.size} of ${pending.size} file(s) deleted\n\n" +
+                        FileOperationHelper.safeDeleteFailure(context, failed)
             }
             isMultiSelectMode = false
             selectedImageUris = emptySet()
@@ -741,9 +755,11 @@ fun AlbumScreen(
         val pending = pendingAllFilesDelete
         pendingAllFilesDelete = null
         if (job != null) {
-            deleteJob = job.copy(
-                uris = pending ?: job.uris,
-                askAllFiles = false
+            startDeleteJob(
+                job.copy(
+                    uris = pending ?: job.uris,
+                    askAllFiles = false
+                )
             )
         }
     }
@@ -794,24 +810,26 @@ fun AlbumScreen(
                     )
                     if (failed != null) {
                         deleteDebugReport =
-                            FileOperationHelper.safeDeleteFailure(context, failed)
+                            "0 of ${failed.size} file(s) deleted\n\n" +
+                                FileOperationHelper.safeDeleteFailure(context, failed)
                     }
                 }
             }
         }
         retryDeleteFolder = null
         if (job != null) {
-            deleteJob = job.copy(
-                uris = pending ?: job.uris,
-                askAllFiles = false,
-                askFolder = granted
+            startDeleteJob(
+                job.copy(
+                    uris = pending ?: job.uris,
+                    askAllFiles = false,
+                    askFolder = granted
+                )
             )
         }
     }
 
-    LaunchedEffect(deleteJob) {
+    LaunchedEffect(deleteRequestId) {
         val job = deleteJob ?: return@LaunchedEffect
-        deleteJob = null
         deleteJobInFlight = job
         // Immediate feedback so the delete is never silent, even if a later
         // stage throws or the platform dialog refuses to appear.
@@ -843,7 +861,8 @@ fun AlbumScreen(
             deleteJobInFlight = null
             reportDeleteOutcome(0, job.uris.size)
             deleteDebugReport =
-                FileOperationHelper.safeDeleteFailure(context, job.uris)
+                "0 of ${job.uris.size} file(s) deleted\n\n" +
+                    FileOperationHelper.safeDeleteFailure(context, job.uris)
             isMultiSelectMode = false
             selectedImageUris = emptySet()
             return@LaunchedEffect
@@ -890,7 +909,7 @@ fun AlbumScreen(
                         // with the next escalation instead of stalling here.
                         Log.w("AlbumScreen", "All-files settings unavailable", e)
                         pendingAllFilesDelete = null
-                        deleteJob = job.copy(askAllFiles = false)
+                        startDeleteJob(job.copy(askAllFiles = false))
                     }
                 }
             }
@@ -930,7 +949,7 @@ fun AlbumScreen(
                         pendingFolderDelete = null
                         retryDeleteFolder = null
                         declinedDeleteFolders += outcome.folder.absolutePath
-                        deleteJob = job.copy(askFolder = false)
+                        startDeleteJob(job.copy(askFolder = false))
                     }
                 }
             }
@@ -1264,13 +1283,15 @@ fun AlbumScreen(
      */
     val trashOrDelete: (List<String>, String, String, Boolean) -> Unit = { uris, trashTemplate, directTemplate, allowDirectDelete ->
         if (uris.isNotEmpty()) {
-            deleteJob = DeleteJob(
-                uris = uris,
-                askAllFiles = allowDirectDelete,
-                askFolder = allowDirectDelete,
-                allowDirectDelete = allowDirectDelete,
-                trashTemplate = trashTemplate,
-                directTemplate = directTemplate
+            startDeleteJob(
+                DeleteJob(
+                    uris = uris,
+                    askAllFiles = allowDirectDelete,
+                    askFolder = allowDirectDelete,
+                    allowDirectDelete = allowDirectDelete,
+                    trashTemplate = trashTemplate,
+                    directTemplate = directTemplate
+                )
             )
         }
     }
