@@ -231,7 +231,10 @@ fun AppNavGraph() {
                     currentImageIndex = imageList.indexOf(imageUri)
                     viewerEnterDirection = 0
                     navController.navigate(Routes.imageDetail(imageUri))
-                }
+                },
+                onNavigateToImageEdit = { navController.navigate(Routes.IMAGE_EDIT) },
+                onNavigateToWechatGrid = { navController.navigate(Routes.WECHAT_GRID) },
+                onNavigateToAiEdit = { navController.navigate(Routes.AI_EDIT) }
             )
         }
 

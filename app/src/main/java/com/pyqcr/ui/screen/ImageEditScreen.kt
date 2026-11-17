@@ -160,6 +160,7 @@ fun ImageEditScreen(onBack: () -> Unit) {
     var cropStart by remember { mutableStateOf<EditStrokePoint?>(null) }
     var cropEnd by remember { mutableStateOf<EditStrokePoint?>(null) }
     var showResize by remember { mutableStateOf(false) }
+    var showRotate by remember { mutableStateOf(false) }
     var showTextOptions by remember { mutableStateOf(false) }
     var showLayerPicker by remember { mutableStateOf(false) }
     var pendingText by remember { mutableStateOf<EditTextItem?>(null) }
@@ -572,6 +573,7 @@ fun ImageEditScreen(onBack: () -> Unit) {
                         }
                     },
                     onResize = { showResize = true },
+                    onRotate = { showRotate = true },
                     onText = { showTextOptions = true }
                 )
             }
@@ -584,6 +586,17 @@ fun ImageEditScreen(onBack: () -> Unit) {
                         showResize = false
                         pushUndo(current)
                         doc = ImageEditEngine.resize(current, width, padSquare, padColor)
+                    }
+                )
+            }
+
+            if (showRotate) {
+                EditRotateDialog(
+                    onDismiss = { showRotate = false },
+                    onConfirm = { degrees ->
+                        showRotate = false
+                        pushUndo(current)
+                        doc = ImageEditEngine.rotate(current, degrees)
                     }
                 )
             }
@@ -808,6 +821,7 @@ private fun EditorControls(
     onDeleteLayer: () -> Unit,
     onApplyCrop: () -> Unit,
     onResize: () -> Unit,
+    onRotate: () -> Unit,
     onText: () -> Unit
 ) {
     Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 8.dp) {
@@ -884,6 +898,14 @@ private fun EditorControls(
                         Icon(Icons.Default.AspectRatio, contentDescription = null, modifier = Modifier.size(18.dp))
                     }
                 )
+                FilterChip(
+                    selected = false,
+                    onClick = onRotate,
+                    label = { Text("Rotate") },
+                    leadingIcon = {
+                        Icon(Icons.Default.RotateRight, contentDescription = null, modifier = Modifier.size(18.dp))
+                    }
+                )
             }
 
             // Tool options
@@ -947,6 +969,50 @@ private fun EditorControls(
 }
 
 // ---------------------------------------------------------------- dialogs
+
+/**
+ * Free rotation: a slider for any angle plus the three quarter turns people
+ * actually use. Applied to the flattened document, so earlier marks rotate with
+ * the photo.
+ */
+@Composable
+private fun EditRotateDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (Float) -> Unit
+) {
+    var angle by remember { mutableFloatStateOf(0f) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rotate") },
+        text = {
+            Column {
+                Text(
+                    if (angle == 0f) "No rotation" else "${angle.toInt()}°",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Slider(
+                    value = angle,
+                    onValueChange = { angle = it },
+                    valueRange = -180f..180f,
+                    steps = 71
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { angle -= 90f }) { Text("−90°") }
+                    TextButton(onClick = { angle += 90f }) { Text("+90°") }
+                    TextButton(onClick = { angle = 180f }) { Text("180°") }
+                    TextButton(onClick = { angle = 0f }) { Text("Reset") }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = angle != 0f,
+                onClick = { onConfirm(angle) }
+            ) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
 
 @Composable
 private fun EditResizeDialog(

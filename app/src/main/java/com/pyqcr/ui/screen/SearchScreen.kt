@@ -1,7 +1,8 @@
 package com.pyqcr.ui.screen
 
 import android.net.Uri
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,10 +19,13 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircleOutline
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandMore
@@ -41,6 +45,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -52,6 +57,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +75,11 @@ import coil3.compose.AsyncImage
 import com.pyqcr.PyqCrApp
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.ui.component.AppSnackbarHost
+import com.pyqcr.ui.component.BatchMultiSelectBar
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -114,7 +125,10 @@ private data class AppliedSearch(
 @Composable
 fun SearchScreen(
     onBack: () -> Unit,
-    onImageClick: (uri: String, uris: List<String>) -> Unit
+    onImageClick: (uri: String, uris: List<String>) -> Unit,
+    onNavigateToImageEdit: () -> Unit = {},
+    onNavigateToWechatGrid: () -> Unit = {},
+    onNavigateToAiEdit: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as PyqCrApp
@@ -124,6 +138,16 @@ fun SearchScreen(
     LaunchedEffect(Unit) {
         repository.getAllImages().collect { images = it }
     }
+
+    // Videos are not in the Room images table, so they are read live for the
+    // whole library (getFolderVideos(null)). They carry no rating/AI score, so
+    // those two criteria naturally hide them.
+    var videos by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        videos = withContext(Dispatchers.IO) { repository.getFolderVideos(null) }
+    }
+
+    val library = remember(images, videos) { images + videos }
 
     var nameQuery by remember { mutableStateOf("") }
     var folderQuery by remember { mutableStateOf("") }
@@ -139,6 +163,29 @@ fun SearchScreen(
     // The criteria the last Search press ran with. Null until then, so the
     // list is built from this snapshot and never from the live form fields.
     var applied by remember { mutableStateOf<AppliedSearch?>(null) }
+
+    // ---- multi-select (the folder view's batch actions) -------------------
+    var multiSelect by remember { mutableStateOf(false) }
+    var selection by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var batchAction by remember { mutableStateOf<SearchBatchAction?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    // A new search starts a fresh selection: acting on rows that are no longer
+    // on screen would be a surprise.
+    LaunchedEffect(applied) {
+        multiSelect = false
+        selection = emptySet()
+    }
+
+    // Rows that left the result set (deleted, moved, or no longer matching)
+    // drop out of the selection, so the count never counts ghosts.
+    LaunchedEffect(results) {
+        if (selection.isNotEmpty()) {
+            val visible = results.map { it.uri }.toSet()
+            if (!visible.containsAll(selection)) selection = selection.intersect(visible)
+        }
+    }
 
     /** Filter the library with exactly what the form holds right now. */
     fun runSearch() {
@@ -170,11 +217,11 @@ fun SearchScreen(
         dateFrom.isNotBlank() || dateTo.isNotBlank() || minSizeMb.isNotBlank() ||
         maxSizeMb.isNotBlank() || minRating > 0f || minAiScore > 0f
 
-    val folders = remember(images) {
-        images.map { it.folderName }.distinct().sortedBy { it.lowercase() }
+    val folders = remember(library) {
+        library.map { it.folderName }.distinct().sortedBy { it.lowercase() }
     }
 
-    val results: List<ImageItem> = remember(images, applied, sort) {
+    val results: List<ImageItem> = remember(library, applied, sort) {
         val query = applied
         if (query == null) {
             emptyList()
@@ -185,7 +232,7 @@ fun SearchScreen(
             val maxBytes = query.maxSizeMb.toFloatOrNull()?.let { it * 1048576f }
             val name = query.name.lowercase()
             val folder = query.folder.lowercase()
-            val matched = images.filter { item ->
+            val matched = library.filter { item ->
                 (name.isEmpty() || item.displayName.lowercase().contains(name)) &&
                     (folder.isEmpty() || item.folderName.lowercase().contains(folder)) &&
                     (from == null || item.dateAdded >= from) &&
@@ -251,6 +298,38 @@ fun SearchScreen(
                     }
                 }
             )
+        },
+        snackbarHost = { AppSnackbarHost(snackbarHostState) },
+        bottomBar = {
+            if (multiSelect) {
+                BatchMultiSelectBar(
+                    selectedCount = selection.size,
+                    allContextSelected = selection.size == results.size && results.isNotEmpty(),
+                    onCancel = {
+                        multiSelect = false
+                        selection = emptySet()
+                    },
+                    onSelectAll = {
+                        selection = if (selection.size == results.size) emptySet()
+                        else results.map { it.uri }.toSet()
+                    },
+                    onRestore = {},
+                    onCollage = { batchAction = SearchBatchAction.COLLAGE },
+                    onTag = { batchAction = SearchBatchAction.TAG },
+                    onRate = { batchAction = SearchBatchAction.RATE },
+                    onFavourite = { batchAction = SearchBatchAction.FAVOURITE },
+                    onDelete = { batchAction = SearchBatchAction.DELETE },
+                    onSelectForAi = { batchAction = SearchBatchAction.AI_RATING },
+                    onAiEdit = { batchAction = SearchBatchAction.AI_EDIT },
+                    onEditImages = { batchAction = SearchBatchAction.EDIT_IMAGES },
+                    onWechatGrid = { batchAction = SearchBatchAction.WECHAT_GRID },
+                    onResize = { batchAction = SearchBatchAction.RESIZE },
+                    onRename = { batchAction = SearchBatchAction.RENAME },
+                    onCopyTo = { batchAction = SearchBatchAction.COPY },
+                    onMoveTo = { batchAction = SearchBatchAction.MOVE },
+                    onMoveToVault = { batchAction = SearchBatchAction.VAULT }
+                )
+            }
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
@@ -467,11 +546,18 @@ fun SearchScreen(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            text = "${results.size} of ${images.size}",
+                            text = if (multiSelect) "${selection.size} selected"
+                            else "${results.size} of ${library.size}",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.weight(1f)
                         )
+                        if (!multiSelect && results.isNotEmpty()) {
+                            TextButton(onClick = {
+                                multiSelect = true
+                                selection = emptySet()
+                            }) { Text("Select") }
+                        }
                         Box {
                             TextButton(onClick = { showSortMenu = true }) {
                                 Icon(Icons.Default.Sort, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -515,7 +601,7 @@ fun SearchScreen(
                             )
                             Spacer(Modifier.height(12.dp))
                             Text(
-                                text = if (images.isEmpty()) "No photos in the library yet."
+                                text = if (library.isEmpty()) "No items in the library yet."
                                 else "Nothing matches these filters.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -527,9 +613,23 @@ fun SearchScreen(
                             contentPadding = PaddingValues(bottom = 24.dp)
                         ) {
                             items(results, key = { it.uri }) { item ->
+                                val checked = item.uri in selection
                                 SearchResultRow(
                                     item = item,
-                                    onClick = { onImageClick(item.uri, resultUris) }
+                                    multiSelect = multiSelect,
+                                    checked = checked,
+                                    onClick = {
+                                        if (multiSelect) {
+                                            selection = if (checked) selection - item.uri
+                                            else selection + item.uri
+                                        } else {
+                                            onImageClick(item.uri, resultUris)
+                                        }
+                                    },
+                                    onLongClick = {
+                                        multiSelect = true
+                                        selection = selection + item.uri
+                                    }
                                 )
                                 HorizontalDivider()
                             }
@@ -539,6 +639,18 @@ fun SearchScreen(
             }
         }
     }
+
+    // ---- batch action host ---------------------------------------------
+    SearchBatchActionHost(
+        action = batchAction,
+        uris = selection.toList(),
+        images = library,
+        onConsumed = { batchAction = null },
+        onMessage = { text -> scope.launch { snackbarHostState.showSnackbar(text) } },
+        onNavigateToImageEdit = onNavigateToImageEdit,
+        onNavigateToWechatGrid = onNavigateToWechatGrid,
+        onNavigateToAiEdit = onNavigateToAiEdit
+    )
 }
 
 /** An action chip: applies a preset to the field above it (never a toggle). */
@@ -550,26 +662,51 @@ private fun Chip(text: String, onClick: () -> Unit) {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SearchResultRow(
     item: ImageItem,
-    onClick: () -> Unit
+    multiSelect: Boolean,
+    checked: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        AsyncImage(
-            model = Uri.parse(item.uri),
-            contentDescription = item.displayName,
-            modifier = Modifier
-                .size(60.dp)
-                .clip(RoundedCornerShape(8.dp)),
-            contentScale = ContentScale.Crop
-        )
+        Box {
+            AsyncImage(
+                model = Uri.parse(item.uri),
+                contentDescription = item.displayName,
+                modifier = Modifier
+                    .size(60.dp)
+                    .clip(RoundedCornerShape(8.dp)),
+                contentScale = ContentScale.Crop
+            )
+            if (multiSelect) {
+                // Same visual language as the album grid's selection.
+                Surface(
+                    shape = CircleShape,
+                    color = if (checked) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                    modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).size(20.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            if (checked) Icons.Default.Check else Icons.Default.CheckCircleOutline,
+                            contentDescription = null,
+                            tint = if (checked) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+            }
+        }
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -582,6 +719,7 @@ private fun SearchResultRow(
                 .append(" · ")
                 .append(formatSearchDate(item.dateAdded))
             if (item.sizeBytes > 0L) caption.append(" · ").append(formatSearchSize(item.sizeBytes))
+            if (item.uri.contains("/video/")) caption.append(" · video")
             if (item.width > 0 && item.height > 0) {
                 caption.append(" · ").append(item.width).append("×").append(item.height)
             }

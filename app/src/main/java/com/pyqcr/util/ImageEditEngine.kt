@@ -364,6 +364,41 @@ object ImageEditEngine {
         return ImageEditDoc(base = result)
     }
 
+    /**
+     * Rotate the flattened document by [degrees] (clockwise, any value).
+     *
+     * Arbitrary angles cannot be expressed in the overlay model — every mark is
+     * stored in normalized image space — so the document is flattened first,
+     * exactly like crop and resize. The canvas grows to the rotated bounding box
+     * and the empty corners are filled white, which is what a printed photo
+     * looks like on a sheet.
+     */
+    fun rotate(doc: ImageEditDoc, degrees: Float): ImageEditDoc {
+        val flat = render(doc)
+        val angle = ((degrees % 360f) + 360f) % 360f
+        if (angle == 0f) return ImageEditDoc(base = flat)
+        val rad = Math.toRadians(angle.toDouble())
+        val sin = kotlin.math.abs(kotlin.math.sin(rad)).toFloat()
+        val cos = kotlin.math.abs(kotlin.math.cos(rad)).toFloat()
+        val w = flat.width.toFloat()
+        val h = flat.height.toFloat()
+        val outW = (w * cos + h * sin).toInt().coerceAtLeast(1)
+        val outH = (w * sin + h * cos).toInt().coerceAtLeast(1)
+        val out = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(android.graphics.Color.WHITE)
+        val paint = Paint().apply {
+            isAntiAlias = true
+            isFilterBitmap = true
+        }
+        canvas.save()
+        canvas.rotate(angle, outW / 2f, outH / 2f)
+        canvas.drawBitmap(flat, (outW - w) / 2f, (outH - h) / 2f, paint)
+        canvas.restore()
+        flat.recycle()
+        return ImageEditDoc(base = out)
+    }
+
     /** Scale an overlay photo to exactly the base dimensions (same-position stacking). */
     fun fitOverlayToBase(overlay: Bitmap, base: Bitmap): Bitmap {
         if (overlay.width == base.width && overlay.height == base.height) return overlay
