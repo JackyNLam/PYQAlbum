@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
@@ -1292,7 +1293,7 @@ object FileOperationHelper {
         if (uris.isEmpty()) return@withContext DeleteOutcome.Done(emptyList(), emptyList())
 
         val refused = trashMediaSilently(context, uris)
-        val trashed = uris.filter { it !in refused }
+        val trashed = uris.filter { it !in refused }.toMutableList()
         var remaining = refused
         if (remaining.isNotEmpty()) {
             val removed = deleteMoveSources(context, remaining)
@@ -1310,6 +1311,31 @@ object FileOperationHelper {
             remaining = remaining.filter { it !in removed }
             if (remaining.isEmpty()) {
                 return@withContext DeleteOutcome.Done(trashed + removed, trashed)
+            }
+        }
+        if (remaining.isNotEmpty()) {
+            // A ROM can apply the bin write while answering 0 rows (and some
+            // report RESULT_CANCELED for a request they applied). Re-read the
+            // row state before asking the user for anything: a row that is in
+            // the bin has left the gallery and must not be reported as a
+            // failed delete.
+            val binned = remaining.filter { u ->
+                val parsed = try {
+                    Uri.parse(u)
+                } catch (e: Exception) {
+                    null
+                }
+                parsed != null && isTrashedRow(context, parsed)
+            }
+            if (binned.isNotEmpty()) {
+                Log.i(TAG, "attemptDelete: ${binned.size} row(s) already in the bin")
+                trashed += binned
+                remaining = remaining.filter { it !in binned }
+                if (remaining.isEmpty()) {
+                    // Everything requested now sits in the bin; count each row
+                    // once (the screens add removed + trashed).
+                    return@withContext DeleteOutcome.Done(emptyList(), trashed)
+                }
             }
         }
         if (remaining.isNotEmpty()) {
@@ -1680,22 +1706,60 @@ object FileOperationHelper {
         }
 
     /**
+     * True when [uri]'s row is in the system recycle bin (`IS_TRASHED = 1`).
+     *
+     * Some ROMs (HONOR / Parallel Space) apply the trash write and still report
+     * 0 updated rows, so write return values cannot be trusted for a delete —
+     * the row state is the only evidence. A trashed row has left the gallery,
+     * which is what "deleted" means to the user.
+     */
+    private fun isTrashedRow(context: Context, uri: Uri): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        return try {
+            val args = Bundle().apply {
+                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, 1)
+            }
+            context.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns.IS_TRASHED),
+                args,
+                null
+            )?.use { c ->
+                c.moveToFirst() && c.getInt(0) == 1
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
      * URIs from [uris] that the provider STILL lists after a delete — i.e. the
      * rows whose deletion silently failed (a clone can accept a delete/trash
      * request and then do nothing). Used to report an honest x/y count.
+     *
+     * Rows that are now in the recycle bin count as removed: they are gone from
+     * the gallery, and a ROM that applies the trash while answering 0 rows (or
+     * reports RESULT_CANCELED) would otherwise be reported as a failure.
      */
     suspend fun survivingUris(context: Context, uris: List<String>): List<String> =
         withContext(Dispatchers.IO) {
             uris.filter { raw ->
-                try {
+                val parsed = try {
+                    Uri.parse(raw)
+                } catch (e: Exception) {
+                    null
+                }
+                if (parsed == null) return@filter false
+                val listed = try {
                     context.contentResolver.query(
-                        Uri.parse(raw),
+                        parsed,
                         arrayOf(MediaStore.MediaColumns._ID),
                         null, null, null
                     )?.use { it.count > 0 } ?: false
                 } catch (e: Exception) {
                     false
                 }
+                listed && !isTrashedRow(context, parsed)
             }
         }
 
@@ -1814,8 +1878,12 @@ object FileOperationHelper {
             }
             for (raw in uris) {
                 var trashed = false
+                val parsed = try {
+                    Uri.parse(raw)
+                } catch (e: Exception) {
+                    null
+                }
                 try {
-                    val parsed = Uri.parse(raw)
                     val candidates = mediaUriCandidates(context, raw)
                     for (candidate in candidates) {
                         val n = try {
@@ -1834,6 +1902,13 @@ object FileOperationHelper {
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "trashMediaSilently failed for $raw", e)
+                }
+                // Some ROMs (HONOR) apply the flag write and still answer 0
+                // updated rows. Trusting that number reported a delete that
+                // actually landed as a failure, so the row state decides.
+                if (!trashed && parsed != null && isTrashedRow(context, parsed)) {
+                    trashed = true
+                    Log.i(TAG, "trashMediaSilently: $raw is in the bin (update reported 0 rows)")
                 }
                 if (!trashed) failed += raw
             }

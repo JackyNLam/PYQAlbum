@@ -654,8 +654,18 @@ fun ImageDetailScreen(
             val removed = withContext(Dispatchers.IO) {
                 FileOperationHelper.forceDeleteByPath(context, pending)
             }
-            if (removed.isNotEmpty()) {
-                reportDeleteOutcome(removed.size, pending.size)
+            // A ROM can apply a trash request even though launching its dialog
+            // failed (or answered 0 rows). Verify the rows themselves before
+            // calling this a failure — a bin item has left the gallery.
+            val survivors = withContext(Dispatchers.IO) {
+                FileOperationHelper.survivingUris(
+                    context,
+                    pending.filterNot { it in removed }
+                )
+            }
+            val gone = pending.size - survivors.size
+            if (gone > 0) {
+                reportDeleteOutcome(gone, pending.size)
                 snackbarHostState.showSnackbar(message)
                 withContext(Dispatchers.IO) {
                     repository.refreshImagesFromMediaStore()
@@ -666,7 +676,7 @@ fun ImageDetailScreen(
                 snackbarHostState.showSnackbar("Could not delete the image")
                 deleteDebugReport =
                     "0 of ${pending.size} file(s) deleted\n\n" +
-                        FileOperationHelper.safeDeleteFailure(context, pending)
+                        FileOperationHelper.safeDeleteFailure(context, survivors)
                 withContext(Dispatchers.IO) {
                     repository.refreshImagesFromMediaStore()
                 }

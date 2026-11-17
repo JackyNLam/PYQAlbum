@@ -691,20 +691,33 @@ fun AlbumScreen(
             val removed = withContext(Dispatchers.IO) {
                 FileOperationHelper.forceDeleteByPath(context, pending)
             }
+            // A ROM can apply a trash request even though launching its dialog
+            // failed (or answered 0 rows). Verify the rows themselves before
+            // calling this a failure — a bin item has left the gallery.
+            val survivors = withContext(Dispatchers.IO) {
+                FileOperationHelper.survivingUris(
+                    context,
+                    pending.filterNot { it in removed }
+                )
+            }
             if (removed.isNotEmpty()) {
                 viewModel.deleteImages(removed)
+            }
+            if (removed.isNotEmpty() || survivors.size < pending.size) {
                 viewModel.refreshImages()
-                reportDeleteOutcome(removed.size, pending.size)
-                snackbarHostState.showSnackbar(message.replace("{n}", "${removed.size}"))
+            }
+            val gone = pending.size - survivors.size
+            if (gone > 0) {
+                reportDeleteOutcome(gone, pending.size)
+                snackbarHostState.showSnackbar(message.replace("{n}", "$gone"))
             } else {
                 reportDeleteOutcome(0, pending.size)
                 snackbarHostState.showSnackbar("Could not delete ${pending.size} image(s)")
             }
-            if (removed.size < pending.size) {
-                val failed = pending.filterNot { it in removed }
+            if (survivors.isNotEmpty()) {
                 deleteDebugReport =
-                    "${removed.size} of ${pending.size} file(s) deleted\n\n" +
-                        FileOperationHelper.safeDeleteFailure(context, failed)
+                    "$gone of ${pending.size} file(s) deleted\n\n" +
+                        FileOperationHelper.safeDeleteFailure(context, survivors)
             }
             isMultiSelectMode = false
             selectedImageUris = emptySet()
@@ -872,6 +885,11 @@ fun AlbumScreen(
                 deleteJobInFlight = null
                 if (outcome.removed.isNotEmpty()) {
                     viewModel.deleteImages(outcome.removed)
+                }
+                // Trashed rows left the gallery too — refresh or they stay on
+                // screen until the folder is reopened, which looks like a
+                // failed delete. Their tags stay (the bin can restore them).
+                if (outcome.removed.isNotEmpty() || outcome.trashed.isNotEmpty()) {
                     viewModel.refreshImages()
                 }
                 // Trashed rows are gone from the gallery too — count them, or
