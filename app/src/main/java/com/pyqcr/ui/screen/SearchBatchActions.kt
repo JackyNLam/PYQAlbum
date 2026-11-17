@@ -122,7 +122,7 @@ fun SearchBatchActionHost(
     }
 
     val favouriteLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
+        ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         val pending = pendingFavourite
         pendingFavourite = null

@@ -178,15 +178,6 @@ fun SearchScreen(
         selection = emptySet()
     }
 
-    // Rows that left the result set (deleted, moved, or no longer matching)
-    // drop out of the selection, so the count never counts ghosts.
-    LaunchedEffect(results) {
-        if (selection.isNotEmpty()) {
-            val visible = results.map { it.uri }.toSet()
-            if (!visible.containsAll(selection)) selection = selection.intersect(visible)
-        }
-    }
-
     /** Filter the library with exactly what the form holds right now. */
     fun runSearch() {
         applied = AppliedSearch(
@@ -251,6 +242,15 @@ fun SearchScreen(
                 SearchSort.RATING -> matched.sortedByDescending { it.rating }
                 SearchSort.AI_SCORE -> matched.sortedByDescending { it.aiScore ?: -1f }
             }
+        }
+    }
+
+    // Rows that left the result set (deleted, moved, or no longer matching)
+    // drop out of the selection, so the count never counts ghosts.
+    LaunchedEffect(results) {
+        if (selection.isNotEmpty()) {
+            val visible = results.map { it.uri }.toSet()
+            if (!visible.containsAll(selection)) selection = selection.intersect(visible)
         }
     }
 
