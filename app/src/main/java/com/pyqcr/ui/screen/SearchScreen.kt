@@ -511,7 +511,6 @@ private fun SearchResultRow(
             if (item.width > 0 && item.height > 0) {
                 caption.append(" · ").append(item.width).append("×").append(item.height)
             }
-            if (item.type == "video") caption.append(" · video")
             Text(
                 text = caption.toString(),
                 style = MaterialTheme.typography.bodySmall,
