@@ -173,6 +173,10 @@ fun AppNavGraph() {
                     // the AI Edit screen (it imports sources from these prefs).
                     AiEditSelectionStore.addSource(context, imageUri)
                     navController.navigate(Routes.AI_EDIT)
+                },
+                onOpenWechatGrid = {
+                    // The viewer already stored this photo as the center tile.
+                    navController.navigate(Routes.WECHAT_GRID)
                 }
             )
         }

@@ -35,6 +35,7 @@ import com.pyqcr.PyqCrApp
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
 import com.pyqcr.util.WechatGridEngine
+import com.pyqcr.util.WechatGridSelectionStore
 import kotlinx.coroutines.launch
 
 /**
@@ -70,6 +71,20 @@ fun WechatGridScreen(onBack: () -> Unit) {
     var showModeMenu by remember { mutableStateOf(false) }
     var showReorder by remember { mutableStateOf(false) }
     var previewUri by remember { mutableStateOf<String?>(null) }
+
+    // Photos handed over from the folder view or the viewer: the first one is
+    // the center photo, the rest fill the hidden photos in that order.
+    LaunchedEffect(Unit) {
+        val pending = WechatGridSelectionStore.load(context) ?: return@LaunchedEffect
+        WechatGridSelectionStore.clear(context)
+        centerUri = pending.center
+        val hidden = pending.hidden.take(WechatGridEngine.MODES.last())
+        if (hidden.isNotEmpty()) {
+            others = hidden
+            mode = WechatGridEngine.MODES.firstOrNull { it >= hidden.size }
+                ?: WechatGridEngine.MODES.last()
+        }
+    }
 
     // Which list the picker is editing: the single center photo or the hidden
     // photos. Null = the main screen is showing.

@@ -105,6 +105,7 @@ import com.pyqcr.util.ImageEditSelectionStore
 import com.pyqcr.util.ImageUtil
 import com.pyqcr.util.PermissionHelper
 import com.pyqcr.util.SafGrantStore
+import com.pyqcr.util.WechatGridSelectionStore
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -2124,6 +2125,25 @@ fun AlbumScreen(
                             selectedImageUris = emptySet()
                             onNavigateToImageEdit()
                         },
+                        onWechatGrid = {
+                            // First selected photo = center tile, the rest =
+                            // hidden photos (videos cannot be rendered below).
+                            val uris = selectedImageUris
+                                .filterNot { it.contains("/video/") }
+                                .toList()
+                            if (uris.isEmpty()) {
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        "Select at least one photo for WeChat Grid"
+                                    )
+                                }
+                            } else {
+                                WechatGridSelectionStore.save(context, uris)
+                                isMultiSelectMode = false
+                                selectedImageUris = emptySet()
+                                onNavigateToWechatGrid()
+                            }
+                        },
                         onFavourite = {
                             scope.launch {
                                 if (!FavouriteStore.supported) {
@@ -3209,6 +3229,7 @@ private fun BatchMultiSelectBar(
     onRename: () -> Unit,
     onAiEdit: () -> Unit,
     onEditImages: () -> Unit,
+    onWechatGrid: () -> Unit,
     onCopyTo: () -> Unit,
     onMoveTo: () -> Unit,
     onMoveToVault: () -> Unit,
@@ -3302,6 +3323,11 @@ private fun BatchMultiSelectBar(
                         onClick = { showMenu = false; onEditImages() },
                         text = { Text("Edit images") },
                         leadingIcon = { Icon(Icons.Default.Brush, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        onClick = { showMenu = false; onWechatGrid() },
+                        text = { Text("WeChat Grid") },
+                        leadingIcon = { Icon(Icons.Default.GridView, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     )
                     HorizontalDivider()
                     DropdownMenuItem(

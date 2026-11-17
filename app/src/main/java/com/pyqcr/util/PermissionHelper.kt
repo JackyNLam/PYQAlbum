@@ -42,6 +42,23 @@ object PermissionHelper {
         }
     }
 
+    /**
+     * True when the app runs as a secondary Android user — an HONOR Parallel
+     * Space / dual-app clone, a work profile, or another multi-user profile.
+     *
+     * A clone has its own MediaStore and its own copy of the permission state,
+     * so "All files access" reported here can be inherited from the main
+     * profile yet still refuse writes. Callers use this to ask for the grant
+     * again instead of trusting the flag.
+     */
+    fun isCloneProfile(): Boolean {
+        return try {
+            android.os.Process.myUid() / 100000 != 0
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun hasMediaPermission(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= 33) {
             ContextCompat.checkSelfPermission(

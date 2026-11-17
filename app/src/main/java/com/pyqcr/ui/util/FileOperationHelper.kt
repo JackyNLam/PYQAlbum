@@ -72,11 +72,16 @@ object FileOperationHelper {
 
     /**
      * Resolve the current on-device path of a MediaStore row (image OR video)
-     * from its content:// URI: RELATIVE_PATH + DISPLAY_NAME on Android 10+
-     * (scoped-storage safe, no DATA permission needed), falling back to the
-     * DATA column on older APIs. Returns null when the row cannot be read.
-     * Trashed rows are still queryable this way, so the recycle bin can show
-     * where a binned file lives.
+     * from its content:// URI: the storage ROOT (volume) + RELATIVE_PATH +
+     * DISPLAY_NAME on Android 10+ (scoped-storage safe, no DATA permission
+     * needed), falling back to the DATA column on older APIs. Returns null when
+     * the row cannot be read. Trashed rows are still queryable this way, so the
+     * recycle bin can show where a binned file lives.
+     *
+     * The result is always an ABSOLUTE path: `RELATIVE_PATH` alone is relative
+     * to the volume ("DCIM/Camera/"), and callers delete the real file and look
+     * up SAF grants by it — a relative path silently matched neither, which is
+     * why deletes inside HONOR Parallel Space always failed.
      */
     fun resolveMediaPath(context: Context, uri: String): String? {
         return try {
@@ -84,7 +89,8 @@ object FileOperationHelper {
             val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 arrayOf(
                     MediaStore.MediaColumns.RELATIVE_PATH,
-                    MediaStore.MediaColumns.DISPLAY_NAME
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.VOLUME_NAME
                 )
             } else {
                 arrayOf(MediaStore.MediaColumns.DATA)
@@ -95,10 +101,15 @@ object FileOperationHelper {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         val relIdx = it.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
                         val nameIdx = it.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                        val volumeIdx = it.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
                         val rel = if (relIdx >= 0) it.getString(relIdx) else null
                         val name = if (nameIdx >= 0) it.getString(nameIdx) else null
-                        if (rel != null && name != null) return rel + name
-                        if (rel != null) return rel
+                        val volume = if (volumeIdx >= 0) it.getString(volumeIdx) else null
+                        val root = volumeRoot(volume)
+                        if (rel != null && name != null) {
+                            return root + File.separator + rel.trimStart('/') + name
+                        }
+                        if (rel != null) return root + File.separator + rel.trimStart('/')
                     }
                     val dataIdx = it.getColumnIndex(MediaStore.MediaColumns.DATA)
                     if (dataIdx >= 0) {
@@ -111,6 +122,22 @@ object FileOperationHelper {
         } catch (e: Exception) {
             Log.w(TAG, "resolveMediaPath failed for $uri: ${e.message}")
             null
+        }
+    }
+
+    /**
+     * Filesystem root of a MediaStore volume. `RELATIVE_PATH` is relative to
+     * it, so an absolute path needs the volume too (an SD card is
+     * `/storage/XXXX-XXXX/`, not the primary shared folder).
+     */
+    private fun volumeRoot(volume: String?): String {
+        return if (volume == null ||
+            volume == MediaStore.VOLUME_EXTERNAL_PRIMARY ||
+            volume == "external"
+        ) {
+            Environment.getExternalStorageDirectory().absolutePath
+        } else {
+            "/storage/$volume"
         }
     }
 
@@ -1216,6 +1243,11 @@ object FileOperationHelper {
      *    All files access once, then for the folder grant once, and only then
      *    falls back to the platform consent dialog.
      *
+     * Inside a secondary profile (HONOR Parallel Space clone, work profile) the
+     * "All files access" flag is re-requested even when it reads as granted: a
+     * clone inherits the main profile's setting, and the system dialog there is
+     * the only supported way to make deletes silent again.
+     *
      * [allowAllFilesPrompt] / [allowFolderPrompt] let the caller suppress a
      * prompt it has already shown; [declinedFolders] holds folders whose picker
      * the user cancelled, so the app does not nag about them again.
@@ -1239,9 +1271,10 @@ object FileOperationHelper {
                 return@withContext DeleteOutcome.Done(trashed + removed, trashed)
             }
         }
+        val clone = com.pyqcr.util.PermissionHelper.isCloneProfile()
         if (allowAllFilesPrompt &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-            !com.pyqcr.util.PermissionHelper.hasAllFilesAccess()
+            (!com.pyqcr.util.PermissionHelper.hasAllFilesAccess() || clone)
         ) {
             return@withContext DeleteOutcome.NeedsAllFiles(remaining)
         }
@@ -1257,19 +1290,37 @@ object FileOperationHelper {
     /**
      * Folder to ask a one-off SAF write grant for, so [uris] can be deleted
      * silently through [deleteFileViaSaf], or null when every row already sits
-     * under a remembered grant (a missing grant is then not the blocker).
+     * under a grant that can actually reach it.
+     *
+     * A remembered grant is only trusted when the file shows up in the tree:
+     * a stale/wrong grant would otherwise send the delete straight to the
+     * platform consent dialog, which a Parallel Space clone always refuses.
      */
     suspend fun folderNeedingDeleteGrant(context: Context, uris: List<String>): File? =
         withContext(Dispatchers.IO) {
             for (u in uris) {
                 val path = resolveMediaPath(context, u) ?: continue
-                val dir = File(path).parentFile ?: continue
-                if (com.pyqcr.util.SafGrantStore.findGrant(context, dir) == null) {
+                val file = File(path)
+                val dir = file.parentFile ?: continue
+                val grant = com.pyqcr.util.SafGrantStore.findGrant(context, dir)
+                if (grant == null || !canDeleteViaSaf(context, grant, file)) {
                     return@withContext dir
                 }
             }
             null
         }
+
+    /** True when [treeUri] lists [file], i.e. [deleteFileViaSaf] can remove it. */
+    private fun canDeleteViaSaf(context: Context, treeUri: Uri, file: File): Boolean {
+        return try {
+            val dir = file.parentFile ?: return false
+            val dirDocId = resolveSafDirDocumentId(context, treeUri, dir)
+            if (dirDocId.isBlank()) return false
+            findSafChildDocumentId(context, treeUri, dirDocId, file.name) != null
+        } catch (e: Exception) {
+            false
+        }
+    }
 
     /**
      * Move [uris] into the recoverable system recycle bin WITHOUT showing the

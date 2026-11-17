@@ -84,6 +84,7 @@ import com.pyqcr.util.MotionPhotoExtractor
 import com.pyqcr.util.PermissionHelper
 import com.pyqcr.util.QrCodeReader
 import com.pyqcr.util.SafGrantStore
+import com.pyqcr.util.WechatGridSelectionStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -119,6 +120,7 @@ fun ImageDetailScreen(
     onPreviousImage: () -> Unit = {},
     onOpenAiRating: () -> Unit = {},
     onOpenAiEdit: () -> Unit = {},
+    onOpenWechatGrid: () -> Unit = {},
     hasNextImage: Boolean = true,
     hasPreviousImage: Boolean = true,
     // +1 = arrived by swiping left (slide in from the right), -1 = arrived by
@@ -1293,6 +1295,15 @@ fun ImageDetailScreen(
                                     if (qrScanning) "Reading…" else "Read QR",
                                     active = qrScanning
                                 ) { scanQr() }
+                            }
+                            // Open WeChat Grid with this photo as the center
+                            // tile (the rest are picked there or in the folder
+                            // view's batch menu).
+                            if (!isVideo) {
+                                DetailIconButton(Icons.Default.GridView, "WeChat Grid") {
+                                    WechatGridSelectionStore.save(context, listOf(imageUri))
+                                    onOpenWechatGrid()
+                                }
                             }
                             DetailIconButton(Icons.Default.SaveAlt, "Copy") {
                                 destinationDialogOp = "copy"
