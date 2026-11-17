@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -58,9 +59,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import coil3.compose.AsyncImage
 import com.pyqcr.PyqCrApp
@@ -83,12 +86,29 @@ private enum class SearchSort(val label: String) {
 }
 
 /**
+ * The criteria one Search press actually ran with. The form's own fields stay
+ * free to edit without touching the list — the library is only re-filtered
+ * when Search is pressed, which keeps a big library from being scanned on
+ * every keystroke.
+ */
+private data class AppliedSearch(
+    val name: String,
+    val folder: String,
+    val dateFrom: String,
+    val dateTo: String,
+    val minSizeMb: String,
+    val maxSizeMb: String,
+    val minRating: Float,
+    val minAiScore: Float
+)
+
+/**
  * Library search from the left drawer.
  *
  * Every criterion the gallery stores is filterable here: filename, folder name,
  * date (a range, typed or with the quick chips), file size, star rating and AI
- * score. Filters combine with AND and are applied to the same MediaStore-backed
- * list the album shows, so a result always exists.
+ * score. Filters combine with AND, results only appear after the Search button
+ * is pressed, and every result is a row the album shows, so it always opens.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -116,6 +136,23 @@ fun SearchScreen(
     var sort by remember { mutableStateOf(SearchSort.NEWEST) }
     var showSortMenu by remember { mutableStateOf(false) }
     var showFolderMenu by remember { mutableStateOf(false) }
+    // The criteria the last Search press ran with. Null until then, so the
+    // list is built from this snapshot and never from the live form fields.
+    var applied by remember { mutableStateOf<AppliedSearch?>(null) }
+
+    /** Filter the library with exactly what the form holds right now. */
+    fun runSearch() {
+        applied = AppliedSearch(
+            name = nameQuery.trim(),
+            folder = folderQuery.trim(),
+            dateFrom = dateFrom.trim(),
+            dateTo = dateTo.trim(),
+            minSizeMb = minSizeMb.trim(),
+            maxSizeMb = maxSizeMb.trim(),
+            minRating = minRating,
+            minAiScore = minAiScore
+        )
+    }
 
     fun clearFilters() {
         nameQuery = ""
@@ -126,6 +163,7 @@ fun SearchScreen(
         maxSizeMb = ""
         minRating = 0f
         minAiScore = 0f
+        applied = null
     }
 
     val hasFilters = nameQuery.isNotBlank() || folderQuery.isNotBlank() ||
@@ -136,34 +174,36 @@ fun SearchScreen(
         images.map { it.folderName }.distinct().sortedBy { it.lowercase() }
     }
 
-    val results = remember(
-        images, nameQuery, folderQuery, dateFrom, dateTo,
-        minSizeMb, maxSizeMb, minRating, minAiScore, sort
-    ) {
-        val from = parseDateBound(dateFrom, endOfDay = false)
-        val to = parseDateBound(dateTo, endOfDay = true)
-        val minBytes = minSizeMb.trim().toFloatOrNull()?.let { it * 1048576f }
-        val maxBytes = maxSizeMb.trim().toFloatOrNull()?.let { it * 1048576f }
-        val name = nameQuery.trim().lowercase()
-        val folder = folderQuery.trim().lowercase()
-        val matched = images.filter { item ->
-            (name.isEmpty() || item.displayName.lowercase().contains(name)) &&
-                (folder.isEmpty() || item.folderName.lowercase().contains(folder)) &&
-                (from == null || item.dateAdded >= from) &&
-                (to == null || item.dateAdded <= to) &&
-                (minBytes == null || item.sizeBytes >= minBytes.toLong()) &&
-                (maxBytes == null || item.sizeBytes <= maxBytes.toLong()) &&
-                (minRating <= 0f || item.rating >= minRating) &&
-                (minAiScore <= 0f || (item.aiScore ?: -1f) >= minAiScore)
-        }
-        when (sort) {
-            SearchSort.NEWEST -> matched.sortedByDescending { it.dateAdded }
-            SearchSort.OLDEST -> matched.sortedBy { it.dateAdded }
-            SearchSort.NAME -> matched.sortedBy { it.displayName.lowercase() }
-            SearchSort.SIZE_BIG -> matched.sortedByDescending { it.sizeBytes }
-            SearchSort.SIZE_SMALL -> matched.sortedBy { it.sizeBytes }
-            SearchSort.RATING -> matched.sortedByDescending { it.rating }
-            SearchSort.AI_SCORE -> matched.sortedByDescending { it.aiScore ?: -1f }
+    val results: List<ImageItem> = remember(images, applied, sort) {
+        val query = applied
+        if (query == null) {
+            emptyList()
+        } else {
+            val from = parseDateBound(query.dateFrom, endOfDay = false)
+            val to = parseDateBound(query.dateTo, endOfDay = true)
+            val minBytes = query.minSizeMb.toFloatOrNull()?.let { it * 1048576f }
+            val maxBytes = query.maxSizeMb.toFloatOrNull()?.let { it * 1048576f }
+            val name = query.name.lowercase()
+            val folder = query.folder.lowercase()
+            val matched = images.filter { item ->
+                (name.isEmpty() || item.displayName.lowercase().contains(name)) &&
+                    (folder.isEmpty() || item.folderName.lowercase().contains(folder)) &&
+                    (from == null || item.dateAdded >= from) &&
+                    (to == null || item.dateAdded <= to) &&
+                    (minBytes == null || item.sizeBytes >= minBytes.toLong()) &&
+                    (maxBytes == null || item.sizeBytes <= maxBytes.toLong()) &&
+                    (query.minRating <= 0f || item.rating >= query.minRating) &&
+                    (query.minAiScore <= 0f || (item.aiScore ?: -1f) >= query.minAiScore)
+            }
+            when (sort) {
+                SearchSort.NEWEST -> matched.sortedByDescending { it.dateAdded }
+                SearchSort.OLDEST -> matched.sortedBy { it.dateAdded }
+                SearchSort.NAME -> matched.sortedBy { it.displayName.lowercase() }
+                SearchSort.SIZE_BIG -> matched.sortedByDescending { it.sizeBytes }
+                SearchSort.SIZE_SMALL -> matched.sortedBy { it.sizeBytes }
+                SearchSort.RATING -> matched.sortedByDescending { it.rating }
+                SearchSort.AI_SCORE -> matched.sortedByDescending { it.aiScore ?: -1f }
+            }
         }
     }
 
@@ -225,7 +265,13 @@ fun SearchScreen(
                             }
                         }
                     },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Text,
+                        imeAction = ImeAction.Search
+                    ),
+                    // The keyboard's Search key runs exactly what the button
+                    // runs — the list never changes while typing.
+                    keyboardActions = KeyboardActions(onSearch = { runSearch() })
                 )
 
                 Box {
@@ -383,6 +429,21 @@ fun SearchScreen(
                     valueRange = 0f..100f,
                     steps = 19
                 )
+                Spacer(Modifier.height(4.dp))
+                // The only thing that runs a search: pressing it snapshots the
+                // form and fills the list below. Typing never filters.
+                Button(
+                    onClick = { runSearch() },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Search")
+                }
             }
 
             HorizontalDivider()
@@ -392,7 +453,8 @@ fun SearchScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
             ) {
                 Text(
-                    text = "${results.size} of ${images.size}",
+                    text = if (applied == null) "${images.size} photos"
+                    else "${results.size} of ${images.size}",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f)
@@ -418,7 +480,7 @@ fun SearchScreen(
                         }
                     }
                 }
-                if (hasFilters) {
+                if (hasFilters || applied != null) {
                     OutlinedButton(onClick = { clearFilters() }) {
                         Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
@@ -442,8 +504,8 @@ fun SearchScreen(
                     Text(
                         text = when {
                             images.isEmpty() -> "No photos in the library yet."
-                            hasFilters -> "Nothing matches these filters."
-                            else -> "Type a filename, pick a folder or set a date, size, rating or AI score."
+                            applied == null -> "Set the filters and press Search."
+                            else -> "Nothing matches the last search."
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant

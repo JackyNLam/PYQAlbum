@@ -15,6 +15,12 @@ import androidx.core.content.ContextCompat
  */
 object PermissionHelper {
 
+    private const val PREFS_NAME = "pyqcr_permissions"
+    // The same flag the first-run prompt in AlbumScreen sets: Android's All
+    // files access is offered exactly once per install, by whichever route
+    // gets there first.
+    private const val KEY_ALL_FILES_ASKED = "asked_all_files_access"
+
     /**
      * True once the user granted the "All files access" special permission
      * (API 30+). Below Android 11 the legacy READ/WRITE permissions already
@@ -24,6 +30,26 @@ object PermissionHelper {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
             Environment.isExternalStorageManager()
     }
+
+    /**
+     * True while the app may still send the user to the "All files access"
+     * page. The grant itself is permanent and remembered by the system, and it
+     * is what keeps later deletes silent, so the page is offered exactly once
+     * per install — the first-run prompt and the delete flow share this flag.
+     * After it, a delete that still needs permission answers the platform's
+     * own "move to trash?" prompt instead of going back to Settings.
+     */
+    fun shouldAskAllFiles(context: Context): Boolean {
+        return !appPrefs(context).getBoolean(KEY_ALL_FILES_ASKED, false)
+    }
+
+    /** Records that the app has opened the All files access page. */
+    fun markAllFilesAsked(context: Context) {
+        appPrefs(context).edit().putBoolean(KEY_ALL_FILES_ASKED, true).apply()
+    }
+
+    private fun appPrefs(context: Context) =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /**
      * Settings screen where the user can toggle "All files access" for this

@@ -106,27 +106,48 @@ fun ImageEditScreen(onBack: () -> Unit) {
 
     // The images chosen in the folder view's batch menu (⋮ → Edit images).
     // Only these are offered here — both the initial picker and "add layer".
-    val storedUris = remember { ImageEditSelectionStore.load(context) }
+    // State (not a plain remember) because the screen can also empty the pool:
+    // removing a photo here must stick, not come back on the next gallery emit.
+    var poolUris by remember { mutableStateOf(ImageEditSelectionStore.load(context)) }
 
     var allImages by remember { mutableStateOf<List<ImageItem>>(emptyList()) }
     // URIs that still resolve to a real gallery row. A photo deleted (in the
     // app, in Parallel Space, or by another gallery) must disappear from the
     // picker instead of lingering as an unopenable placeholder.
-    var editableUris by remember { mutableStateOf(storedUris) }
+    var editableUris by remember { mutableStateOf(poolUris) }
     var prunedCount by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        if (storedUris.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(poolUris) {
+        if (poolUris.isEmpty()) {
+            allImages = emptyList()
+            editableUris = emptyList()
+            return@LaunchedEffect
+        }
         repository.getAllImages().collect { list ->
             val byUri = list.associateBy { it.uri }
-            val alive = storedUris.filter { byUri.containsKey(it) }
+            val alive = poolUris.filter { byUri.containsKey(it) }
             allImages = alive.mapNotNull { byUri[it] }
             editableUris = alive
-            if (alive.size != storedUris.size) {
-                prunedCount = storedUris.size - alive.size
+            if (alive.size != poolUris.size) {
+                prunedCount = poolUris.size - alive.size
                 // Persist the pruned selection so the next visit starts clean.
                 ImageEditSelectionStore.save(context, alive)
             }
         }
+    }
+
+    /**
+     * Replace the pool (removing one photo, or clearing it) and persist the
+     * change, so the folder view's "Edit images" selection starts from the
+     * same list next time. The effect above re-fills the lists from the flow.
+     */
+    fun setPool(uris: List<String>) {
+        if (uris.isEmpty()) {
+            ImageEditSelectionStore.clear(context)
+            prunedCount = 0
+        } else {
+            ImageEditSelectionStore.save(context, uris)
+        }
+        poolUris = uris
     }
 
     var doc by remember { mutableStateOf<ImageEditDoc?>(null) }
@@ -312,7 +333,15 @@ fun ImageEditScreen(onBack: () -> Unit) {
                     images = allImages,
                     padding = padding,
                     busy = busy,
-                    onPick = { openImage(it) }
+                    onPick = { openImage(it) },
+                    onRemove = { uri -> setPool(editableUris.filterNot { it == uri }) },
+                    onClear = {
+                        val n = editableUris.size
+                        setPool(emptyList())
+                        scope.launch {
+                            snackbar.showSnackbar("Removed $n photo(s) from the edit pool")
+                        }
+                    }
                 )
             }
         } else {
@@ -674,18 +703,30 @@ private fun EditorImagePicker(
     images: List<ImageItem>,
     padding: PaddingValues,
     busy: Boolean,
-    onPick: (String) -> Unit
+    onPick: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onClear: () -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(padding)
     ) {
-        Text(
-            "Pick a photo to edit",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(end = 8.dp)
+        ) {
+            Text(
+                "Pick a photo to edit",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            )
+            // The pool is only editable from the folder view otherwise; this
+            // empties it (and the saved selection) without leaving the editor.
+            TextButton(onClick = onClear) { Text("Clear") }
+        }
         if (busy) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
@@ -696,14 +737,53 @@ private fun EditorImagePicker(
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             items(images, key = { it.uri }) { image ->
-                AsyncImage(
-                    model = image.uri,
-                    contentDescription = image.displayName,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable { onPick(image.uri) }
+                PoolTile(
+                    image = image,
+                    corner = 6,
+                    onUse = { onPick(image.uri) },
+                    onRemove = { onRemove(image.uri) }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One photo of the selected pool. Tapping it uses the photo (as the edit
+ * target or as a layer); the corner button takes it out of the pool, which
+ * also updates the saved "Edit images" selection.
+ */
+@Composable
+private fun PoolTile(
+    image: ImageItem,
+    corner: Int,
+    onUse: () -> Unit,
+    onRemove: () -> Unit
+) {
+    Box(Modifier.aspectRatio(1f)) {
+        AsyncImage(
+            model = image.uri,
+            contentDescription = image.displayName,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .matchParentSize()
+                .clip(RoundedCornerShape(corner.dp))
+                .clickable(onClick = onUse)
+        )
+        Surface(
+            modifier = Modifier.align(Alignment.TopEnd).padding(3.dp).size(22.dp),
+            shape = CircleShape,
+            color = Color.Black.copy(alpha = 0.55f),
+            contentColor = Color.White
+        ) {
+            Box(
+                modifier = Modifier.clickable(onClick = onRemove),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Remove from the pool",
+                    modifier = Modifier.size(14.dp)
                 )
             }
         }

@@ -1251,9 +1251,10 @@ object FileOperationHelper {
      * How far a delete got, and what the screen should ask the user next.
      *
      * Android only lets an app remove media it did not contribute through two
-     * routes: All files access, or a SAF write grant on the containing folder.
-     * [attemptDelete] walks them in that order so the "move to trash?" consent
-     * dialog is normally never needed.
+     * routes: All files access, or the platform's own trash/delete consent
+     * dialog. [attemptDelete] tries everything silent first and never opens
+     * the SAF folder picker — granting a whole folder just to delete one photo
+     * was judged worse than answering the "move to trash?" prompt.
      */
     sealed class DeleteOutcome {
         /** Nothing left to do. [removed] = really gone, [trashed] = recyclable bin. */
@@ -1261,12 +1262,6 @@ object FileOperationHelper {
 
         /** Needs the one-time All files access grant before rows can go. */
         data class NeedsAllFiles(val remaining: List<String>) : DeleteOutcome()
-
-        /** Needs a one-time SAF write grant on [folder]. */
-        data class NeedsFolderGrant(
-            val folder: File,
-            val remaining: List<String>
-        ) : DeleteOutcome()
 
         /** Last resort: the platform's own trash/delete consent dialog. */
         data class NeedsConsent(val remaining: List<String>) : DeleteOutcome()
@@ -1283,21 +1278,20 @@ object FileOperationHelper {
      * 3. [forceDeleteByPath] — the real file at every address we can build
      *    (volume root, `/sdcard` alias, DATA). This is what removes foreign
      *    media with All files access, in the normal profile AND in a clone.
-     * 4. Everything still left is explained back to the caller, which asks for
-     *    the SAF folder grant once (first inside a clone, where that grant is
-     *    the route that works), else for All files access once, and only then
-     *    falls back to the platform consent dialog.
+     * 4. Everything still left goes to the platform's "move to trash?"
+     *    consent dialog. The one exception is All files access, which is
+     *    offered exactly once per install because the grant is permanent and
+     *    makes every later delete silent; the SAF folder picker is never
+     *    opened for a delete.
      *
-     * [allowAllFilesPrompt] / [allowFolderPrompt] let the caller suppress a
-     * prompt it has already shown; [declinedFolders] holds folders whose picker
-     * the user cancelled, so the app does not nag about them again.
+     * [allowAllFilesPrompt] lets a caller suppress the grant it has already
+     * asked for; [PermissionHelper.shouldAskAllFiles] remembers the ask
+     * across restarts, so nothing repeats.
      */
     suspend fun attemptDelete(
         context: Context,
         uris: List<String>,
-        allowAllFilesPrompt: Boolean = true,
-        allowFolderPrompt: Boolean = true,
-        declinedFolders: Set<String> = emptySet()
+        allowAllFilesPrompt: Boolean = true
     ): DeleteOutcome = withContext(Dispatchers.IO) {
         if (uris.isEmpty()) return@withContext DeleteOutcome.Done(emptyList(), emptyList())
 
@@ -1351,27 +1345,22 @@ object FileOperationHelper {
                     "${remaining.size} still left after the silent routes"
             )
         }
-        if (allowFolderPrompt && com.pyqcr.util.PermissionHelper.isCloneProfile()) {
-            // Inside a clone the SAF grant is the route that actually works —
-            // ask for it before the All-files page, which a clone inherits but
-            // cannot use.
-            val folder = folderNeedingDeleteGrant(context, remaining)
-            if (folder != null && folder.absolutePath !in declinedFolders) {
-                return@withContext DeleteOutcome.NeedsFolderGrant(folder, remaining)
-            }
-        }
         if (allowAllFilesPrompt &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-            !com.pyqcr.util.PermissionHelper.hasAllFilesAccess()
+            !com.pyqcr.util.PermissionHelper.hasAllFilesAccess() &&
+            com.pyqcr.util.PermissionHelper.shouldAskAllFiles(context)
         ) {
+            // The one trip to Settings that pays for itself: the grant is
+            // permanent, so every later delete lands in the silent routes.
+            // Recorded here rather than per job so a restart cannot send the
+            // user back to the same page.
+            com.pyqcr.util.PermissionHelper.markAllFilesAsked(context)
             return@withContext DeleteOutcome.NeedsAllFiles(remaining)
         }
-        if (allowFolderPrompt) {
-            val folder = folderNeedingDeleteGrant(context, remaining)
-            if (folder != null && folder.absolutePath !in declinedFolders) {
-                return@withContext DeleteOutcome.NeedsFolderGrant(folder, remaining)
-            }
-        }
+        // No SAF folder picker: granting a whole folder just to remove one
+        // photo is worse than the prompt below. The platform's own consent
+        // dialog is the terminal route — the user answers it once per batch
+        // and the file lands in the recycle bin.
         DeleteOutcome.NeedsConsent(remaining)
     }
 
@@ -1432,50 +1421,6 @@ object FileOperationHelper {
             }
             deleted
         }
-
-    /**
-     * Folder to ask a one-off SAF write grant for, so [uris] can be deleted
-     * silently through [deleteFileViaSaf], or null when every row already sits
-     * under a grant that can actually reach it.
-     *
-     * A remembered grant is only trusted when the file shows up in the tree:
-     * a stale/wrong grant would otherwise send the delete straight to the
-     * platform consent dialog, which a Parallel Space clone always refuses.
-     */
-    suspend fun folderNeedingDeleteGrant(context: Context, uris: List<String>): File? =
-        withContext(Dispatchers.IO) {
-            for (u in uris) {
-                // A grant that already reaches this row by RELATIVE_PATH needs
-                // no new prompt — and works whether or not an absolute path
-                // can be built for the clone's storage.
-                if (canDeleteViaSafByRelativePath(context, u)) continue
-                val path = resolveMediaPath(context, u)
-                if (path != null) {
-                    val file = File(path)
-                    val dir = file.parentFile ?: continue
-                    val grant = com.pyqcr.util.SafGrantStore.findGrant(context, dir)
-                    if (grant != null && canDeleteViaSaf(context, grant, file)) continue
-                    return@withContext dir
-                }
-                // No absolute path: name the folder from RELATIVE_PATH so the
-                // picker can still be opened at the right place.
-                val folder = relativeFolderFile(context, u)
-                if (folder != null) return@withContext folder
-            }
-            null
-        }
-
-    /** True when [treeUri] lists [file], i.e. [deleteFileViaSaf] can remove it. */
-    private fun canDeleteViaSaf(context: Context, treeUri: Uri, file: File): Boolean {
-        return try {
-            val dir = file.parentFile ?: return false
-            val dirDocId = resolveSafDirDocumentId(context, treeUri, dir)
-            if (dirDocId.isBlank()) return false
-            findSafChildDocumentId(context, treeUri, dirDocId, file.name) != null
-        } catch (e: Exception) {
-            false
-        }
-    }
 
     /**
      * Folder segments + file name of a MediaStore row, as the provider reports

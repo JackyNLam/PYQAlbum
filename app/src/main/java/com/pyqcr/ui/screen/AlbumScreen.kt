@@ -670,10 +670,11 @@ fun AlbumScreen(
     // A delete runs as a small state machine: attemptDelete() removes what it
     // can with no prompt (recycle-bin write, row/file delete, remembered SAF
     // grant) and reports what it still needs. Asking for All files access ONCE
-    // is what makes every later delete silent — inside HONOR Parallel Space it
-    // is the only way past the repeated "move to trash?" dialog, because a
-    // clone can never inherit the main profile's grant. The folder grant and
-    // the platform dialog remain as fallbacks.
+    // per install is what makes every later delete silent — inside HONOR
+    // Parallel Space it is the only way past the repeated "move to trash?"
+    // dialog, because a clone can never inherit the main profile's grant. The
+    // platform trash prompt is the last route; a SAF folder picker is never
+    // opened for a delete.
     var deleteJob by remember { mutableStateOf<DeleteJob?>(null) }
     // The effect below is keyed on this counter, NOT on deleteJob: writing the
     // key from inside the effect would cancel the coroutine that is running it
@@ -688,11 +689,6 @@ fun AlbumScreen(
     }
 
     var pendingAllFilesDelete by remember { mutableStateOf<List<String>?>(null) }
-    var pendingFolderDelete by remember { mutableStateOf<List<String>?>(null) }
-    var retryDeleteFolder by remember { mutableStateOf<File?>(null) }
-    // Folders whose picker the user already cancelled — one ask per folder,
-    // then straight to the platform consent dialog.
-    val declinedDeleteFolders = remember { mutableStateListOf<String>() }
 
     /**
      * Last-resort delete when the platform dialog cannot be used or cannot be
@@ -789,70 +785,6 @@ fun AlbumScreen(
         }
     }
 
-    // One-off folder grant for deletes: the system remembers the tree, so the
-    // retry — and every later delete there — is silent.
-    val deleteTreeLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val tree = result.data?.data
-        val job = deleteJobInFlight
-        deleteJobInFlight = null
-        val pending = pendingFolderDelete
-        pendingFolderDelete = null
-        val folder = retryDeleteFolder
-        val picked = result.resultCode == android.app.Activity.RESULT_OK && tree != null
-        if (picked && tree != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    tree,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-            } catch (e: Exception) {
-                Log.w("AlbumScreen", "takePersistableUriPermission failed", e)
-            }
-        }
-        // Believe the picker only when the grant is really there: a clone that
-        // accepts the tree but drops the persisted permission would otherwise
-        // re-open the picker forever.
-        val granted = if (picked && folder != null) {
-            try {
-                SafGrantStore.findGrant(context, folder) != null
-            } catch (e: Exception) {
-                false
-            }
-        } else {
-            false
-        }
-        if (!granted) {
-            folder?.let { declinedDeleteFolders += it.absolutePath }
-            val failed = pending
-            if (picked) {
-                // Honest, and no repeat prompts for this folder.
-                scope.launch {
-                    snackbarHostState.showSnackbar(
-                        "Android did not keep the folder grant — cannot delete there"
-                    )
-                    if (failed != null) {
-                        deleteDebugReport =
-                            "0 of ${failed.size} file(s) deleted\n\n" +
-                                FileOperationHelper.safeDeleteFailure(context, failed)
-                    }
-                }
-            }
-        }
-        retryDeleteFolder = null
-        if (job != null) {
-            startDeleteJob(
-                job.copy(
-                    uris = pending ?: job.uris,
-                    askAllFiles = false,
-                    askFolder = granted
-                )
-            )
-        }
-    }
-
     LaunchedEffect(deleteRequestId) {
         val job = deleteJob ?: return@LaunchedEffect
         deleteJobInFlight = job
@@ -871,9 +803,7 @@ fun AlbumScreen(
                 FileOperationHelper.attemptDelete(
                     context = context,
                     uris = job.uris,
-                    allowAllFilesPrompt = job.askAllFiles,
-                    allowFolderPrompt = job.askFolder,
-                    declinedFolders = declinedDeleteFolders.toSet()
+                    allowAllFilesPrompt = job.askAllFiles
                 )
             }
         } catch (e: Exception) {
@@ -941,46 +871,6 @@ fun AlbumScreen(
                         Log.w("AlbumScreen", "All-files settings unavailable", e)
                         pendingAllFilesDelete = null
                         startDeleteJob(job.copy(askAllFiles = false))
-                    }
-                }
-            }
-            is FileOperationHelper.DeleteOutcome.NeedsFolderGrant -> {
-                deleteJobInFlight = null
-                if (!job.allowDirectDelete) {
-                    snackbarHostState.showSnackbar(
-                        "Copied to the destination — originals kept (no write access to delete them)"
-                    )
-                    isMultiSelectMode = false
-                    selectedImageUris = emptySet()
-                } else {
-                    retryDeleteFolder = outcome.folder
-                    pendingFolderDelete = outcome.remaining
-                    deleteJobInFlight = job
-                    snackbarHostState.showSnackbar(
-                        "Allow access to \"${outcome.folder.name}\" once — deletes there will then be silent"
-                    )
-                    try {
-                        deleteTreeLauncher.launch(
-                            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                                addFlags(
-                                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-                                )
-                                putExtra(
-                                    "android.provider.extra.INITIAL_URI",
-                                    SafGrantStore.topLevelDocumentUri(outcome.folder)
-                                )
-                            }
-                        )
-                    } catch (e: Exception) {
-                        // No system picker (clone space): treat as declined and
-                        // move on to the platform consent request.
-                        Log.w("AlbumScreen", "Folder picker unavailable", e)
-                        pendingFolderDelete = null
-                        retryDeleteFolder = null
-                        declinedDeleteFolders += outcome.folder.absolutePath
-                        startDeleteJob(job.copy(askFolder = false))
                     }
                 }
             }
@@ -1318,7 +1208,6 @@ fun AlbumScreen(
                 DeleteJob(
                     uris = uris,
                     askAllFiles = allowDirectDelete,
-                    askFolder = allowDirectDelete,
                     allowDirectDelete = allowDirectDelete,
                     trashTemplate = trashTemplate,
                     directTemplate = directTemplate
@@ -1580,9 +1469,8 @@ fun AlbumScreen(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
                 !PermissionHelper.hasAllFilesAccess()
             ) {
-                val prefs = context.getSharedPreferences("pyqcr_permissions", Context.MODE_PRIVATE)
-                if (!prefs.getBoolean("asked_all_files_access", false)) {
-                    prefs.edit().putBoolean("asked_all_files_access", true).apply()
+                if (PermissionHelper.shouldAskAllFiles(context)) {
+                    PermissionHelper.markAllFilesAsked(context)
                     try {
                         allFilesAccessLauncher.launch(
                             PermissionHelper.allFilesAccessIntent(context)
@@ -5236,7 +5124,6 @@ private fun RecycleBinViewer(
 private data class DeleteJob(
     val uris: List<String>,
     val askAllFiles: Boolean,
-    val askFolder: Boolean,
     val allowDirectDelete: Boolean,
     val trashTemplate: String,
     val directTemplate: String
