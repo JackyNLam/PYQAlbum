@@ -46,6 +46,7 @@ import coil3.compose.AsyncImage
 import com.pyqcr.PyqCrApp
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.ui.component.AppSnackbarHost
 import com.pyqcr.util.EditMark
 import com.pyqcr.util.EditOverlay
 import com.pyqcr.util.EditStrokePoint
@@ -264,7 +265,7 @@ fun ImageEditScreen(onBack: () -> Unit) {
     }
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
+        snackbarHost = { AppSnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text("Image Edit") },

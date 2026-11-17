@@ -34,6 +34,7 @@ import coil3.compose.AsyncImage
 import com.pyqcr.PyqCrApp
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.ui.component.AppSnackbarHost
 import com.pyqcr.util.WechatGridEngine
 import com.pyqcr.util.WechatGridSelectionStore
 import kotlinx.coroutines.launch
@@ -150,7 +151,7 @@ fun WechatGridScreen(onBack: () -> Unit) {
                 }
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
+        snackbarHost = { AppSnackbarHost(snackbarHostState) }
     ) { padding ->
 
         val editingCenter = pickerForCenter

@@ -67,6 +67,7 @@ import com.pyqcr.data.db.ImageTagCrossRef
 import com.pyqcr.data.db.TagEntity
 import com.pyqcr.data.model.ImageItem
 import com.pyqcr.data.repository.AlbumRepository
+import com.pyqcr.ui.component.AppSnackbarHost
 import com.pyqcr.ui.component.CopyMoveDestinationDialog
 import com.pyqcr.ui.component.GifPlayer
 import com.pyqcr.ui.component.MotionPhotoPlayer
@@ -1188,7 +1189,7 @@ fun ImageDetailScreen(
     // image uses every pixel. Swipe down or system Back leaves the viewer.
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) }
+        snackbarHost = { AppSnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Box(
             modifier = Modifier
