@@ -532,12 +532,20 @@ fun ImageDetailScreen(
     var deleteDebugReport by remember { mutableStateOf<String?>(null) }
 
     /**
-     * Single place for delete feedback so a toast always appears — success,
-     * partial or nothing — plus a logcat line. Declared before first use
-     * (Kotlin local declarations cannot be forward-referenced).
+     * Single place for delete feedback: exactly ONE popup — a toast with the
+     * verified count — plus a logcat line. The dark snackbar bar used to repeat
+     * the same outcome underneath, so a delete showed two popups at once. A
+     * delete that removed nothing says so whatever flow had announced.
+     * Declared before first use (Kotlin local declarations cannot be
+     * forward-referenced).
      */
-    fun reportDeleteOutcome(done: Int, total: Int) {
-        val text = "Deleted $done/$total file(s)"
+    fun reportDeleteOutcome(done: Int, total: Int, template: String? = null) {
+        val wording = template?.takeIf { it.isNotBlank() }
+        val text = when {
+            done <= 0 -> "Could not delete $total file(s)"
+            wording != null -> wording.replace("{n}", "$done/$total")
+            else -> "Deleted $done/$total file(s)"
+        }
         try {
             Toast.makeText(
                 context,
@@ -559,17 +567,20 @@ fun ImageDetailScreen(
         if (pending != null) {
             coroutineScope.launch {
                 // The OS can say OK and still leave the row behind, and some
-                // ROMs apply the trash while reporting RESULT_CANCELED.
+                // ROMs apply the trash while reporting RESULT_CANCELED — or set
+                // the bin flag a moment after the dialog closed, which the
+                // grace period below catches.
                 val survivors = withContext(Dispatchers.IO) {
-                    FileOperationHelper.survivingUris(context, pending)
+                    FileOperationHelper.survivingUris(
+                        context, pending, FileOperationHelper.BIN_SETTLE_MS
+                    )
                 }
                 val done = pending.size - survivors.size
                 withContext(Dispatchers.IO) {
                     repository.refreshImagesFromMediaStore()
                 }
                 if (done > 0) {
-                    reportDeleteOutcome(done, pending.size)
-                    snackbarHostState.showSnackbar(pendingDeleteMessage)
+                    reportDeleteOutcome(done, pending.size, pendingDeleteMessage)
                     onBack()
                 } else if (approved) {
                     reportDeleteOutcome(0, pending.size)
@@ -660,20 +671,19 @@ fun ImageDetailScreen(
             val survivors = withContext(Dispatchers.IO) {
                 FileOperationHelper.survivingUris(
                     context,
-                    pending.filterNot { it in removed }
+                    pending.filterNot { it in removed },
+                    FileOperationHelper.BIN_SETTLE_MS
                 )
             }
             val gone = pending.size - survivors.size
             if (gone > 0) {
-                reportDeleteOutcome(gone, pending.size)
-                snackbarHostState.showSnackbar(message)
+                reportDeleteOutcome(gone, pending.size, message)
                 withContext(Dispatchers.IO) {
                     repository.refreshImagesFromMediaStore()
                 }
                 onBack()
             } else {
                 reportDeleteOutcome(0, pending.size)
-                snackbarHostState.showSnackbar("Could not delete the image")
                 deleteDebugReport =
                     "0 of ${pending.size} file(s) deleted\n\n" +
                         FileOperationHelper.safeDeleteFailure(context, survivors)
@@ -832,8 +842,8 @@ fun ImageDetailScreen(
                     repository.refreshImagesFromMediaStore()
                 }
                 val doneCount = outcome.removed.size + outcome.trashed.size
-                reportDeleteOutcome(doneCount, job.uris.size)
-                snackbarHostState.showSnackbar(
+                reportDeleteOutcome(
+                    doneCount, job.uris.size,
                     if (outcome.trashed.isNotEmpty()) job.trashTemplate else job.directTemplate
                 )
                 onBack()

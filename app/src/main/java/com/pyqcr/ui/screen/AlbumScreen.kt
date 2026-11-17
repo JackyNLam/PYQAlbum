@@ -592,12 +592,19 @@ fun AlbumScreen(
     var deleteDebugReport by remember { mutableStateOf<String?>(null) }
 
     /**
-     * Every delete ends here so the user ALWAYS gets a toast with the verified
-     * count — success, partial or nothing — plus a logcat line. Declared before
-     * its first use (Kotlin local declarations cannot be forward-referenced).
+     * Every delete ends here so the user ALWAYS gets exactly ONE popup — a
+     * toast with the verified count — plus a logcat line. The dark snackbar bar
+     * used to repeat the same outcome, so a finished delete popped up twice at
+     * the same time. A delete that removed nothing says so plainly whatever the
+     * flow had intended to announce. Declared before its first use (Kotlin
+     * local declarations cannot be forward-referenced).
      */
-    fun reportDeleteOutcome(done: Int, total: Int) {
-        val text = "Deleted $done/$total file(s)"
+    fun reportDeleteOutcome(done: Int, total: Int, template: String? = null) {
+        val text = when {
+            done <= 0 -> "Could not delete $total file(s)"
+            template != null -> template.replace("{n}", "$done/$total")
+            else -> "Deleted $done/$total file(s)"
+        }
         try {
             Toast.makeText(
                 context,
@@ -626,13 +633,18 @@ fun AlbumScreen(
         // RESULT_CANCELED. Verify both ways and report the real count.
         scope.launch {
             val survivors = withContext(Dispatchers.IO) {
-                FileOperationHelper.survivingUris(context, uris)
+                // Some ROMs flip IS_TRASHED a moment AFTER the dialog answered,
+                // so the rows get that grace before the count is taken — a
+                // binned image is a finished delete, not a failure.
+                FileOperationHelper.survivingUris(
+                    context, uris, FileOperationHelper.BIN_SETTLE_MS
+                )
             }
             val doneUris = uris.filterNot { it in survivors }
             if (doneUris.isNotEmpty()) {
                 viewModel.deleteImages(doneUris)
-                reportDeleteOutcome(doneUris.size, uris.size)
-                snackbarHostState.showSnackbar(message.replace("{n}", "${doneUris.size}"))
+                // One popup for the outcome, in the flow's own wording.
+                reportDeleteOutcome(doneUris.size, uris.size, message)
             }
             viewModel.refreshImages()
             if (survivors.isNotEmpty()) {
@@ -697,7 +709,8 @@ fun AlbumScreen(
             val survivors = withContext(Dispatchers.IO) {
                 FileOperationHelper.survivingUris(
                     context,
-                    pending.filterNot { it in removed }
+                    pending.filterNot { it in removed },
+                    FileOperationHelper.BIN_SETTLE_MS
                 )
             }
             if (removed.isNotEmpty()) {
@@ -707,13 +720,10 @@ fun AlbumScreen(
                 viewModel.refreshImages()
             }
             val gone = pending.size - survivors.size
-            if (gone > 0) {
-                reportDeleteOutcome(gone, pending.size)
-                snackbarHostState.showSnackbar(message.replace("{n}", "$gone"))
-            } else {
-                reportDeleteOutcome(0, pending.size)
-                snackbarHostState.showSnackbar("Could not delete ${pending.size} image(s)")
-            }
+            // One popup for the outcome: the toast carries the verified count in
+            // the flow's own wording (and says "Could not delete" when nothing
+            // went), the dialog below the failure details.
+            reportDeleteOutcome(gone, pending.size, message)
             if (survivors.isNotEmpty()) {
                 deleteDebugReport =
                     "$gone of ${pending.size} file(s) deleted\n\n" +
@@ -897,8 +907,9 @@ fun AlbumScreen(
                 val doneCount = outcome.removed.size + outcome.trashed.size
                 val template =
                     if (outcome.trashed.isNotEmpty()) job.trashTemplate else job.directTemplate
-                reportDeleteOutcome(doneCount, job.uris.size)
-                snackbarHostState.showSnackbar(template.replace("{n}", "$doneCount"))
+                // Single popup: the toast states the count in the flow's
+                // wording; the message bar used to repeat it underneath.
+                reportDeleteOutcome(doneCount, job.uris.size, template)
                 isMultiSelectMode = false
                 selectedImageUris = emptySet()
             }

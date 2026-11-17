@@ -8,11 +8,13 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -37,6 +39,13 @@ import java.io.FileOutputStream
 object FileOperationHelper {
 
     internal const val TAG = "FileOpHelper"
+
+    /**
+     * How long a recycle-bin write is given to show up in the row before the
+     * app calls the delete a failure, and how often the row is re-read.
+     */
+    internal const val BIN_SETTLE_MS = 3000L
+    private const val BIN_POLL_MS = 300L
 
     /**
      * Outcome of a single copy/move: destination (path or content uri) or the failure reason.
@@ -1296,10 +1305,31 @@ object FileOperationHelper {
         val trashed = uris.filter { it !in refused }.toMutableList()
         var remaining = refused
         if (remaining.isNotEmpty()) {
+            // A ROM can apply the bin write SECONDS after answering 0 updated
+            // rows, so the row state has to be re-read on a short deadline:
+            // without the wait the app reported "could not delete" while the
+            // image left the gallery on its own a moment later. Waiting here
+            // also keeps the bin recoverable — the routes below remove the
+            // real file, which the late flag would otherwise have saved.
+            val binned = awaitTrashedRows(context, remaining)
+            if (binned.isNotEmpty()) {
+                Log.i(TAG, "attemptDelete: ${binned.size} row(s) landed in the bin")
+                trashed += binned
+                remaining = remaining.filter { it !in binned }
+            }
+        }
+        if (remaining.isEmpty()) {
+            // Nothing left: every requested row is in the bin. Count each row
+            // once — the screens add removed + trashed.
+            return@withContext DeleteOutcome.Done(emptyList(), trashed)
+        }
+        val hardRemoved = mutableListOf<String>()
+        if (remaining.isNotEmpty()) {
             val removed = deleteMoveSources(context, remaining)
+            hardRemoved += removed
             remaining = remaining.filter { it !in removed }
             if (remaining.isEmpty()) {
-                return@withContext DeleteOutcome.Done(trashed + removed, trashed)
+                return@withContext DeleteOutcome.Done(hardRemoved, trashed)
             }
         }
         if (remaining.isNotEmpty()) {
@@ -1308,34 +1338,10 @@ object FileOperationHelper {
             // user for anything — with All files access this is what actually
             // deletes media this app does not own.
             val removed = forceDeleteByPath(context, remaining)
+            hardRemoved += removed
             remaining = remaining.filter { it !in removed }
             if (remaining.isEmpty()) {
-                return@withContext DeleteOutcome.Done(trashed + removed, trashed)
-            }
-        }
-        if (remaining.isNotEmpty()) {
-            // A ROM can apply the bin write while answering 0 rows (and some
-            // report RESULT_CANCELED for a request they applied). Re-read the
-            // row state before asking the user for anything: a row that is in
-            // the bin has left the gallery and must not be reported as a
-            // failed delete.
-            val binned = remaining.filter { u ->
-                val parsed = try {
-                    Uri.parse(u)
-                } catch (e: Exception) {
-                    null
-                }
-                parsed != null && isTrashedRow(context, parsed)
-            }
-            if (binned.isNotEmpty()) {
-                Log.i(TAG, "attemptDelete: ${binned.size} row(s) already in the bin")
-                trashed += binned
-                remaining = remaining.filter { it !in binned }
-                if (remaining.isEmpty()) {
-                    // Everything requested now sits in the bin; count each row
-                    // once (the screens add removed + trashed).
-                    return@withContext DeleteOutcome.Done(emptyList(), trashed)
-                }
+                return@withContext DeleteOutcome.Done(hardRemoved, trashed)
             }
         }
         if (remaining.isNotEmpty()) {
@@ -1733,6 +1739,45 @@ object FileOperationHelper {
     }
 
     /**
+     * Rows of [uris] whose recycle-bin flag becomes visible within [timeoutMs].
+     *
+     * The provider applies the flag asynchronously on some ROMs (verified on
+     * HONOR 2026-11-17): the write answers 0 updated rows, the row still reads
+     * IS_TRASHED = 0 for a second or two, and the image leaves the gallery on
+     * its own afterwards. A delete therefore has to re-read the row state on a
+     * deadline instead of trusting the first answer, or the app reports a
+     * failure for a delete that did land — and, worse, goes on to remove the
+     * real file that the late flag would have kept recoverable.
+     */
+    suspend fun awaitTrashedRows(
+        context: Context,
+        uris: Collection<String>,
+        timeoutMs: Long = BIN_SETTLE_MS
+    ): List<String> = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext emptyList()
+        var waiting = uris.toList()
+        val binned = mutableListOf<String>()
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (waiting.isNotEmpty()) {
+            val stillWaiting = mutableListOf<String>()
+            for (raw in waiting) {
+                val parsed = try {
+                    Uri.parse(raw)
+                } catch (e: Exception) {
+                    null
+                }
+                if (parsed != null && isTrashedRow(context, parsed)) binned += raw
+                else stillWaiting += raw
+            }
+            waiting = stillWaiting
+            if (waiting.isEmpty() || SystemClock.elapsedRealtime() >= deadline) break
+            delay(BIN_POLL_MS)
+        }
+        if (binned.isNotEmpty()) Log.i(TAG, "awaitTrashedRows: ${binned.size} row(s) in the bin")
+        binned
+    }
+
+    /**
      * URIs from [uris] that the provider STILL lists after a delete — i.e. the
      * rows whose deletion silently failed (a clone can accept a delete/trash
      * request and then do nothing). Used to report an honest x/y count.
@@ -1740,17 +1785,24 @@ object FileOperationHelper {
      * Rows that are now in the recycle bin count as removed: they are gone from
      * the gallery, and a ROM that applies the trash while answering 0 rows (or
      * reports RESULT_CANCELED) would otherwise be reported as a failure.
+     *
+     * [graceMs] re-reads those rows for that long first, for the ROMs that set
+     * the flag a moment after the write returned.
      */
-    suspend fun survivingUris(context: Context, uris: List<String>): List<String> =
+    suspend fun survivingUris(
+        context: Context,
+        uris: List<String>,
+        graceMs: Long = 0L
+    ): List<String> =
         withContext(Dispatchers.IO) {
-            uris.filter { raw ->
+            val listed = uris.filter { raw ->
                 val parsed = try {
                     Uri.parse(raw)
                 } catch (e: Exception) {
                     null
                 }
                 if (parsed == null) return@filter false
-                val listed = try {
+                val present = try {
                     context.contentResolver.query(
                         parsed,
                         arrayOf(MediaStore.MediaColumns._ID),
@@ -1759,7 +1811,13 @@ object FileOperationHelper {
                 } catch (e: Exception) {
                     false
                 }
-                listed && !isTrashedRow(context, parsed)
+                present && !isTrashedRow(context, parsed)
+            }
+            if (graceMs <= 0L || listed.isEmpty()) listed
+            else {
+                val binned = awaitTrashedRows(context, listed, graceMs)
+                if (binned.isEmpty()) listed
+                else listed.filter { it !in binned }
             }
         }
 
