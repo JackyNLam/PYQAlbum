@@ -139,6 +139,7 @@ fun AlbumScreen(
     onNavigateToAiEdit: () -> Unit = {},
     onNavigateToImageEdit: () -> Unit = {},
     onNavigateToWechatGrid: () -> Unit = {},
+    onNavigateToSearch: () -> Unit = {},
     onNavigateToVault: () -> Unit = {},
     viewModel: AlbumViewModel = viewModel()
 ) {
@@ -192,6 +193,7 @@ fun AlbumScreen(
         when (target) {
             "image_edit" -> onNavigateToImageEdit()
             "wechat_grid" -> onNavigateToWechatGrid()
+            "search" -> onNavigateToSearch()
             "ai_edit" -> onNavigateToAiEdit()
             "ai_rating" -> onNavigateToAiSelection()
             "vault" -> onNavigateToVault()
@@ -1771,6 +1773,13 @@ fun AlbumScreen(
                     label = "AI Rating",
                     selected = false,
                     onClick = { pendingDrawerNav = "ai_rating" }
+                )
+
+                DrawerItem(
+                    icon = Icons.Default.Search,
+                    label = "Search",
+                    selected = false,
+                    onClick = { pendingDrawerNav = "search" }
                 )
 
                 DrawerItem(
@@ -3468,7 +3477,7 @@ private fun GroupLabel(text: String) {
 
 /** The batch menu's collapsed action groups, kept out of the top level. */
 private enum class BatchSubMenu(val label: String) {
-    AI_TOOLS("AI tools"),
+    AI_TOOLS("AI & Tools"),
     SIZE("Resize & Collage"),
     ORGANIZE("Organize")
 }

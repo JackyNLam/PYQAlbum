@@ -23,6 +23,7 @@ object Routes {
     const val AI_EDIT = "ai_edit"
     const val IMAGE_EDIT = "image_edit"
     const val WECHAT_GRID = "wechat_grid"
+    const val SEARCH = "search"
     const val AI_SELECT = "ai_select"
     const val BATCH_EDIT = "batch_edit/{mode}"
     const val VAULT = "vault"
@@ -100,6 +101,9 @@ fun AppNavGraph() {
                 },
                 onNavigateToWechatGrid = {
                     navController.navigate(Routes.WECHAT_GRID)
+                },
+                onNavigateToSearch = {
+                    navController.navigate(Routes.SEARCH)
                 },
                 onNavigateToVault = {
                     navController.navigate(Routes.VAULT)
@@ -214,6 +218,20 @@ fun AppNavGraph() {
         composable(Routes.WECHAT_GRID) {
             WechatGridScreen(
                 onBack = { popIfCurrent(Routes.WECHAT_GRID) }
+            )
+        }
+
+        composable(Routes.SEARCH) {
+            SearchScreen(
+                onBack = { popIfCurrent(Routes.SEARCH) },
+                // Swiping in the viewer must walk the result list, not the
+                // stale album grid, so the results become the viewer order.
+                onImageClick = { imageUri, imageList ->
+                    currentImages = imageList
+                    currentImageIndex = imageList.indexOf(imageUri)
+                    viewerEnterDirection = 0
+                    navController.navigate(Routes.imageDetail(imageUri))
+                }
             )
         }
 
