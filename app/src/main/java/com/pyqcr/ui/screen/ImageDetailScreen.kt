@@ -562,10 +562,23 @@ fun ImageDetailScreen(
             null
         }
         if (sender == null) {
+            // No consent request can be built (a clone refuses one, some ROMs
+            // reject foreign media). Delete the file directly instead.
             coroutineScope.launch {
-                snackbarHostState.showSnackbar("Could not delete the image")
-                withContext(Dispatchers.IO) {
-                    repository.refreshImagesFromMediaStore()
+                val removed = withContext(Dispatchers.IO) {
+                    FileOperationHelper.forceDeleteByPath(context, pending)
+                }
+                if (removed.isNotEmpty()) {
+                    snackbarHostState.showSnackbar(message)
+                    withContext(Dispatchers.IO) {
+                        repository.refreshImagesFromMediaStore()
+                    }
+                    onBack()
+                } else {
+                    snackbarHostState.showSnackbar("Could not delete the image")
+                    withContext(Dispatchers.IO) {
+                        repository.refreshImagesFromMediaStore()
+                    }
                 }
             }
             return
@@ -658,9 +671,17 @@ fun ImageDetailScreen(
                     snackbarHostState.showSnackbar(
                         "Allow \"All files access\" once — deletes are then silent"
                     )
-                    deleteAllFilesLauncher.launch(
-                        PermissionHelper.allFilesAccessIntent(context)
-                    )
+                    try {
+                        deleteAllFilesLauncher.launch(
+                            PermissionHelper.allFilesAccessIntent(context)
+                        )
+                    } catch (e: Exception) {
+                        // ROMs without the per-app All-files page throw here —
+                        // retry without that step instead of stalling.
+                        android.util.Log.w("ImageDetail", "All-files settings unavailable", e)
+                        pendingAllFilesDelete = null
+                        deleteJob = job.copy(askAllFiles = false)
+                    }
                 }
             }
             is FileOperationHelper.DeleteOutcome.NeedsFolderGrant -> {
@@ -679,19 +700,29 @@ fun ImageDetailScreen(
                     snackbarHostState.showSnackbar(
                         "Allow access to \"${outcome.folder.name}\" once — deletes there will then be silent"
                     )
-                    deleteTreeLauncher.launch(
-                        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                            addFlags(
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-                            )
-                            putExtra(
-                                "android.provider.extra.INITIAL_URI",
-                                SafGrantStore.topLevelDocumentUri(outcome.folder)
-                            )
-                        }
-                    )
+                    try {
+                        deleteTreeLauncher.launch(
+                            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                                addFlags(
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                                )
+                                putExtra(
+                                    "android.provider.extra.INITIAL_URI",
+                                    SafGrantStore.topLevelDocumentUri(outcome.folder)
+                                )
+                            }
+                        )
+                    } catch (e: Exception) {
+                        // No system picker available: treat as declined and let
+                        // the platform consent request have the last word.
+                        android.util.Log.w("ImageDetail", "Folder picker unavailable", e)
+                        pendingFolderDelete = null
+                        retryDeleteFolder = null
+                        declinedDeleteFolder = outcome.folder.absolutePath
+                        deleteJob = job.copy(askFolder = false)
+                    }
                 }
             }
             is FileOperationHelper.DeleteOutcome.NeedsConsent -> {

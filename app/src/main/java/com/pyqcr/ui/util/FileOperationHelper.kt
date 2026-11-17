@@ -84,43 +84,75 @@ object FileOperationHelper {
      * why deletes inside HONOR Parallel Space always failed.
      */
     fun resolveMediaPath(context: Context, uri: String): String? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // VOLUME_NAME is the precise answer (SD cards live elsewhere), but
+            // it is not accepted by every provider/ROM — query it separately so
+            // a rejected column degrades to the primary root instead of
+            // resolving nothing at all.
+            resolveProjectedPath(context, uri, withVolume = true)?.let { return it }
+            resolveProjectedPath(context, uri, withVolume = false)?.let { return it }
+        }
+        return resolveDataPath(context, uri)
+    }
+
+    /** RELATIVE_PATH (+ optionally VOLUME_NAME) → absolute path, or null. */
+    private fun resolveProjectedPath(context: Context, uri: String, withVolume: Boolean): String? {
         return try {
-            val contentUri = Uri.parse(uri)
-            val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val projection = if (withVolume) {
                 arrayOf(
                     MediaStore.MediaColumns.RELATIVE_PATH,
                     MediaStore.MediaColumns.DISPLAY_NAME,
                     MediaStore.MediaColumns.VOLUME_NAME
                 )
             } else {
-                arrayOf(MediaStore.MediaColumns.DATA)
+                arrayOf(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    MediaStore.MediaColumns.DISPLAY_NAME
+                )
             }
-            val cursor = context.contentResolver.query(contentUri, projection, null, null, null)
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        val relIdx = it.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
-                        val nameIdx = it.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
-                        val volumeIdx = it.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
-                        val rel = if (relIdx >= 0) it.getString(relIdx) else null
-                        val name = if (nameIdx >= 0) it.getString(nameIdx) else null
-                        val volume = if (volumeIdx >= 0) it.getString(volumeIdx) else null
-                        val root = volumeRoot(volume)
-                        if (rel != null && name != null) {
-                            return root + File.separator + rel.trimStart('/') + name
-                        }
-                        if (rel != null) return root + File.separator + rel.trimStart('/')
+            var path: String? = null
+            context.contentResolver.query(Uri.parse(uri), projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val relIdx = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                    val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                    val volumeIdx = if (withVolume) {
+                        cursor.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
+                    } else {
+                        -1
                     }
-                    val dataIdx = it.getColumnIndex(MediaStore.MediaColumns.DATA)
-                    if (dataIdx >= 0) {
-                        val data = it.getString(dataIdx)
-                        if (data != null) return data
+                    val rel = if (relIdx >= 0) cursor.getString(relIdx) else null
+                    val name = if (nameIdx >= 0) cursor.getString(nameIdx) else null
+                    if (rel != null) {
+                        val volume = if (volumeIdx >= 0) cursor.getString(volumeIdx) else null
+                        path = volumeRoot(volume) + File.separator +
+                            rel.trimStart('/') + (name ?: "")
                     }
                 }
             }
-            null
+            path
         } catch (e: Exception) {
-            Log.w(TAG, "resolveMediaPath failed for $uri: ${e.message}")
+            Log.w(TAG, "resolveProjectedPath(${withVolume}) failed for $uri: ${e.message}")
+            null
+        }
+    }
+
+    /** The DATA column (absolute already) — legacy API, or a ROM that still fills it. */
+    private fun resolveDataPath(context: Context, uri: String): String? {
+        return try {
+            var path: String? = null
+            context.contentResolver.query(
+                Uri.parse(uri),
+                arrayOf(MediaStore.MediaColumns.DATA),
+                null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                    if (idx >= 0) path = cursor.getString(idx)
+                }
+            }
+            path
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveDataPath failed for $uri: ${e.message}")
             null
         }
     }
@@ -1237,16 +1269,14 @@ object FileOperationHelper {
      *    recoverable recycle bin, no dialog. Works for the app's own rows and
      *    whenever All files access is granted.
      * 2. [deleteMoveSources] — row delete, then the real file, then
-     *    [deleteFileViaSaf] through a remembered folder grant. This is the route
-     *    that works inside an app clone / HONOR Parallel Space.
-     * 3. Everything still left is explained back to the caller, which asks for
-     *    All files access once, then for the folder grant once, and only then
+     *    [deleteFileViaSaf] through a remembered folder grant.
+     * 3. [forceDeleteByPath] — the real file at every address we can build
+     *    (volume root, `/sdcard` alias, DATA). This is what removes foreign
+     *    media with All files access, in the normal profile AND in a clone.
+     * 4. Everything still left is explained back to the caller, which asks for
+     *    the SAF folder grant once (first inside a clone, where that grant is
+     *    the route that works), else for All files access once, and only then
      *    falls back to the platform consent dialog.
-     *
-     * Inside a secondary profile (HONOR Parallel Space clone, work profile) the
-     * "All files access" flag is re-requested even when it reads as granted: a
-     * clone inherits the main profile's setting, and the system dialog there is
-     * the only supported way to make deletes silent again.
      *
      * [allowAllFilesPrompt] / [allowFolderPrompt] let the caller suppress a
      * prompt it has already shown; [declinedFolders] holds folders whose picker
@@ -1271,10 +1301,36 @@ object FileOperationHelper {
                 return@withContext DeleteOutcome.Done(trashed + removed, trashed)
             }
         }
-        val clone = com.pyqcr.util.PermissionHelper.isCloneProfile()
+        if (remaining.isNotEmpty()) {
+            // Every remaining row has a refused row delete. Remove the file
+            // itself through each possible on-disk address before asking the
+            // user for anything — with All files access this is what actually
+            // deletes media this app does not own.
+            val removed = forceDeleteByPath(context, remaining)
+            remaining = remaining.filter { it !in removed }
+            if (remaining.isEmpty()) {
+                return@withContext DeleteOutcome.Done(trashed + removed, trashed)
+            }
+        }
+        if (remaining.isNotEmpty()) {
+            Log.i(
+                TAG,
+                "attemptDelete: ${uris.size} requested, ${trashed.size} trashed, " +
+                    "${remaining.size} still left after the silent routes"
+            )
+        }
+        if (allowFolderPrompt && com.pyqcr.util.PermissionHelper.isCloneProfile()) {
+            // Inside a clone the SAF grant is the route that actually works —
+            // ask for it before the All-files page, which a clone inherits but
+            // cannot use.
+            val folder = folderNeedingDeleteGrant(context, remaining)
+            if (folder != null && folder.absolutePath !in declinedFolders) {
+                return@withContext DeleteOutcome.NeedsFolderGrant(folder, remaining)
+            }
+        }
         if (allowAllFilesPrompt &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-            (!com.pyqcr.util.PermissionHelper.hasAllFilesAccess() || clone)
+            !com.pyqcr.util.PermissionHelper.hasAllFilesAccess()
         ) {
             return@withContext DeleteOutcome.NeedsAllFiles(remaining)
         }
@@ -1286,6 +1342,68 @@ object FileOperationHelper {
         }
         DeleteOutcome.NeedsConsent(remaining)
     }
+
+    /**
+     * Delete the real files behind [uris] at every address we can build:
+     * `RELATIVE_PATH` on the primary root, the DATA column, and the `/sdcard`
+     * alias some ROMs (and clone spaces) report instead of
+     * `/storage/emulated/0`. A URI only counts as removed when its file is
+     * really gone, so a refused delete still reaches the user honestly.
+     *
+     * This is the silent route that makes deletes work with All files access
+     * even when MediaProvider refuses the row write (foreign media, clones).
+     */
+    suspend fun forceDeleteByPath(context: Context, uris: List<String>): List<String> =
+        withContext(Dispatchers.IO) {
+            val deleted = mutableListOf<String>()
+            for (u in uris) {
+                val uri = try {
+                    Uri.parse(u)
+                } catch (e: Exception) {
+                    null
+                } ?: continue
+                val candidates = LinkedHashSet<String>()
+                resolveMediaPath(context, u)?.let { path ->
+                    candidates += path
+                    val primary = Environment.getExternalStorageDirectory().absolutePath
+                    if (path.startsWith(primary + File.separator)) {
+                        candidates += "/sdcard" + path.removePrefix(primary)
+                    }
+                }
+                resolveDataPath(context, u)?.let { candidates += it }
+                val gone = candidates.any { path ->
+                    val file = File(path)
+                    val existed = try {
+                        file.exists()
+                    } catch (e: Exception) {
+                        false
+                    }
+                    if (!existed) {
+                        // A candidate the row does not point at — not evidence.
+                        false
+                    } else {
+                        try {
+                            file.delete()
+                            !file.exists()
+                        } catch (e: Exception) {
+                            false
+                        }
+                    }
+                }
+                if (gone) {
+                    try {
+                        context.contentResolver.delete(uri, null, null)
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        candidates.firstOrNull()?.let { MediaStoreUtils.scanFile(context, it) }
+                    } catch (_: Exception) {
+                    }
+                    deleted += u
+                }
+            }
+            deleted
+        }
 
     /**
      * Folder to ask a one-off SAF write grant for, so [uris] can be deleted

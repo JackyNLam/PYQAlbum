@@ -637,8 +637,20 @@ fun AlbumScreen(
             null
         }
         if (sender == null) {
+            // No consent request can be built for these rows (a clone refuses
+            // to build one, and some ROMs reject foreign media outright). Try
+            // the direct file delete instead of dead-ending the user.
             scope.launch {
-                snackbarHostState.showSnackbar("Could not delete ${pending.size} image(s)")
+                val removed = withContext(Dispatchers.IO) {
+                    FileOperationHelper.forceDeleteByPath(context, pending)
+                }
+                if (removed.isNotEmpty()) {
+                    viewModel.deleteImages(removed)
+                    viewModel.refreshImages()
+                    snackbarHostState.showSnackbar(message.replace("{n}", "${removed.size}"))
+                } else {
+                    snackbarHostState.showSnackbar("Could not delete ${pending.size} image(s)")
+                }
                 isMultiSelectMode = false
                 selectedImageUris = emptySet()
             }
@@ -743,9 +755,17 @@ fun AlbumScreen(
                     snackbarHostState.showSnackbar(
                         "Allow \"All files access\" once — deletes are then silent"
                     )
-                    deleteAllFilesLauncher.launch(
-                        PermissionHelper.allFilesAccessIntent(context)
-                    )
+                    try {
+                        deleteAllFilesLauncher.launch(
+                            PermissionHelper.allFilesAccessIntent(context)
+                        )
+                    } catch (e: Exception) {
+                        // ROMs that expose no per-app All-files page: keep going
+                        // with the next escalation instead of stalling here.
+                        Log.w("AlbumScreen", "All-files settings unavailable", e)
+                        pendingAllFilesDelete = null
+                        deleteJob = job.copy(askAllFiles = false)
+                    }
                 }
             }
             is FileOperationHelper.DeleteOutcome.NeedsFolderGrant -> {
@@ -763,19 +783,29 @@ fun AlbumScreen(
                     snackbarHostState.showSnackbar(
                         "Allow access to \"${outcome.folder.name}\" once — deletes there will then be silent"
                     )
-                    deleteTreeLauncher.launch(
-                        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                            addFlags(
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-                            )
-                            putExtra(
-                                "android.provider.extra.INITIAL_URI",
-                                SafGrantStore.topLevelDocumentUri(outcome.folder)
-                            )
-                        }
-                    )
+                    try {
+                        deleteTreeLauncher.launch(
+                            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                                addFlags(
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                                )
+                                putExtra(
+                                    "android.provider.extra.INITIAL_URI",
+                                    SafGrantStore.topLevelDocumentUri(outcome.folder)
+                                )
+                            }
+                        )
+                    } catch (e: Exception) {
+                        // No system picker (clone space): treat as declined and
+                        // move on to the platform consent request.
+                        Log.w("AlbumScreen", "Folder picker unavailable", e)
+                        pendingFolderDelete = null
+                        retryDeleteFolder = null
+                        declinedDeleteFolders += outcome.folder.absolutePath
+                        deleteJob = job.copy(askFolder = false)
+                    }
                 }
             }
             is FileOperationHelper.DeleteOutcome.NeedsConsent -> {
