@@ -4,6 +4,7 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.IntentSender
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -197,6 +198,114 @@ object FileOperationHelper {
             }
         }
         return contentUri.lastPathSegment ?: "unknown_${System.currentTimeMillis()}"
+    }
+
+    /**
+     * What the detail screen shows about a video: the folder it lives in, its
+     * pixel size, byte size and playback length. Videos are not in the Room
+     * image table, so their metadata comes straight from MediaStore.
+     */
+    data class VideoMetadata(
+        val displayName: String?,
+        val folderName: String?,
+        val width: Int,
+        val height: Int,
+        val sizeBytes: Long,
+        val durationMs: Long
+    )
+
+    /**
+     * Read [VideoMetadata] for a video content:// URI or file path.
+     *
+     * MediaStore is the primary source; rows on some ROMs omit columns, so a
+     * [MediaMetadataRetriever] pass fills in duration/dimensions and the real
+     * file fills in size/folder/name.
+     */
+    fun readVideoMetadata(context: Context, uriStr: String): VideoMetadata? {
+        val uri = Uri.parse(uriStr)
+        var name: String? = null
+        var folder: String? = null
+        var width = 0
+        var height = 0
+        var size = 0L
+        var duration = 0L
+
+        try {
+            val projection = arrayOf(
+                MediaStore.Video.Media.DISPLAY_NAME,
+                MediaStore.Video.Media.WIDTH,
+                MediaStore.Video.Media.HEIGHT,
+                MediaStore.Video.Media.SIZE,
+                MediaStore.Video.Media.DURATION,
+                MediaStore.Video.Media.BUCKET_DISPLAY_NAME
+            )
+            context.contentResolver.query(uri, projection, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val nameIdx = c.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
+                    if (nameIdx >= 0) name = c.getString(nameIdx)
+                    val widthIdx = c.getColumnIndex(MediaStore.Video.Media.WIDTH)
+                    if (widthIdx >= 0) width = c.getInt(widthIdx)
+                    val heightIdx = c.getColumnIndex(MediaStore.Video.Media.HEIGHT)
+                    if (heightIdx >= 0) height = c.getInt(heightIdx)
+                    val sizeIdx = c.getColumnIndex(MediaStore.Video.Media.SIZE)
+                    if (sizeIdx >= 0) size = c.getLong(sizeIdx)
+                    val durationIdx = c.getColumnIndex(MediaStore.Video.Media.DURATION)
+                    if (durationIdx >= 0) duration = c.getLong(durationIdx)
+                    val folderIdx = c.getColumnIndex(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
+                    if (folderIdx >= 0) folder = c.getString(folderIdx)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "readVideoMetadata query failed for $uriStr: ${e.message}")
+        }
+
+        if (duration <= 0L || width <= 0 || height <= 0) {
+            try {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    if (uriStr.startsWith("content://")) {
+                        retriever.setDataSource(context, uri)
+                    } else {
+                        retriever.setDataSource(uriStr)
+                    }
+                    if (duration <= 0L) {
+                        duration = retriever
+                            .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                            ?.toLongOrNull() ?: 0L
+                    }
+                    if (width <= 0) {
+                        width = retriever
+                            .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                            ?.toIntOrNull() ?: 0
+                    }
+                    if (height <= 0) {
+                        height = retriever
+                            .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                            ?.toIntOrNull() ?: 0
+                    }
+                } finally {
+                    retriever.release()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "readVideoMetadata retriever failed for $uriStr: ${e.message}")
+            }
+        }
+
+        val path = resolveMediaPath(context, uriStr)
+            ?: if (!uriStr.startsWith("content://")) uriStr else null
+        if (path != null) {
+            val file = File(path)
+            if (size <= 0L) size = file.length()
+            if (folder.isNullOrBlank()) folder = file.parentFile?.name
+            if (name.isNullOrBlank()) name = file.name
+        }
+
+        if (name == null && folder == null && width <= 0 && height <= 0 &&
+            size <= 0L && duration <= 0L
+        ) {
+            return null
+        }
+        return VideoMetadata(name, folder, width, height, size, duration)
     }
 
     // ---------- MediaStore RELATIVE_PATH (zero-permission standard collections) ----------

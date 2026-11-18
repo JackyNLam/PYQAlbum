@@ -146,6 +146,11 @@ fun ImageDetailScreen(
     }
 
     var imageItem by remember { mutableStateOf<ImageItem?>(null) }
+    // Videos are not in the Room image table — their metadata is read live from
+    // MediaStore so the Info dialog can show folder / size / length for them too.
+    var videoMeta by remember(imageUri) {
+        mutableStateOf<FileOperationHelper.VideoMetadata?>(null)
+    }
     var tags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var allTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var rating by remember { mutableFloatStateOf(0f) }
@@ -1006,7 +1011,27 @@ fun ImageDetailScreen(
     // Full file path of the current image, resolved lazily for the detail panel
     var fullPath by remember(imageUri) { mutableStateOf<String?>(null) }
     LaunchedEffect(imageUri) {
-        fullPath = com.pyqcr.ui.util.FileOperationHelper.resolveFilePath(context, imageUri)
+        // resolveMediaPath understands video rows as well as images (the old
+        // Images-only DATA lookup returned null for every video).
+        fullPath = withContext(Dispatchers.IO) {
+            com.pyqcr.ui.util.FileOperationHelper.resolveMediaPath(context, imageUri)
+                ?: com.pyqcr.ui.util.FileOperationHelper.resolveFilePath(context, imageUri)
+        }
+    }
+
+    // Live MediaStore metadata for a video (folder / dimensions / size / length).
+    LaunchedEffect(imageUri, isVideo) {
+        videoMeta = if (isVideo) {
+            withContext(Dispatchers.IO) {
+                try {
+                    FileOperationHelper.readVideoMetadata(context, imageUri)
+                } catch (e: Exception) {
+                    null
+                }
+            }
+        } else {
+            null
+        }
     }
 
     // Real file name of the current item (MediaStore DISPLAY_NAME) — used as
@@ -1496,6 +1521,14 @@ fun ImageDetailScreen(
                     onDismissRequest = { showInfoDialog = false },
                     title = { Text("Details") },
                     text = {
+                        val metaFolder = imageItem?.folderName
+                            ?: videoMeta?.folderName
+                        val metaWidth = imageItem?.width?.takeIf { it > 0 }
+                            ?: videoMeta?.width?.takeIf { it > 0 } ?: 0
+                        val metaHeight = imageItem?.height?.takeIf { it > 0 }
+                            ?: videoMeta?.height?.takeIf { it > 0 } ?: 0
+                        val metaSize = imageItem?.sizeBytes?.takeIf { it > 0 }
+                            ?: videoMeta?.sizeBytes ?: 0L
                         Column(
                             modifier = Modifier
                                 .heightIn(max = 460.dp)
@@ -1506,11 +1539,15 @@ fun ImageDetailScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.horizontalScroll(rememberScrollState())
                             ) {
-                                DetailChip("📁 ${imageItem?.folderName ?: "Unknown"}")
-                                if ((imageItem?.width ?: 0) > 0 && (imageItem?.height ?: 0) > 0) {
-                                    DetailChip("${imageItem?.width} × ${imageItem?.height}")
+                                DetailChip("📁 ${metaFolder ?: "Unknown"}")
+                                if (metaWidth > 0 && metaHeight > 0) {
+                                    DetailChip("$metaWidth × $metaHeight")
                                 }
-                                DetailChip(formatFileSize(imageItem?.sizeBytes ?: 0L))
+                                DetailChip(formatFileSize(metaSize))
+                                val durationMs = videoMeta?.durationMs ?: 0L
+                                if (durationMs > 0L) {
+                                    DetailChip("⏱ ${formatDuration(durationMs)}")
+                                }
                             }
                             Spacer(Modifier.height(8.dp))
                             Surface(
@@ -1910,6 +1947,19 @@ private fun formatFileSize(bytes: Long): String {
         bytes >= mb -> String.format("%.1f MB", bytes / mb)
         bytes >= kb -> String.format("%.1f KB", bytes / kb)
         else -> "$bytes B"
+    }
+}
+
+/** Format a playback length as "0:07" / "12:34" / "1:02:03". */
+private fun formatDuration(ms: Long): String {
+    val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+    val hours = totalSeconds / 3600L
+    val minutes = (totalSeconds % 3600L) / 60L
+    val seconds = totalSeconds % 60L
+    return if (hours > 0L) {
+        String.format("%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format("%d:%02d", minutes, seconds)
     }
 }
 

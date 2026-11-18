@@ -224,7 +224,7 @@ pyqAlbum loads photos from the device's MediaStore, allows browsing by **folder*
 - **Full-screen image** — no `.aspectRatio()` constraint; the image always fills the whole screen (`fillMaxSize()` + `ContentScale.Fit`); there is **no top bar at all** — no file name and no back arrow; swipe down or system Back leaves the viewer
 - **Swipe down** anywhere on the image → navigates back to thumbnail grid (folder/tag context preserved)
 - **Swipe up** → reveals a small **semi-transparent floating action bar** over the image: a rounded 26dp pill with a drag handle and one **icon + caption** per function, scrollable horizontally on narrow screens. Every action that needs input opens its own dialog (details, tags, resize, rename, copy/move…) instead of stacking everything in a tall sheet
-  - **Info** — dialog with the folder / pixel size / file size chips, the full path, the rating bar and the AI score/reason
+  - **Info** — dialog with the folder / pixel size / file size chips, the full path, the rating bar and the AI score/reason. For a **video** the same chips are filled from a live MediaStore read (`DURATION`/`BUCKET_DISPLAY_NAME`/`WIDTH`/`HEIGHT`/`SIZE`, with a `MediaMetadataRetriever` fallback) and gain a **playback length** chip, since videos are not in the Room image table
   - **Tags** — dialog with the image's tags (removable) and the add-tag flow (existing tags or create new)
   - **AI Rating** — toggles this image in/out of the AI Rating selection queue (icon highlights when queued)
   - **AI Edit** — opens a role dialog (**As AI Edit source / As AI Edit target**, tap again to remove), exactly like the batch menu's AI Edit dialog
